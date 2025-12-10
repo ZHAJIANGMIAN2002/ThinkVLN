@@ -1,0 +1,28 @@
+# --- 系统文件 ---
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# --- IDE 配置 (可选) ---
+.vscode/
+.idea/
+
+# --- 大型文件 (模型权重) ---
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.safetensors
+*.h5
+.cache/
+
+# --- 数据集与输出 ---
+data/
+datasets/
+outputs/
+checkpoints/
+runs/
+baseline_model/
+
+# --- 忽略 third_party 下可能产生的临时文件 (保留 submodule 链接本身) ---
+third_party/**/__pycache__
