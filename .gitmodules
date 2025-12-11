@@ -1,3 +1,6 @@
 [submodule "third_party/habitat-lab"]
 	path = third_party/habitat-lab
 	url = https://github.com/facebookresearch/habitat-lab.git
+[submodule "third_party/LLaMA-Factory"]
+	path = third_party/LLaMA-Factory
+	url = https://github.com/hiyouga/LLaMA-Factory.git

@@ -6,6 +6,7 @@ __pycache__/
 # --- IDE 配置 (可选) ---
 .vscode/
 .idea/
+.cursor/
 
 # --- 大型文件 (模型权重) ---
 *.pth
