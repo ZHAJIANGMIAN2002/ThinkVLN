@@ -23,7 +23,8 @@ datasets/
 outputs/
 checkpoints/
 runs/
-baseline_model/
+models/
+
 
 # --- 忽略 third_party 下可能产生的临时文件 (保留 submodule 链接本身) ---
 third_party/**/__pycache__
