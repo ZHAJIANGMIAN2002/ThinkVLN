@@ -1,0 +1,13 @@
+### Note: DO NOT use quantized model or quantization_bit when merging lora adapters
+
+### model
+model_name_or_path: third_party/LLaMA-Factory/saves/Qwen3-VL-2B-Instruct/full/train_2025-12-16-11-17-02/checkpoint-1100
+template: qwen3_vl_nothink
+trust_remote_code: true
+
+### export
+export_dir: outputs/full/train_2025-12-16-11-17-02
+export_size: 5
+export_device: auto  # choices: [cpu, auto]
+export_legacy_format: false
+

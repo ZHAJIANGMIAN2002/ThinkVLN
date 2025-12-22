@@ -6,6 +6,7 @@ Combines instruction, plan, image, and answer into LLaMA-Factory compatible form
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 import argparse
@@ -139,8 +140,54 @@ def action_id_to_name(action_id: int) -> str:
     return action_map.get(action_id, "unknown")
 
 
-def build_user_message(instruction: str, plan: str, prompt_version: str = "simple") -> str:
-    """Build the user message combining instruction, plan, and prompt."""
+def extract_prev_subtask_from_answer(answer: str) -> Optional[str]:
+    """Extract [prev subtask] information from answer text.
+    
+    Args:
+        answer: The answer text containing reasoning chain
+        
+    Returns:
+        Previous subtask string (e.g., "4 (Enter the bathroom.)") or None
+    """
+    if not answer:
+        return None
+    
+    # Look for [prev subtask] or [prev subtask] pattern
+    pattern = r'\[prev subtask\]\s*(\d+)\s*\(([^)]+)\)'
+    match = re.search(pattern, answer, re.IGNORECASE)
+    
+    if match:
+        subtask_index = match.group(1)
+        subtask_desc = match.group(2).strip()
+        return f"{subtask_index} ({subtask_desc})"
+    
+    return None
+
+
+def build_user_message(instruction: str, plan: str, prev_subtask: Optional[str] = None, prompt_version: str = "simple") -> str:
+    """Build the user message combining instruction, plan, and prompt.
+    
+    Args:
+        instruction: Navigation instruction text
+        plan: Step-by-step plan
+        prev_subtask: Previous subtask information (e.g., "4 (Enter the bathroom.)")
+        prompt_version: "simple", "with_tables", or "clean" (no prompt)
+    
+    Returns:
+        Formatted user message string
+    """
+    
+    # Clean version: no prompt, just instruction and plan
+    if prompt_version == "clean":
+        prev_subtask_section = ""
+        if prev_subtask:
+            prev_subtask_section = f"\n**Previous Subtask**: {prev_subtask}"
+        
+        user_message = f"""<image>
+**Instruction**: {instruction}
+
+**Plan**: {plan}{prev_subtask_section}"""
+        return user_message
     
     # Select prompt version
     if prompt_version == "with_tables":
@@ -154,13 +201,17 @@ def build_user_message(instruction: str, plan: str, prompt_version: str = "simpl
     else:
         plan_text = str(plan)
     
-    # Build the user message with instruction and plan
+    # Build the user message with instruction, plan, and prev_subtask
+    prev_subtask_section = ""
+    if prev_subtask:
+        prev_subtask_section = f"\n**Previous Subtask**: {prev_subtask}"
+    
     user_message = f"""<image>{prompt}
 
 ### Current Task Instance
 **Instruction**: {instruction}
 
-**Plan**: {plan_text}
+**Plan**: {plan_text}{prev_subtask_section}
 
 Analyze the image and generate your reasoning chain following the output format."""
     
@@ -232,8 +283,11 @@ def create_sft_dataset(
                 print(f"[{idx}/{len(cot_data)}] Skipped: image file not found at {image_path}")
                 continue
             
-            # Build user message
-            user_message = build_user_message(instruction, plan, prompt_version)
+            # Extract previous subtask from answer
+            prev_subtask = extract_prev_subtask_from_answer(answer)
+            
+            # Build user message with prev_subtask information
+            user_message = build_user_message(instruction, plan, prev_subtask, prompt_version)
             
             # Create dataset entry
             entry = {
@@ -286,7 +340,7 @@ def main():
     parser.add_argument(
         '--cot-file',
         type=str,
-        default='/home/swx/ThinkVLN/data/cot_dataset/cot_dataset_100_answer.jsonl',
+        default='/mnt/swx/ThinkVLN/data/cot_dataset/cot_dataset_answer.jsonl',
         help='Path to COT answer JSONL file'
     )
     parser.add_argument(
@@ -298,15 +352,15 @@ def main():
     parser.add_argument(
         '--output-file',
         type=str,
-        default='/home/swx/ThinkVLN/data/sft_dataset.json',
+        default='/mnt/swx/ThinkVLN/data/cot_dataset/sft_dataset_v2.json',
         help='Output file path for SFT dataset'
     )
     parser.add_argument(
         '--prompt-version',
         type=str,
-        choices=['simple', 'with_tables'],
+        choices=['simple', 'with_tables', 'clean'],
         default='simple',
-        help='Prompt version to use: simple (without tables) or with_tables'
+        help='Prompt version to use: simple (default), with_tables, or clean (no prompt, just instruction and plan)'
     )
     
     args = parser.parse_args()
