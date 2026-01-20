@@ -289,6 +289,44 @@ def create_sft_dataset(
             # Build user message with prev_subtask information
             user_message = build_user_message(instruction, plan, prev_subtask, prompt_version)
             
+            # Convert action to label (0-3)
+            # Model expects: 0=stop, 1=forward, 2=turn_left, 3=turn_right
+            # Data might have: 1=forward, 2=turn_left, 3=turn_right, 4=stop (Habitat format)
+            action_label = None
+            if action_id is not None:
+                if isinstance(action_id, int):
+                    # Convert from Habitat format (1-4) to model format (0-3)
+                    if action_id == 4:  # stop
+                        action_label = 0
+                    elif action_id in [1, 2, 3]:  # forward, turn_left, turn_right
+                        action_label = action_id  # Already correct
+                    else:
+                        action_label = None
+                elif isinstance(action_id, str):
+                    action_map = {
+                        "stop": 0,
+                        "forward": 1,
+                        "turn_left": 2,
+                        "turn_right": 3
+                    }
+                    action_label = action_map.get(action_id.lower(), None)
+                else:
+                    try:
+                        action_id_int = int(action_id)
+                        if action_id_int == 4:
+                            action_label = 0
+                        elif action_id_int in [1, 2, 3]:
+                            action_label = action_id_int
+                        else:
+                            action_label = None
+                    except:
+                        action_label = None
+                
+                # Validate action label
+                if action_label is not None and (action_label < 0 or action_label > 3):
+                    print(f"[{idx}/{len(cot_data)}] Warning: invalid action_id {action_id} -> {action_label}, skipping action_label")
+                    action_label = None
+            
             # Create dataset entry
             entry = {
                 "messages": [
@@ -303,6 +341,10 @@ def create_sft_dataset(
                 ],
                 "images": [image_path]
             }
+            
+            # Add action_label if available
+            if action_label is not None:
+                entry["action"] = action_label
             
             dataset.append(entry)
             stats['success'] += 1

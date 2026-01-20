@@ -21,6 +21,12 @@ class ThinkVLNDataset(Dataset):
         sample = self.data[idx]
         messages = sample.get("messages", [])
         images_paths = sample.get("images", [])
+        
+        # action_label
+        action_label = sample.get("action", sample.get("action_label", None))
+        if action_label is not None:
+            action_label = int(action_label)
+            assert 0 <= action_label <= 3, f"Action label must be 0-3, got {action_label}"
 
         user_message = ""
         assistant_message = ""
@@ -44,6 +50,7 @@ class ThinkVLNDataset(Dataset):
             "user_message": user_message,
             "assistant_message": assistant_message,
             "image": image,
+            "action_label": action_label,
             "sample": sample
         }
 
