@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data (keep structure, ignore large files)
+datasets/**/*.jpg
+datasets/**/*.png
+datasets/**/*.mp4
+datasets/**/*.avi
+# Keep small metadata files
+!datasets/**/*.json
+!datasets/**/.gitkeep
+
+# Model checkpoints
+outputs/
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Logs
+logs/
+*.log
+wandb/
+tensorboard/
+
+# Environment
+.env
+.venv
+venv/
+ENV/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+tmp/
+temp/
+*.tmp

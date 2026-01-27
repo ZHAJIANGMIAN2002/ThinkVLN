@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Keyframe Annotation Refinement</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Keyframe Annotation Refinement</h1>
+            <div class="episode-selector">
+                <label for="episodeSelect">Select Episode:</label>
+                <select id="episodeSelect">
+                    <option value="">Loading...</option>
+                </select>
+            </div>
+        </header>
+
+        <div id="episodeInfo" class="episode-info" style="display: none;">
+            <h2 id="episodeTitle"></h2>
+            <div class="info-row">
+                <span><strong>Instruction:</strong> <span id="instruction"></span></span>
+            </div>
+            <div class="info-row">
+                <span><strong>Frames:</strong> <span id="numFrames"></span></span>
+                <span><strong>Keyframes:</strong> <span id="numKeyframes"></span></span>
+                <span><strong>Subtasks:</strong> <span id="numSubtasks"></span></span>
+            </div>
+        </div>
+
+        <div id="planSection" class="plan-section" style="display: none;">
+            <h3>Plan (Choices)</h3>
+            <div id="planList" class="plan-list"></div>
+        </div>
+
+        <div id="keyframesContainer" class="keyframes-container" style="display: none;">
+            <h3>Keyframes</h3>
+            <div id="keyframesGrid" class="keyframes-grid"></div>
+        </div>
+
+        <div id="saveSection" class="save-section" style="display: none;">
+            <div class="episode-navigation">
+                <button id="prevEpisodeBtn" class="nav-btn" disabled>← Previous</button>
+                <button id="nextEpisodeBtn" class="nav-btn" disabled>Next →</button>
+            </div>
+            <div class="save-controls">
+                <button id="saveBtn" class="save-btn">Save Changes</button>
+                <span id="saveStatus" class="save-status"></span>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
+
