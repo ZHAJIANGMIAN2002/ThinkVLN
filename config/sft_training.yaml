@@ -1,0 +1,216 @@
+# ThinkVLN Actor SFT Training Configuration
+# 
+# This configuration file provides a template for training the ThinkVLN actor model
+# using supervised fine-tuning with mixed action and CoT data.
+#
+# Usage:
+#   The trainer accepts command-line arguments. This file serves as a reference
+#   for the available options and recommended settings.
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model:
+  # Pretrained Qwen3VL model path or HuggingFace model identifier
+  model_name_or_path: "Qwen/Qwen3-VL-2B"
+  
+  # Number of learnable query tokens for action/progress prediction
+  # These tokens are appended to the input sequence for action mode
+  num_query_tokens: 4
+  
+  # Number of discrete action classes
+  # 0: stop, 1: forward, 2: turn_left, 3: turn_right
+  num_action_classes: 4
+  
+  # Loss weights for multi-task learning
+  action_loss_weight: 1.0      # Weight for action classification loss
+  progress_loss_weight: 1.0    # Weight for progress regression loss
+
+
+# ============================================================================
+# Data Configuration
+# ============================================================================
+data:
+  # Root directory containing all data files
+  data_root: "data/trajectory_data/R2R_back"
+  
+  # Path to action data JSONL file (relative to data_root)
+  # Format: summary_full.jsonl with trajectory, actions, subtask_sequence
+  action_data_path: "summary_full.jsonl"
+  
+  # Path to CoT data JSONL file (relative to data_root)
+  # Format: cot_dataset_*.jsonl with frame_key, instruction, answer (reasoning)
+  cot_data_path: "../cot_dataset/cot_dataset_100_answer.jsonl"
+  
+  # Ratio of action samples in the dataset
+  # 0.5 means 50% action samples and 50% CoT samples
+  # Adjust based on your data balance preference
+  action_cot_ratio: 0.5
+  
+  # Validation split ratio
+  # 0.1 means 10% of data will be used for validation
+  # Set to 0 to disable validation split
+  val_split_ratio: 0.1
+
+
+# ============================================================================
+# Training Configuration
+# ============================================================================
+training:
+  # Output directory for checkpoints and logs
+  output_dir: "checkpoints/thinkvln_actor"
+  
+  # Training duration
+  num_train_epochs: 3
+  max_steps: -1  # -1 means use num_train_epochs instead
+  
+  # Batch size and gradient accumulation
+  per_device_train_batch_size: 2      # Batch size per GPU
+  gradient_accumulation_steps: 8      # Accumulate gradients over N steps
+  # Effective batch size = per_device_batch_size × gradient_accumulation_steps × num_gpus
+  # Example: 2 × 8 × 8 = 128 (for 8 GPUs)
+  
+  # Optimizer settings
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_steps: 500
+  max_grad_norm: 1.0
+  
+  # Learning rate scheduler
+  lr_scheduler_type: "cosine"
+  
+  # Mixed precision training
+  bf16: true          # Use bfloat16 (recommended for A100/H100)
+  fp16: false         # Use float16 (for V100)
+  
+  # Memory optimization
+  gradient_checkpointing: true  # Enable to save memory
+  
+  # Logging and checkpointing
+  logging_steps: 10
+  logging_first_step: true
+  save_steps: 1000
+  save_total_limit: 3           # Keep only last 3 checkpoints
+  
+  # Evaluation (if eval dataset is provided)
+  evaluation_strategy: "steps"  # "no", "steps", or "epoch"
+  eval_steps: 1000
+  eval_accumulation_steps: 1    # Number of batches to accumulate before moving to CPU
+  
+  # Distributed training
+  # For DeepSpeed ZeRO-2 or ZeRO-3
+  deepspeed: "scripts/zero2.json"
+  
+  # Data loading
+  dataloader_num_workers: 4
+  dataloader_pin_memory: true
+  
+  # Reproducibility
+  seed: 42
+  
+  # Distributed training settings
+  ddp_find_unused_parameters: false  # Set to true if you have unused parameters
+  ddp_backend: "nccl"                # Use "nccl" for NVIDIA GPUs, "gloo" for CPU
+
+
+# ============================================================================
+# Logging Configuration (WandB)
+# ============================================================================
+logging:
+  # Logging destinations: ["wandb", "tensorboard", "none"]
+  # Multiple can be specified, e.g., ["wandb", "tensorboard"]
+  report_to: ["wandb"]
+  
+  # WandB run name (optional, auto-generated if not specified)
+  # Use a descriptive name to identify your runs
+  run_name: "thinkvln-actor-sft"
+  
+  # Logging directory for local logs (optional)
+  # If not specified, will use output_dir/runs
+  logging_dir: null
+
+
+# ============================================================================
+# Usage
+# ============================================================================
+# 
+# Run training using this configuration file:
+#
+#   python thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
+#
+# To use a custom configuration:
+#
+#   python thinkvln/engine/sft_trainer.py --config path/to/your_config.yaml
+#
+# To override specific settings, edit this file or create a new config file.
+# All settings above can be modified to suit your training requirements.
+
+
+# ============================================================================
+# Hardware Recommendations
+# ============================================================================
+#
+# For 8x A100 (80GB):
+#   - per_device_train_batch_size: 4
+#   - gradient_accumulation_steps: 4
+#   - bf16: true
+#   - gradient_checkpointing: false (optional, more memory available)
+#
+# For 8x V100 (32GB):
+#   - per_device_train_batch_size: 2
+#   - gradient_accumulation_steps: 8
+#   - fp16: true
+#   - gradient_checkpointing: true (recommended)
+#   - deepspeed: scripts/zero3.json (for larger models)
+#
+# For 8x RTX 3090/4090 (24GB):
+#   - per_device_train_batch_size: 1
+#   - gradient_accumulation_steps: 16
+#   - bf16: true (if supported)
+#   - gradient_checkpointing: true
+#   - deepspeed: scripts/zero3.json
+
+
+# ============================================================================
+# Notes
+# ============================================================================
+#
+# 1. Data Format:
+#    - Action data must be in JSONL format with fields: episode_key, actions, 
+#      subtask_sequence, instruction, plan
+#    - CoT data must be in JSONL format with fields: frame_key, episode_key,
+#      instruction, plan, answer (reasoning text)
+#
+# 2. Mixed Batch Training:
+#    - The trainer automatically handles mixed batches of action and CoT samples
+#    - Action samples get query tokens appended and compute action/progress loss
+#    - CoT samples generate reasoning and compute language modeling loss
+#
+# 3. DeepSpeed Configuration:
+#    - Use ZeRO-2 (scripts/zero2.json) for models that fit in GPU memory
+#    - Use ZeRO-3 (scripts/zero3.json) for larger models or limited memory
+#    - Ensure deepspeed package is installed: pip install deepspeed
+#
+# 4. Dataset Implementation:
+#    - The dataset/collator API is defined in thinkvln/dataset/dataset.py
+#    - Full implementation needs to be completed before training
+#    - See the API documentation in dataset.py for expected formats
+#
+# 5. WandB Setup:
+#    - Install wandb: pip install wandb
+#    - Login: wandb login
+#    - Set project/entity in environment:
+#      export WANDB_PROJECT=thinkvln
+#      export WANDB_ENTITY=your-username
+#    - Or set in code before training
+#
+# 6. Distributed Training:
+#    - Accelerate (recommended): Create accelerate config with 'accelerate config'
+#    - DeepSpeed: Requires DeepSpeed config file (scripts/zero2.json)
+#    - torchrun: Standard PyTorch distributed launcher
+#    - All methods work with HuggingFace Trainer automatically
+#
+# 7. Train/Val Split:
+#    - Set val_split_ratio > 0 to enable validation
+#    - Validation metrics will be logged to WandB
+#    - Best model will be saved based on validation loss

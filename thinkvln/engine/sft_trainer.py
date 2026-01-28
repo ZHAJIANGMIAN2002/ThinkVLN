@@ -1,0 +1,611 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+ThinkVLN SFT Trainer
+
+This module implements the supervised fine-tuning (SFT) trainer for ThinkVLN actor model.
+It supports hybrid training with both action prediction and chain-of-thought (CoT) generation.
+
+Training Modes:
+    - Action Mode: Predicts next 4 actions and progress values
+    - CoT Mode: Generates reasoning text for action determination
+    - Mixed Batches: Combines both modes in a single batch for efficient training
+
+Usage:
+    python thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
+    
+    Or specify a custom config:
+    python thinkvln/engine/sft_trainer.py --config path/to/your_config.yaml
+"""
+
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+import torch
+import logging
+import yaml
+import argparse
+from dataclasses import dataclass, field, asdict
+from typing import Optional, Dict, Any, Union, Tuple
+from transformers import (
+    Trainer,
+    TrainingArguments,
+    AutoProcessor,
+)
+from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
+from transformers.integrations import WandbCallback
+
+# Setup logging
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ThinkVLNTrainingArguments(TrainingArguments):
+    """
+    Extended training arguments for ThinkVLN actor training.
+    
+    Extends HuggingFace TrainingArguments with ThinkVLN-specific parameters
+    for model configuration and data paths.
+    
+    Model Arguments:
+        model_name_or_path: Pretrained Qwen3VL model path or identifier
+        num_query_tokens: Number of learnable query tokens for action prediction
+        num_action_classes: Number of discrete action classes (0=stop, 1=forward, 2=left, 3=right)
+        action_loss_weight: Weight for action classification loss
+        progress_loss_weight: Weight for progress regression loss
+    
+    Data Arguments:
+        data_root: Root directory containing data files
+        action_data_path: Path to action JSONL file (relative to data_root)
+        cot_data_path: Path to CoT JSONL file (relative to data_root)
+        action_cot_ratio: Ratio of action samples in mixed batches (0.5 = 50-50 split)
+        val_split_ratio: Ratio of data to use for validation (0.1 = 10% validation)
+    
+    Training Arguments:
+        gradient_checkpointing: Enable gradient checkpointing for memory efficiency
+    """
+    
+    # Model arguments
+    model_name_or_path: str = field(
+        default="Qwen/Qwen3-VL-2B",
+        metadata={"help": "Path to pretrained Qwen3VL model or model identifier from huggingface.co/models"}
+    )
+    num_query_tokens: int = field(
+        default=4,
+        metadata={"help": "Number of learnable query tokens for action/progress prediction"}
+    )
+    num_action_classes: int = field(
+        default=4,
+        metadata={"help": "Number of action classes (0=stop, 1=forward, 2=turn_left, 3=turn_right)"}
+    )
+    action_loss_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for action classification loss"}
+    )
+    progress_loss_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for progress regression loss"}
+    )
+    
+    # Data arguments
+    data_root: str = field(
+        default="data",
+        metadata={"help": "Root directory for data files"}
+    )
+    action_data_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to action data JSONL file (summary_full.jsonl), relative to data_root"}
+    )
+    cot_data_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to CoT data JSONL file (cot_dataset_*.jsonl), relative to data_root"}
+    )
+    action_cot_ratio: float = field(
+        default=0.5,
+        metadata={"help": "Ratio of action samples in dataset (0.5 = 50% action, 50% CoT)"}
+    )
+    val_split_ratio: float = field(
+        default=0.1,
+        metadata={"help": "Ratio of data to use for validation (0.1 = 10% validation)"}
+    )
+    
+    # Training-specific
+    gradient_checkpointing: bool = field(
+        default=True,
+        metadata={"help": "Enable gradient checkpointing to save memory"}
+    )
+    
+    def __post_init__(self):
+        """Validate arguments after initialization."""
+        super().__post_init__()
+        
+        # Validate data paths
+        if self.action_data_path is None and self.cot_data_path is None:
+            raise ValueError("At least one of action_data_path or cot_data_path must be provided")
+        
+        # Validate ratio
+        if not 0.0 <= self.action_cot_ratio <= 1.0:
+            raise ValueError(f"action_cot_ratio must be between 0 and 1, got {self.action_cot_ratio}")
+        
+        # Validate validation split
+        if not 0.0 <= self.val_split_ratio < 1.0:
+            raise ValueError(f"val_split_ratio must be between 0 and 1, got {self.val_split_ratio}")
+        
+        # Validate loss weights
+        if self.action_loss_weight < 0 or self.progress_loss_weight < 0:
+            raise ValueError("Loss weights must be non-negative")
+
+
+class ThinkVLNSFTTrainer(Trainer):
+    """
+    Custom Trainer for ThinkVLN actor supervised fine-tuning.
+    
+    This trainer extends HuggingFace Trainer to handle mixed batches of action
+    and CoT samples. It computes appropriate losses based on sample type and
+    logs individual loss components for monitoring.
+    
+    Key Features:
+        - Mixed batch training (action + CoT in same batch)
+        - Automatic loss routing based on sample type
+        - Individual loss component logging
+        - Support for DeepSpeed and distributed training
+    """
+    
+    def __init__(self, *args, **kwargs):
+        """Initialize trainer with standard HF Trainer arguments."""
+        super().__init__(*args, **kwargs)
+        
+        # Track loss components for logging
+        self.loss_history = {
+            "action_loss": [],
+            "progress_loss": [],
+            "lm_loss": [],
+        }
+    
+    def compute_loss(
+        self,
+        model,
+        inputs: Dict[str, torch.Tensor],
+        return_outputs: bool = False,
+        num_items_in_batch: Optional[int] = None,
+    ) -> Union[torch.Tensor, tuple]:
+        """
+        Compute loss for a batch of samples.
+        
+        The model automatically handles routing based on the presence of action_labels:
+        - If action_labels is not None: Action mode (action + progress loss)
+        - If action_labels is None: CoT mode (LM loss only)
+        
+        Args:
+            model: ThinkVLNActor model
+            inputs: Dictionary of input tensors from data collator
+                - input_ids: [batch_size, seq_len]
+                - attention_mask: [batch_size, seq_len]
+                - pixel_values: Image tensor or None
+                - image_grid_thw: Image grid info or None
+                - action_labels: [batch_size, 4] or None (for action samples)
+                - progress_labels: [batch_size, 4] or None (for action samples)
+                - labels: [batch_size, seq_len] or None (for CoT samples)
+        
+        Returns:
+            loss: Combined loss tensor
+            outputs (optional): Model outputs for logging
+        """
+        # Forward pass - model handles routing internally
+        outputs = model(**inputs)
+        
+        # Extract combined loss (already weighted by model)
+        loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
+        
+        # Log individual loss components for monitoring
+        if self.state.global_step % self.args.logging_steps == 0:
+            self._log_loss_components(outputs)
+        
+        return (loss, outputs) if return_outputs else loss
+    
+    def _log_loss_components(self, outputs: Dict[str, Any]):
+        """
+        Log individual loss components for monitoring.
+        
+        Args:
+            outputs: Model forward outputs containing loss components
+        """
+        metrics = {}
+        
+        # Extract loss components from model outputs
+        if isinstance(outputs, dict):
+            if "action_loss" in outputs and outputs["action_loss"] is not None:
+                action_loss_value = outputs["action_loss"].item()
+                metrics["train/action_loss"] = action_loss_value
+                self.loss_history["action_loss"].append(action_loss_value)
+            
+            if "progress_loss" in outputs and outputs["progress_loss"] is not None:
+                progress_loss_value = outputs["progress_loss"].item()
+                metrics["train/progress_loss"] = progress_loss_value
+                self.loss_history["progress_loss"].append(progress_loss_value)
+            
+            if "lm_loss" in outputs and outputs["lm_loss"] is not None:
+                lm_loss_value = outputs["lm_loss"].item()
+                metrics["train/lm_loss"] = lm_loss_value
+                self.loss_history["lm_loss"].append(lm_loss_value)
+        
+        # Log metrics if any were collected
+        if metrics:
+            self.log(metrics)
+    
+    def _save_checkpoint(self, model, trial, metrics=None):
+        """
+        Save checkpoint with loss history.
+        
+        Overrides parent method to also save loss component history.
+        """
+        # Call parent save
+        super()._save_checkpoint(model, trial, metrics)
+        
+        # Save loss history
+        if self.args.should_save:
+            checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+            output_dir = os.path.join(self.args.output_dir, checkpoint_folder)
+            
+            loss_history_path = os.path.join(output_dir, "loss_history.pt")
+            torch.save(self.loss_history, loss_history_path)
+            logger.info(f"Saved loss history to {loss_history_path}")
+
+
+def load_model(args: ThinkVLNTrainingArguments):
+    """
+    Load ThinkVLNActor model from pretrained Qwen3VL.
+    
+    Args:
+        args: Training arguments containing model configuration
+    
+    Returns:
+        ThinkVLNActor model with initialized actor heads
+    """
+    from thinkvln.models.thinkvln_actor import ThinkVLNActor
+    from thinkvln.models.actor_config import ThinkVLNActorConfig
+    
+    logger.info(f"Loading model from {args.model_name_or_path}")
+    
+    # Create actor configuration
+    actor_config = ThinkVLNActorConfig(
+        num_query_tokens=args.num_query_tokens,
+        num_action_classes=args.num_action_classes,
+        action_loss_weight=args.action_loss_weight,
+        progress_loss_weight=args.progress_loss_weight,
+    )
+    
+    logger.info(f"Actor config: {actor_config}")
+    
+    # Load model from pretrained Qwen3VL
+    model = ThinkVLNActor.from_pretrained(
+        args.model_name_or_path,
+        actor_config=actor_config,
+        torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
+        trust_remote_code=True,
+    )
+    
+    # Enable gradient checkpointing for memory efficiency
+    if args.gradient_checkpointing:
+        logger.info("Enabling gradient checkpointing")
+        model.gradient_checkpointing_enable()
+    
+    logger.info(f"Model loaded successfully")
+    logger.info(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+    logger.info(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    
+    return model
+
+
+def create_datasets(args: ThinkVLNTrainingArguments, processor):
+    """
+    Create training and evaluation datasets with optional train/val split.
+    
+    This function creates the dataset and collator using the API defined in
+    thinkvln/dataset/dataset.py. The actual data loading implementation will
+    be completed in a separate task.
+    
+    Args:
+        args: Training arguments containing data paths
+        processor: Qwen3VL processor for image and text processing
+    
+    Returns:
+        Tuple of (train_dataset, eval_dataset, data_collator)
+        eval_dataset is None if val_split_ratio is 0
+    """
+    from thinkvln.dataset.dataset import ThinkVLNDataset, ThinkVLNDataCollator
+    from torch.utils.data import random_split
+    
+    logger.info("Creating datasets")
+    logger.info(f"Data root: {args.data_root}")
+    logger.info(f"Action data: {args.action_data_path}")
+    logger.info(f"CoT data: {args.cot_data_path}")
+    logger.info(f"Action/CoT ratio: {args.action_cot_ratio}")
+    logger.info(f"Validation split ratio: {args.val_split_ratio}")
+    
+    # Create full dataset
+    full_dataset = ThinkVLNDataset(
+        action_data_path=args.action_data_path,
+        cot_data_path=args.cot_data_path,
+        data_root=args.data_root,
+        action_cot_ratio=args.action_cot_ratio,
+    )
+    
+    logger.info(f"Full dataset created with {len(full_dataset)} samples")
+    
+    # Split into train and validation if val_split_ratio > 0
+    eval_dataset = None
+    if args.val_split_ratio > 0:
+        val_size = int(len(full_dataset) * args.val_split_ratio)
+        train_size = len(full_dataset) - val_size
+        
+        # Use random_split for train/val split
+        train_dataset, eval_dataset = random_split(
+            full_dataset,
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(args.seed)
+        )
+        
+        logger.info(f"Split into {len(train_dataset)} train and {len(eval_dataset)} validation samples")
+    else:
+        train_dataset = full_dataset
+        logger.info("No validation split - using all data for training")
+    
+    # Create data collator
+    data_collator = ThinkVLNDataCollator(
+        processor=processor,
+        num_query_tokens=args.num_query_tokens,
+        data_root=args.data_root,
+    )
+    
+    logger.info("Data collator created")
+    
+    return train_dataset, eval_dataset, data_collator
+
+
+def load_config_from_yaml(config_path: str) -> Dict[str, Any]:
+    """
+    Load training configuration from YAML file.
+    
+    Args:
+        config_path: Path to YAML configuration file
+    
+    Returns:
+        Dictionary containing configuration
+    """
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    logger.info(f"Loaded configuration from {config_path}")
+    return config
+
+
+def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTrainingArguments:
+    """
+    Create ThinkVLNTrainingArguments from configuration dictionary.
+    
+    Args:
+        config: Configuration dictionary loaded from YAML
+    
+    Returns:
+        ThinkVLNTrainingArguments instance
+    """
+    # Flatten nested config structure
+    flat_config = {}
+    
+    # Model config
+    if 'model' in config:
+        model_cfg = config['model']
+        flat_config['model_name_or_path'] = model_cfg.get('model_name_or_path', 'Qwen/Qwen3-VL-2B')
+        flat_config['num_query_tokens'] = model_cfg.get('num_query_tokens', 4)
+        flat_config['num_action_classes'] = model_cfg.get('num_action_classes', 4)
+        flat_config['action_loss_weight'] = model_cfg.get('action_loss_weight', 1.0)
+        flat_config['progress_loss_weight'] = model_cfg.get('progress_loss_weight', 1.0)
+    
+    # Data config
+    if 'data' in config:
+        data_cfg = config['data']
+        flat_config['data_root'] = data_cfg.get('data_root', 'data')
+        flat_config['action_data_path'] = data_cfg.get('action_data_path')
+        flat_config['cot_data_path'] = data_cfg.get('cot_data_path')
+        flat_config['action_cot_ratio'] = data_cfg.get('action_cot_ratio', 0.5)
+        flat_config['val_split_ratio'] = data_cfg.get('val_split_ratio', 0.1)
+    
+    # Training config
+    if 'training' in config:
+        train_cfg = config['training']
+        flat_config.update({
+            'output_dir': train_cfg.get('output_dir', 'checkpoints/thinkvln_actor'),
+            'num_train_epochs': train_cfg.get('num_train_epochs', 3),
+            'max_steps': train_cfg.get('max_steps', -1),
+            'per_device_train_batch_size': train_cfg.get('per_device_train_batch_size', 2),
+            'gradient_accumulation_steps': train_cfg.get('gradient_accumulation_steps', 8),
+            'learning_rate': train_cfg.get('learning_rate', 2e-5),
+            'weight_decay': train_cfg.get('weight_decay', 0.01),
+            'warmup_steps': train_cfg.get('warmup_steps', 500),
+            'max_grad_norm': train_cfg.get('max_grad_norm', 1.0),
+            'lr_scheduler_type': train_cfg.get('lr_scheduler_type', 'cosine'),
+            'bf16': train_cfg.get('bf16', True),
+            'fp16': train_cfg.get('fp16', False),
+            'gradient_checkpointing': train_cfg.get('gradient_checkpointing', True),
+            'logging_steps': train_cfg.get('logging_steps', 10),
+            'logging_first_step': train_cfg.get('logging_first_step', True),
+            'save_steps': train_cfg.get('save_steps', 1000),
+            'save_total_limit': train_cfg.get('save_total_limit', 3),
+            'evaluation_strategy': train_cfg.get('evaluation_strategy', 'no'),
+            'eval_steps': train_cfg.get('eval_steps', 1000),
+            'deepspeed': train_cfg.get('deepspeed'),
+            'dataloader_num_workers': train_cfg.get('dataloader_num_workers', 4),
+            'dataloader_pin_memory': train_cfg.get('dataloader_pin_memory', True),
+            'seed': train_cfg.get('seed', 42),
+            # Distributed training
+            'ddp_find_unused_parameters': train_cfg.get('ddp_find_unused_parameters', False),
+            'ddp_backend': train_cfg.get('ddp_backend', 'nccl'),
+        })
+    
+    # Logging config (WandB)
+    if 'logging' in config:
+        log_cfg = config['logging']
+        flat_config.update({
+            'report_to': log_cfg.get('report_to', ['wandb']),
+            'run_name': log_cfg.get('run_name'),
+            'logging_dir': log_cfg.get('logging_dir'),
+        })
+    
+    # Create TrainingArguments instance
+    args = ThinkVLNTrainingArguments(**flat_config)
+    return args
+
+
+def main():
+    """
+    Main training script entry point.
+    
+    Steps:
+        1. Parse config file path from command line
+        2. Load configuration from YAML
+        3. Create training arguments
+        4. Load Qwen3VL processor
+        5. Load ThinkVLNActor model
+        6. Create datasets and collator
+        7. Initialize trainer
+        8. Run training
+        9. Save final model
+    """
+    # Parse config file path
+    parser = argparse.ArgumentParser(description="ThinkVLN SFT Trainer")
+    parser.add_argument(
+        '--config',
+        type=str,
+        required=True,
+        help='Path to YAML configuration file (e.g., config/sft_training.yaml)'
+    )
+    cmd_args = parser.parse_args()
+    
+    # Load configuration from YAML
+    config = load_config_from_yaml(cmd_args.config)
+    
+    # Create training arguments
+    args = create_training_args_from_config(config)
+    
+    logger.info("=" * 80)
+    logger.info("ThinkVLN SFT Trainer")
+    logger.info("=" * 80)
+    logger.info(f"Output directory: {args.output_dir}")
+    logger.info(f"Model: {args.model_name_or_path}")
+    logger.info(f"Number of epochs: {args.num_train_epochs}")
+    logger.info(f"Batch size per device: {args.per_device_train_batch_size}")
+    logger.info(f"Gradient accumulation steps: {args.gradient_accumulation_steps}")
+    logger.info(f"Effective batch size: {args.per_device_train_batch_size * args.gradient_accumulation_steps * args.world_size}")
+    logger.info(f"Learning rate: {args.learning_rate}")
+    logger.info(f"Mixed precision: {'bf16' if args.bf16 else 'fp16' if args.fp16 else 'fp32'}")
+    logger.info(f"DeepSpeed: {args.deepspeed if args.deepspeed else 'Disabled'}")
+    logger.info(f"Distributed training: {args.world_size} GPUs")
+    logger.info(f"Logging to: {args.report_to}")
+    if 'wandb' in args.report_to:
+        logger.info(f"WandB run name: {args.run_name if args.run_name else 'auto-generated'}")
+    logger.info("=" * 80)
+    
+    # Initialize WandB if enabled
+    if 'wandb' in args.report_to:
+        try:
+            import wandb
+            # WandB config will include all training args
+            wandb_config = {
+                "model": args.model_name_or_path,
+                "num_query_tokens": args.num_query_tokens,
+                "num_action_classes": args.num_action_classes,
+                "action_loss_weight": args.action_loss_weight,
+                "progress_loss_weight": args.progress_loss_weight,
+                "learning_rate": args.learning_rate,
+                "batch_size": args.per_device_train_batch_size,
+                "gradient_accumulation_steps": args.gradient_accumulation_steps,
+                "effective_batch_size": args.per_device_train_batch_size * args.gradient_accumulation_steps * args.world_size,
+                "num_epochs": args.num_train_epochs,
+                "warmup_steps": args.warmup_steps,
+                "action_cot_ratio": args.action_cot_ratio,
+                "val_split_ratio": args.val_split_ratio,
+            }
+            logger.info("WandB logging enabled")
+        except ImportError:
+            logger.warning("WandB not installed. Install with: pip install wandb")
+            args.report_to = [r for r in args.report_to if r != 'wandb']
+    
+    # Load processor
+    logger.info("Loading processor...")
+    processor = AutoProcessor.from_pretrained(
+        args.model_name_or_path,
+        trust_remote_code=True
+    )
+    logger.info("Processor loaded successfully")
+    
+    # Load model
+    model = load_model(args)
+    
+    # Create datasets
+    train_dataset, eval_dataset, data_collator = create_datasets(args, processor)
+    
+    # Create trainer
+    logger.info("Initializing trainer...")
+    trainer = ThinkVLNSFTTrainer(
+        model=model,
+        args=args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        data_collator=data_collator,
+    )
+    logger.info("Trainer initialized successfully")
+    
+    # Log dataset statistics to WandB
+    if 'wandb' in args.report_to and eval_dataset is not None:
+        try:
+            import wandb
+            wandb.log({
+                "dataset/train_size": len(train_dataset),
+                "dataset/eval_size": len(eval_dataset),
+                "dataset/total_size": len(train_dataset) + len(eval_dataset),
+            })
+        except:
+            pass
+    
+    # Train
+    logger.info("Starting training...")
+    logger.info("=" * 80)
+    
+    train_result = trainer.train()
+    
+    logger.info("=" * 80)
+    logger.info("Training completed!")
+    logger.info(f"Training loss: {train_result.training_loss:.4f}")
+    logger.info(f"Training steps: {train_result.global_step}")
+    
+    # Save final model
+    logger.info(f"Saving final model to {args.output_dir}")
+    trainer.save_model(args.output_dir)
+    processor.save_pretrained(args.output_dir)
+    
+    # Save training metrics
+    metrics_path = os.path.join(args.output_dir, "training_metrics.pt")
+    torch.save({
+        "train_loss": train_result.training_loss,
+        "global_step": train_result.global_step,
+        "loss_history": trainer.loss_history,
+    }, metrics_path)
+    logger.info(f"Saved training metrics to {metrics_path}")
+    
+    logger.info("=" * 80)
+    logger.info("All done!")
+    logger.info("=" * 80)
+
+
+if __name__ == "__main__":
+    main()

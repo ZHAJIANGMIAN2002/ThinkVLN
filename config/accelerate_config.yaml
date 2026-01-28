@@ -1,0 +1,79 @@
+# Accelerate Configuration for ThinkVLN Training
+# 
+# This configuration enables multi-GPU training with Accelerate.
+# Accelerate provides a simple way to run distributed training without
+# changing your training code.
+#
+# Usage:
+#   accelerate launch --config_file config/accelerate_config.yaml \
+#       thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
+#
+# Or generate interactively:
+#   accelerate config
+
+compute_environment: LOCAL_MACHINE
+
+# Distributed training configuration
+distributed_type: MULTI_GPU  # Options: NO, MULTI_GPU, MULTI_CPU, DEEPSPEED, MEGATRON_LM
+
+# Number of GPUs to use
+num_processes: 8  # Total number of processes (usually = num_gpus)
+
+# GPU configuration
+gpu_ids: all  # Use all available GPUs, or specify list like: [0,1,2,3,4,5,6,7]
+
+# Mixed precision training
+mixed_precision: bf16  # Options: no, fp16, bf16
+# Use bf16 for A100/H100, fp16 for V100
+
+# DeepSpeed configuration (optional - can also use deepspeed field in training config)
+# Uncomment the following lines to use DeepSpeed with Accelerate
+# deepspeed_config:
+#   gradient_accumulation_steps: 8
+#   gradient_clipping: 1.0
+#   offload_optimizer_device: none
+#   offload_param_device: none
+#   zero3_init_flag: false
+#   zero_stage: 2
+
+# Machine configuration
+machine_rank: 0  # Rank of this machine (0 for single-node)
+num_machines: 1  # Total number of machines
+
+# Main process configuration
+main_process_ip: null    # IP of main process (null for single-node)
+main_process_port: null  # Port for main process (null for auto)
+
+# Backend for distributed communication
+rdzv_backend: static  # Options: static, c10d
+
+# Enable same_network for multi-node training
+same_network: true
+
+# Dynamo backend (for torch.compile)
+dynamo_backend: "no"  # Options: no, inductor, nvfuser, aot_ts_nvfuser, etc.
+
+# Fully Sharded Data Parallel (FSDP) configuration (alternative to DeepSpeed)
+# Uncomment to use FSDP instead of standard DDP
+# fsdp_config:
+#   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+#   fsdp_backward_prefetch_policy: BACKWARD_PRE
+#   fsdp_cpu_ram_efficient_loading: true
+#   fsdp_forward_prefetch: false
+#   fsdp_offload_params: false
+#   fsdp_sharding_strategy: 1  # 1=FULL_SHARD, 2=SHARD_GRAD_OP, 3=NO_SHARD
+#   fsdp_state_dict_type: FULL_STATE_DICT
+#   fsdp_sync_module_states: true
+#   fsdp_transformer_layer_cls_to_wrap: Qwen3VLDecoderLayer
+#   fsdp_use_orig_params: false
+
+# Megatron-LM configuration (for very large models)
+# Uncomment to use Megatron-LM
+# megatron_lm_config:
+#   megatron_lm_tp_degree: 1
+#   megatron_lm_pp_degree: 1
+#   megatron_lm_recompute_activations: true
+
+# Additional settings
+downcast_bf16: "no"  # Whether to downcast bf16 to fp32 for certain operations
+use_cpu: false       # Force CPU usage even if GPUs are available
