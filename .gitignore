@@ -23,7 +23,7 @@ datasets/
 outputs/
 checkpoints/
 runs/
-models/
+./models/
 
 
 # --- 忽略 third_party 下可能产生的临时文件 (保留 submodule 链接本身) ---

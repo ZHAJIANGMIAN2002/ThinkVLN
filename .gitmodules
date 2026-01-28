@@ -4,3 +4,6 @@
 [submodule "third_party/LLaMA-Factory"]
 	path = third_party/LLaMA-Factory
 	url = https://github.com/hiyouga/LLaMA-Factory.git
+[submodule "third_party/LH-VLN"]
+	path = third_party/LH-VLN
+	url = https://github.com/HCPLab-SYSU/LH-VLN.git
