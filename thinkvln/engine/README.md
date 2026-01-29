@@ -16,11 +16,7 @@ Supervised fine-tuning (SFT) trainer for ThinkVLN actor model with hybrid action
 ### 1. Installation
 
 ```bash
-# Install required packages
-pip install torch transformers accelerate deepspeed wandb pyyaml
-
-# Optional: Install flash-attention for faster training
-pip install flash-attn --no-build-isolation
+pip install torch transformers deepspeed wandb pyyaml
 ```
 
 ### 2. Setup WandB (Optional but Recommended)
@@ -65,39 +61,16 @@ logging:
 
 ### 4. Launch Training
 
-#### Option 1: Using the Launch Script (Recommended)
-
 ```bash
-# Multi-GPU with Accelerate (recommended)
-bash scripts/train_thinkvln_actor.sh --method accelerate --num_gpus 8
+# Using launch script
+bash scripts/train_thinkvln_actor.sh config/sft_training.yaml 8 deepspeed
+bash scripts/train_thinkvln_actor.sh config/sft_training.yaml 8 torchrun
+bash scripts/train_thinkvln_actor.sh config/sft_training.yaml 1 single
 
-# Multi-GPU with DeepSpeed
-bash scripts/train_thinkvln_actor.sh --method deepspeed --num_gpus 8
-
-# Single GPU
-bash scripts/train_thinkvln_actor.sh --method single
-
-# Custom config
-bash scripts/train_thinkvln_actor.sh --config path/to/custom_config.yaml
-```
-
-#### Option 2: Direct Command
-
-```bash
-# Single GPU
+# Direct command
 python thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
-
-# Multi-GPU with Accelerate
-accelerate launch --config_file config/accelerate_config.yaml \
-    thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
-
-# Multi-GPU with DeepSpeed
-deepspeed --num_gpus=8 thinkvln/engine/sft_trainer.py \
-    --config config/sft_training.yaml
-
-# Multi-GPU with torchrun
-torchrun --nproc_per_node=8 thinkvln/engine/sft_trainer.py \
-    --config config/sft_training.yaml
+deepspeed --num_gpus=8 thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
+torchrun --nproc_per_node=8 thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
 ```
 
 ## Configuration Guide
@@ -120,7 +93,6 @@ data:
   data_root: "data/trajectory_data/R2R_back"        # Root data directory
   action_data_path: "summary_full.jsonl"            # Action trajectory data
   cot_data_path: "../cot_dataset/cot_dataset.jsonl" # Chain-of-thought data
-  action_cot_ratio: 0.5                             # 50% action, 50% CoT
   val_split_ratio: 0.1                              # 10% validation split
 ```
 
@@ -172,38 +144,14 @@ logging:
 
 ## Multi-GPU Training
 
-### Accelerate (Recommended)
-
-Accelerate provides the easiest way to run distributed training:
-
+### DeepSpeed (with ZeRO)
 ```bash
-# First time: Create accelerate config
-accelerate config
-
-# Or use the provided config
-accelerate launch --config_file config/accelerate_config.yaml \
-    thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
-```
-
-### DeepSpeed
-
-DeepSpeed enables training very large models with ZeRO optimization:
-
-```bash
-# ZeRO-2 (recommended for models that fit in memory)
-deepspeed --num_gpus=8 thinkvln/engine/sft_trainer.py \
-    --config config/sft_training.yaml
-
-# Make sure your config has: training.deepspeed: "scripts/zero2.json"
+deepspeed --num_gpus=8 thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
 ```
 
 ### PyTorch torchrun
-
-Standard PyTorch distributed launcher:
-
 ```bash
-torchrun --nproc_per_node=8 --master_port=29500 \
-    thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
+torchrun --nproc_per_node=8 thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
 ```
 
 ## Hardware Recommendations

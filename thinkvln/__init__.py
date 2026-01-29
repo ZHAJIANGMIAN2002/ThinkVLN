@@ -7,10 +7,9 @@ with explicit reasoning capabilities.
 
 __version__ = "0.1.0"
 
-from .dataset.dataset import ThinkVLNDataset, load_image, collate_fn
+from .dataset.dataset import ThinkVLNDataset, ThinkVLNDataCollator
 
 __all__ = [
     "ThinkVLNDataset",
-    "load_image",
-    "collate_fn",
+    "ThinkVLNDataCollator",
 ]

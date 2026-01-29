@@ -64,44 +64,32 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
         Forward pass with Aux-Think hybrid training support.
         
         Two training modes:
-        - Action Task: If action_labels is provided, append query tokens and compute action/progress loss
-        - CoT Task: If action_labels is None, no query tokens, compute only LM loss for chain-of-thought
+        - Action Task: If action_labels is provided, compute action/progress loss
+          (query tokens should already be in input_ids from collator)
+        - CoT Task: If action_labels is None, compute only LM loss for chain-of-thought
+        
+        Note: Query token IDs are added by the data collator, not here.
+        The model only handles query token embedding injection (in thinkvln_model.py).
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
         if input_ids is None:
             raise ValueError("input_ids is required for ThinkVLNActor")
         
-        # Store original sequence info
-        batch_size, orig_seq_len = input_ids.shape
+        # Store sequence info
+        batch_size, seq_len = input_ids.shape
         device = input_ids.device
         num_query_tokens = self.config.num_query_tokens
         
         # Determine training mode based on action_labels presence
         use_action_mode = action_labels is not None
         
-        if use_action_mode:
-            # ACTION MODE: Append query tokens for action/progress prediction
-            query_token_ids = torch.full(
-                (batch_size, num_query_tokens),
-                self.config.action_query_token_id,
-                dtype=torch.long,
-                device=device
-            )
-            input_ids = torch.cat([input_ids, query_token_ids], dim=1)
-            
-            # Extend attention_mask
-            if attention_mask is not None:
-                query_mask = torch.ones(batch_size, num_query_tokens, dtype=attention_mask.dtype, device=device)
-                attention_mask = torch.cat([attention_mask, query_mask], dim=1)
-            else:
-                attention_mask = torch.ones(batch_size, orig_seq_len + num_query_tokens, dtype=torch.long, device=device)
-        else:
-            # COT MODE: Keep original sequence, no query tokens
-            if attention_mask is None:
-                attention_mask = torch.ones(batch_size, orig_seq_len, dtype=torch.long, device=device)
+        # Ensure attention mask is present
+        if attention_mask is None:
+            attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long, device=device)
         
-        # Forward through model - query embeddings are injected by ThinkVLNModel if present
+        # Forward through model
+        # Query token embeddings are automatically injected by ThinkVLNModel if query tokens are present in input_ids
         outputs = self.model(
             input_ids=input_ids,
             pixel_values=pixel_values, 
@@ -123,7 +111,8 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
             lm_logits = None
             lm_loss = None
             
-            # Action/progress prediction on query tokens
+            # Action/progress prediction on the last num_query_tokens positions
+            # These correspond to the query tokens that were appended by the collator
             query_hidden = hidden_states[:, -num_query_tokens:, :]
             projected = self.shared_projector(query_hidden)
             action_logits = self.action_head(projected)

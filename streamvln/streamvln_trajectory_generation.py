@@ -2,6 +2,7 @@
 
 import habitat
 import logging
+import gzip
 import random
 import json
 import numpy as np
@@ -13,6 +14,7 @@ import multiprocessing as mp
 from omegaconf import OmegaConf
 
 from habitat.tasks.nav.shortest_path_follower import ShortestPathFollower
+from habitat.core.utils import try_cv2_import
 from habitat_baselines.config.default import get_config as get_habitat_config
 from habitat.config import read_write
 from habitat.utils.visualizations.utils import images_to_video, observations_to_image
@@ -23,18 +25,38 @@ from habitat.config.default_structured_configs import (
 
 from habitat_extensions import measures
 
+cv2 = try_cv2_import()
+
 DATASET = "r2r"
 CONFIG_PATH = "./config/vln_r2r.yaml"
 OUTPUT_PATH = f"./data/trajectory_data/{DATASET}"
 DATA_PATH = None  # Set to None to use default dataset path
 
 class StreamVLNHabitatRunner:
-    def __init__(self, dataset: str, config_path: str, output_path: str, data_path: str = None):
+    def __init__(
+        self,
+        dataset: str,
+        config_path: str,
+        output_path: str,
+        data_path: str = None,
+        scenes_dir: str = None,
+        scene_id_prefix: str = None,
+        scene_id_prefix_replacement: str = None,
+        save_video: bool = True,
+        save_frame_images: bool = False,
+        frame_output_dir: str = None,
+    ):
         self.device = torch.device("cuda")
         self.dataset = dataset.lower()
         self.config_path = config_path
         self.output_path = output_path
         self.data_path = data_path
+        self.scenes_dir = scenes_dir
+        self.scene_id_prefix = scene_id_prefix
+        self.scene_id_prefix_replacement = scene_id_prefix_replacement
+        self.save_video = save_video
+        self.save_frame_images = save_frame_images
+        self.frame_output_dir = frame_output_dir
 
         self.config = get_habitat_config(self.config_path)
         
@@ -61,11 +83,63 @@ class StreamVLNHabitatRunner:
             )
 
     def config_env(self, scene: str = None) -> habitat.Env:
+        if (
+            self.data_path is not None
+            and self.scene_id_prefix
+            and self.scene_id_prefix_replacement is not None
+        ):
+            rewritten_path = os.path.join(
+                self.output_path, f"rewritten_{os.path.basename(self.data_path)}"
+            )
+            if not os.path.exists(rewritten_path):
+                print(f"Rewriting scene_id prefix in dataset: {self.data_path}")
+                print(f"  -> {rewritten_path}")
+                tmp_path = f"{rewritten_path}.tmp.{os.getpid()}"
+
+                if self.data_path.endswith(".json.gz"):
+                    with gzip.open(self.data_path, "rt", encoding="utf-8") as f:
+                        data = json.load(f)
+                else:
+                    with open(self.data_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+
+                episodes = data.get("episodes") if isinstance(data, dict) else None
+                if episodes is None and isinstance(data, list):
+                    episodes = data
+                if episodes is None:
+                    raise ValueError(f"Unsupported dataset format: {self.data_path}")
+
+                for ep in episodes:
+                    scene_id = ep.get("scene_id")
+                    if scene_id and scene_id.startswith(self.scene_id_prefix):
+                        ep["scene_id"] = (
+                            self.scene_id_prefix_replacement
+                            + scene_id[len(self.scene_id_prefix):]
+                        )
+
+                if rewritten_path.endswith(".json.gz"):
+                    with gzip.open(tmp_path, "wt", encoding="utf-8") as f:
+                        json.dump(data, f)
+                else:
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        json.dump(data, f)
+
+                os.replace(tmp_path, rewritten_path)
+
+            self.data_path = rewritten_path
+
         if self.data_path is not None:
             with read_write(self.config):
                 self.config.habitat.dataset.update(
                     {
                         "data_path": self.data_path,
+                    }
+                )
+        if self.scenes_dir is not None:
+            with read_write(self.config):
+                self.config.habitat.dataset.update(
+                    {
+                        "scenes_dir": self.scenes_dir,
                     }
                 )
         print(OmegaConf.to_yaml(self.config))
@@ -77,6 +151,15 @@ class StreamVLNHabitatRunner:
 
         scene_episode_dict = {}
         for episode in env.episodes:
+            if (
+                self.scene_id_prefix
+                and self.scene_id_prefix_replacement is not None
+                and episode.scene_id.startswith(self.scene_id_prefix)
+            ):
+                episode.scene_id = (
+                    self.scene_id_prefix_replacement
+                    + episode.scene_id[len(self.scene_id_prefix):]
+                )
             if episode.scene_id not in scene_episode_dict:
                 scene_episode_dict[episode.scene_id] = []
             scene_episode_dict[episode.scene_id].append(episode)
@@ -130,6 +213,12 @@ class StreamVLNHabitatRunner:
                 actions = [-1]
                 next_waypoint_id = 1
                 vis_frames = []
+                if self.save_frame_images:
+                    frame_base_dir = self.frame_output_dir or os.path.join(self.output_path, "frames")
+                    episode_frame_dir = os.path.join(
+                        frame_base_dir, f"{scene_id}_{self.dataset}_{episode_id:06d}"
+                    )
+                    os.makedirs(episode_frame_dir, exist_ok=True)
 
                 while not env.episode_over:
                     rgb = observation["rgb"]
@@ -139,6 +228,17 @@ class StreamVLNHabitatRunner:
                     if info['top_down_map'] is not None:
                         frame = observations_to_image({'rgb': observation['rgb']}, info)
                         vis_frames.append(frame)
+                        if self.save_frame_images:
+                            frame_idx = len(vis_frames) - 1
+                            rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                            rgb_path = os.path.join(episode_frame_dir, f"{frame_idx:06d}_rgb.jpg")
+                            cv2.imwrite(rgb_path, rgb_bgr)
+
+                            rgb_w = rgb.shape[1]
+                            map_frame = frame[:, rgb_w:, :] if frame.shape[1] > rgb_w else frame
+                            map_bgr = cv2.cvtColor(map_frame, cv2.COLOR_RGB2BGR)
+                            map_path = os.path.join(episode_frame_dir, f"{frame_idx:06d}_map.jpg")
+                            cv2.imwrite(map_path, map_bgr)
 
                     next_action = agent.get_next_action(
                         ref_path[next_waypoint_id])
@@ -168,7 +268,7 @@ class StreamVLNHabitatRunner:
                     vis_frames), f"Actions length {len(actions)} does not match frames length {len(vis_frames)}"
                 
                 # Generate video from collected frames
-                if len(vis_frames) > 0:
+                if self.save_video and len(vis_frames) > 0:
                     video_output_path = os.path.join(
                         self.output_path, "images", f"{scene_id}_{self.dataset}_{episode_id:06d}")
                     os.makedirs(video_output_path, exist_ok=True)
@@ -208,7 +308,13 @@ def worker(rank, world_size, args):
         dataset=args.dataset,
         config_path=args.config_path,
         output_path=args.output_path,
-        data_path=args.data_path
+        data_path=args.data_path,
+        scenes_dir=args.scenes_dir,
+        scene_id_prefix=args.scene_id_prefix,
+        scene_id_prefix_replacement=args.scene_id_prefix_replacement,
+        save_video=args.save_video,
+        save_frame_images=args.save_frame_images,
+        frame_output_dir=args.frame_output_dir,
     )
     # 每个进程调用相同的 generate 函数，但传入不同的 rank
     runner.generate(rank=rank, world_size=world_size)
@@ -221,6 +327,21 @@ if __name__ == "__main__":
     parser.add_argument("--config_path", type=str, default=CONFIG_PATH)
     parser.add_argument("--output_path", type=str, default=OUTPUT_PATH)
     parser.add_argument("--data_path", type=str, default=DATA_PATH)
+    parser.add_argument("--scenes_dir", type=str, default=None,
+                        help="Override habitat dataset scenes_dir")
+    parser.add_argument("--scene_id_prefix", type=str, default=None,
+                        help="Rewrite scene_id when it starts with this prefix")
+    parser.add_argument("--scene_id_prefix_replacement", type=str, default=None,
+                        help="Replacement prefix for scene_id rewriting")
+    parser.add_argument("--save_video", action="store_true",
+                        help="Save trajectory.mp4 videos")
+    parser.add_argument("--skip_video", dest="save_video", action="store_false",
+                        help="Skip trajectory.mp4 video generation")
+    parser.set_defaults(save_video=True)
+    parser.add_argument("--save_frame_images", action="store_true",
+                        help="Save per-frame RGB and map JPGs during collection")
+    parser.add_argument("--frame_output_dir", type=str, default=None,
+                        help="Base directory for per-frame RGB/map images (default: <output_path>/frames)")
     parser.add_argument(
         "--world_size", type=int, default=1, help="Number of concurrent processes to use."
     )
@@ -268,7 +389,13 @@ if __name__ == "__main__":
             dataset=args.dataset,
             config_path=args.config_path,
             output_path=args.output_path,
-            data_path=args.data_path
+            data_path=args.data_path,
+            scenes_dir=args.scenes_dir,
+            scene_id_prefix=args.scene_id_prefix,
+            scene_id_prefix_replacement=args.scene_id_prefix_replacement,
+            save_video=args.save_video,
+            save_frame_images=args.save_frame_images,
+            frame_output_dir=args.frame_output_dir,
         )
         runner.generate(rank=0, world_size=1)
         print("Trajectory generation completed.")

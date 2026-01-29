@@ -12,10 +12,14 @@ Training Modes:
     - Mixed Batches: Combines both modes in a single batch for efficient training
 
 Usage:
+    # Single GPU
     python thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
     
-    Or specify a custom config:
-    python thinkvln/engine/sft_trainer.py --config path/to/your_config.yaml
+    # Multi-GPU with DeepSpeed
+    deepspeed --num_gpus=8 thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
+    
+    # Multi-GPU with torchrun
+    torchrun --nproc_per_node=8 thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
 """
 
 import sys
@@ -64,7 +68,6 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         data_root: Root directory containing data files
         action_data_path: Path to action JSONL file (relative to data_root)
         cot_data_path: Path to CoT JSONL file (relative to data_root)
-        action_cot_ratio: Ratio of action samples in mixed batches (0.5 = 50-50 split)
         val_split_ratio: Ratio of data to use for validation (0.1 = 10% validation)
     
     Training Arguments:
@@ -106,10 +109,7 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         default=None,
         metadata={"help": "Path to CoT data JSONL file (cot_dataset_*.jsonl), relative to data_root"}
     )
-    action_cot_ratio: float = field(
-        default=0.5,
-        metadata={"help": "Ratio of action samples in dataset (0.5 = 50% action, 50% CoT)"}
-    )
+
     val_split_ratio: float = field(
         default=0.1,
         metadata={"help": "Ratio of data to use for validation (0.1 = 10% validation)"}
@@ -128,10 +128,6 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         # Validate data paths
         if self.action_data_path is None and self.cot_data_path is None:
             raise ValueError("At least one of action_data_path or cot_data_path must be provided")
-        
-        # Validate ratio
-        if not 0.0 <= self.action_cot_ratio <= 1.0:
-            raise ValueError(f"action_cot_ratio must be between 0 and 1, got {self.action_cot_ratio}")
         
         # Validate validation split
         if not 0.0 <= self.val_split_ratio < 1.0:
@@ -326,15 +322,13 @@ def create_datasets(args: ThinkVLNTrainingArguments, processor):
     logger.info(f"Data root: {args.data_root}")
     logger.info(f"Action data: {args.action_data_path}")
     logger.info(f"CoT data: {args.cot_data_path}")
-    logger.info(f"Action/CoT ratio: {args.action_cot_ratio}")
     logger.info(f"Validation split ratio: {args.val_split_ratio}")
     
     # Create full dataset
     full_dataset = ThinkVLNDataset(
         action_data_path=args.action_data_path,
         cot_data_path=args.cot_data_path,
-        data_root=args.data_root,
-        action_cot_ratio=args.action_cot_ratio,
+        image_root=args.data_root,
     )
     
     logger.info(f"Full dataset created with {len(full_dataset)} samples")
@@ -417,7 +411,7 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
         flat_config['data_root'] = data_cfg.get('data_root', 'data')
         flat_config['action_data_path'] = data_cfg.get('action_data_path')
         flat_config['cot_data_path'] = data_cfg.get('cot_data_path')
-        flat_config['action_cot_ratio'] = data_cfg.get('action_cot_ratio', 0.5)
+
         flat_config['val_split_ratio'] = data_cfg.get('val_split_ratio', 0.1)
     
     # Training config
@@ -509,36 +503,9 @@ def main():
     logger.info(f"Learning rate: {args.learning_rate}")
     logger.info(f"Mixed precision: {'bf16' if args.bf16 else 'fp16' if args.fp16 else 'fp32'}")
     logger.info(f"DeepSpeed: {args.deepspeed if args.deepspeed else 'Disabled'}")
-    logger.info(f"Distributed training: {args.world_size} GPUs")
-    logger.info(f"Logging to: {args.report_to}")
-    if 'wandb' in args.report_to:
-        logger.info(f"WandB run name: {args.run_name if args.run_name else 'auto-generated'}")
+    logger.info(f"Distributed: {args.world_size} GPUs")
+    logger.info(f"Logging: {args.report_to}")
     logger.info("=" * 80)
-    
-    # Initialize WandB if enabled
-    if 'wandb' in args.report_to:
-        try:
-            import wandb
-            # WandB config will include all training args
-            wandb_config = {
-                "model": args.model_name_or_path,
-                "num_query_tokens": args.num_query_tokens,
-                "num_action_classes": args.num_action_classes,
-                "action_loss_weight": args.action_loss_weight,
-                "progress_loss_weight": args.progress_loss_weight,
-                "learning_rate": args.learning_rate,
-                "batch_size": args.per_device_train_batch_size,
-                "gradient_accumulation_steps": args.gradient_accumulation_steps,
-                "effective_batch_size": args.per_device_train_batch_size * args.gradient_accumulation_steps * args.world_size,
-                "num_epochs": args.num_train_epochs,
-                "warmup_steps": args.warmup_steps,
-                "action_cot_ratio": args.action_cot_ratio,
-                "val_split_ratio": args.val_split_ratio,
-            }
-            logger.info("WandB logging enabled")
-        except ImportError:
-            logger.warning("WandB not installed. Install with: pip install wandb")
-            args.report_to = [r for r in args.report_to if r != 'wandb']
     
     # Load processor
     logger.info("Loading processor...")
@@ -563,19 +530,7 @@ def main():
         eval_dataset=eval_dataset,
         data_collator=data_collator,
     )
-    logger.info("Trainer initialized successfully")
-    
-    # Log dataset statistics to WandB
-    if 'wandb' in args.report_to and eval_dataset is not None:
-        try:
-            import wandb
-            wandb.log({
-                "dataset/train_size": len(train_dataset),
-                "dataset/eval_size": len(eval_dataset),
-                "dataset/total_size": len(train_dataset) + len(eval_dataset),
-            })
-        except:
-            pass
+    logger.info("Trainer initialized")
     
     # Train
     logger.info("Starting training...")

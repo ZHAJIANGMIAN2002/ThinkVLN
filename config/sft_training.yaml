@@ -32,20 +32,16 @@ model:
 # ============================================================================
 data:
   # Root directory containing all data files
-  data_root: "data/trajectory_data/R2R_back"
+  data_root: "data/"
   
   # Path to action data JSONL file (relative to data_root)
   # Format: summary_full.jsonl with trajectory, actions, subtask_sequence
-  action_data_path: "summary_full.jsonl"
+  action_data_path: "trajectory_data/R2R_back/summary_full.jsonl"
   
   # Path to CoT data JSONL file (relative to data_root)
   # Format: cot_dataset_*.jsonl with frame_key, instruction, answer (reasoning)
-  cot_data_path: "../cot_dataset/cot_dataset_100_answer.jsonl"
+  cot_data_path: "cot_dataset/cot_dataset_answer.jsonl"
   
-  # Ratio of action samples in the dataset
-  # 0.5 means 50% action samples and 50% CoT samples
-  # Adjust based on your data balance preference
-  action_cot_ratio: 0.5
   
   # Validation split ratio
   # 0.1 means 10% of data will be used for validation
@@ -186,31 +182,12 @@ logging:
 #    - Action samples get query tokens appended and compute action/progress loss
 #    - CoT samples generate reasoning and compute language modeling loss
 #
-# 3. DeepSpeed Configuration:
-#    - Use ZeRO-2 (scripts/zero2.json) for models that fit in GPU memory
-#    - Use ZeRO-3 (scripts/zero3.json) for larger models or limited memory
-#    - Ensure deepspeed package is installed: pip install deepspeed
-#
-# 4. Dataset Implementation:
+# 3. Dataset Implementation:
 #    - The dataset/collator API is defined in thinkvln/dataset/dataset.py
 #    - Full implementation needs to be completed before training
 #    - See the API documentation in dataset.py for expected formats
 #
-# 5. WandB Setup:
-#    - Install wandb: pip install wandb
-#    - Login: wandb login
-#    - Set project/entity in environment:
-#      export WANDB_PROJECT=thinkvln
-#      export WANDB_ENTITY=your-username
-#    - Or set in code before training
-#
-# 6. Distributed Training:
-#    - Accelerate (recommended): Create accelerate config with 'accelerate config'
-#    - DeepSpeed: Requires DeepSpeed config file (scripts/zero2.json)
-#    - torchrun: Standard PyTorch distributed launcher
-#    - All methods work with HuggingFace Trainer automatically
-#
-# 7. Train/Val Split:
+# 4. Train/Val Split:
 #    - Set val_split_ratio > 0 to enable validation
 #    - Validation metrics will be logged to WandB
 #    - Best model will be saved based on validation loss
