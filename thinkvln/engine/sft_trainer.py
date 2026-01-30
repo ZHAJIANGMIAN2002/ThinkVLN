@@ -176,12 +176,11 @@ class ThinkVLNSFTTrainer(Trainer):
     """
     Custom Trainer for ThinkVLN actor supervised fine-tuning.
     
-    This trainer extends HuggingFace Trainer to handle mixed batches of action
-    and CoT samples. It computes appropriate losses based on sample type and
-    logs individual loss components for monitoring.
+    This trainer extends HuggingFace Trainer to handle homogeneous batches.
+    Each batch contains only one type of sample (action OR CoT, not mixed).
     
     Key Features:
-        - Mixed batch training (action + CoT in same batch)
+        - Homogeneous batch training using HomogeneousBatchSampler
         - Automatic loss routing based on sample type
         - Individual loss component logging
         - Support for DeepSpeed and distributed training
@@ -197,6 +196,37 @@ class ThinkVLNSFTTrainer(Trainer):
             "progress_loss": [],
             "lm_loss": [],
         }
+    
+    def get_train_dataloader(self):
+        """
+        Returns training dataloader with HomogeneousBatchSampler.
+        Ensures each batch contains only one type of sample (action or CoT).
+        """
+        from torch.utils.data import DataLoader
+        from thinkvln.dataset.dataset import HomogeneousBatchSampler
+        
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+        
+        train_dataset = self.train_dataset
+        data_collator = self.data_collator
+        
+        # Create homogeneous batch sampler
+        train_sampler = HomogeneousBatchSampler(
+            dataset=train_dataset,
+            batch_size=self.args.per_device_train_batch_size,
+            drop_last=self.args.dataloader_drop_last,
+            shuffle=True,
+            seed=self.args.seed,
+        )
+        
+        return DataLoader(
+            train_dataset,
+            batch_sampler=train_sampler,
+            collate_fn=data_collator,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
     
     def compute_loss(
         self,

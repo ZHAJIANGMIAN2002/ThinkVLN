@@ -1,0 +1,164 @@
+  0%|                                                                                                                                                                        | 0/4461 [00:00<?, ?it/s]Traceback (most recent call last):
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 684, in <module>
+    main()
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 651, in main
+    train_result = trainer.train()
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2325, in train
+    return inner_training_loop(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2674, in _inner_training_loop
+    tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 4020, in training_step
+    loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 231, in compute_loss
+    outputs = model(**inputs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/parallel/distributed.py", line 1648, in forward
+    else self._run_ddp_forward(*inputs, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/parallel/distributed.py", line 1474, in _run_ddp_forward
+    return self.module(*inputs, **kwargs)  # type: ignore[index]
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/utils/operations.py", line 818, in forward
+    return model_forward(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/utils/operations.py", line 806, in __call__
+    return convert_to_fp32(self.model_forward(*args, **kwargs))
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/amp/autocast_mode.py", line 44, in decorate_autocast
+    return func(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/peft_model.py", line 1850, in forward
+    return self.base_model(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/tuners/tuners_utils.py", line 222, in forward
+    return self.model.forward(*args, **kwargs)
+  File "/mnt/swx/ThinkVLN/thinkvln/models/thinkvln_actor.py", line 93, in forward
+    outputs = self.model(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/generic.py", line 1064, in wrapper
+    outputs = func(self, *args, **kwargs)
+  File "/mnt/swx/ThinkVLN/thinkvln/models/thinkvln_model.py", line 171, in forward
+    outputs = self.language_model(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/generic.py", line 1064, in wrapper
+    outputs = func(self, *args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/models/qwen3_vl/modeling_qwen3_vl.py", line 850, in forward
+    layer_outputs = decoder_layer(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/modeling_layers.py", line 94, in __call__
+    return super().__call__(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/deprecation.py", line 172, in wrapped_func
+    return func(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/models/qwen3_vl/modeling_qwen3_vl.py", line 517, in forward
+    hidden_states = self.mlp(hidden_states)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/models/qwen3_vl/modeling_qwen3_vl.py", line 472, in forward
+    down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/tuners/lora/layer.py", line 769, in forward
+    x = self._cast_input_dtype(x, lora_A.weight.dtype)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/tuners/tuners_utils.py", line 1130, in _cast_input_dtype
+    return x.to(dtype=dtype)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 274.00 MiB. GPU 0 has a total capacity of 47.50 GiB of which 233.75 MiB is free. Including non-PyTorch memory, this process has 47.26 GiB memory in use. Of the allocated memory 46.39 GiB is allocated by PyTorch, and 292.72 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 684, in <module>
+[rank0]:     main()
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 651, in main
+[rank0]:     train_result = trainer.train()
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2325, in train
+[rank0]:     return inner_training_loop(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2674, in _inner_training_loop
+[rank0]:     tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 4020, in training_step
+[rank0]:     loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 231, in compute_loss
+[rank0]:     outputs = model(**inputs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/parallel/distributed.py", line 1648, in forward
+[rank0]:     else self._run_ddp_forward(*inputs, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/parallel/distributed.py", line 1474, in _run_ddp_forward
+[rank0]:     return self.module(*inputs, **kwargs)  # type: ignore[index]
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/utils/operations.py", line 818, in forward
+[rank0]:     return model_forward(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/utils/operations.py", line 806, in __call__
+[rank0]:     return convert_to_fp32(self.model_forward(*args, **kwargs))
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/amp/autocast_mode.py", line 44, in decorate_autocast
+[rank0]:     return func(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/peft_model.py", line 1850, in forward
+[rank0]:     return self.base_model(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/tuners/tuners_utils.py", line 222, in forward
+[rank0]:     return self.model.forward(*args, **kwargs)
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/models/thinkvln_actor.py", line 93, in forward
+[rank0]:     outputs = self.model(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/generic.py", line 1064, in wrapper
+[rank0]:     outputs = func(self, *args, **kwargs)
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/models/thinkvln_model.py", line 171, in forward
+[rank0]:     outputs = self.language_model(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/generic.py", line 1064, in wrapper
+[rank0]:     outputs = func(self, *args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/models/qwen3_vl/modeling_qwen3_vl.py", line 850, in forward
+[rank0]:     layer_outputs = decoder_layer(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/modeling_layers.py", line 94, in __call__
+[rank0]:     return super().__call__(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/deprecation.py", line 172, in wrapped_func
+[rank0]:     return func(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/models/qwen3_vl/modeling_qwen3_vl.py", line 517, in forward
+[rank0]:     hidden_states = self.mlp(hidden_states)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/models/qwen3_vl/modeling_qwen3_vl.py", line 472, in forward
+[rank0]:     down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/tuners/lora/layer.py", line 769, in forward
+[rank0]:     x = self._cast_input_dtype(x, lora_A.weight.dtype)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/tuners/tuners_utils.py", line 1130, in _cast_input_dtype
+[rank0]:     return x.to(dtype=dtype)
+[rank0]: torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 274.00 MiB. GPU 0 has a total capacity of 47.50 GiB of which 233.75 MiB is free. Including non-PyTorch memory, this process has 47.26 GiB memory in use. Of the allocated memory 46.39 GiB is allocated by PyTorch, and 292.72 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

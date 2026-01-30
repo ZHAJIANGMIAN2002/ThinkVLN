@@ -1,9 +1,9 @@
 """ThinkVLN Dataset and Collator for mixed action and CoT training"""
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from PIL import Image
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Iterator
 import os
 import json
 import random
@@ -120,6 +120,76 @@ class ThinkVLNDataset(Dataset):
     def __setstate__(self, state):
         """Custom unpickling to restore dataset state."""
         self.__dict__.update(state)
+
+
+class HomogeneousBatchSampler(Sampler):
+    """
+    Custom sampler that ensures each batch contains only one type of sample (action or CoT).
+    This prevents mixing different data types in the same batch, which simplifies training.
+    """
+    
+    def __init__(self, dataset: Dataset, batch_size: int, drop_last: bool = False, shuffle: bool = True, seed: int = 42):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+        self.shuffle = shuffle
+        self.seed = seed
+        
+        # Group indices by data type
+        self.action_indices = []
+        self.cot_indices = []
+        
+        for idx in range(len(dataset)):
+            sample = dataset[idx]
+            if sample['data_type'] == 'action':
+                self.action_indices.append(idx)
+            else:
+                self.cot_indices.append(idx)
+        
+        print(f"HomogeneousBatchSampler: {len(self.action_indices)} action, {len(self.cot_indices)} CoT samples")
+    
+    def __iter__(self) -> Iterator[List[int]]:
+        # Shuffle if needed
+        if self.shuffle:
+            random.seed(self.seed)
+            random.shuffle(self.action_indices)
+            random.shuffle(self.cot_indices)
+            self.seed += 1  # Different shuffle each epoch
+        
+        # Create batches for each type
+        action_batches = [
+            self.action_indices[i:i + self.batch_size]
+            for i in range(0, len(self.action_indices), self.batch_size)
+        ]
+        cot_batches = [
+            self.cot_indices[i:i + self.batch_size]
+            for i in range(0, len(self.cot_indices), self.batch_size)
+        ]
+        
+        # Drop last incomplete batch if needed
+        if self.drop_last:
+            action_batches = [b for b in action_batches if len(b) == self.batch_size]
+            cot_batches = [b for b in cot_batches if len(b) == self.batch_size]
+        
+        # Interleave batches to mix action and CoT training
+        all_batches = action_batches + cot_batches
+        if self.shuffle:
+            random.shuffle(all_batches)
+        
+        for batch in all_batches:
+            yield batch
+    
+    def __len__(self) -> int:
+        action_batches = len(self.action_indices) // self.batch_size
+        cot_batches = len(self.cot_indices) // self.batch_size
+        
+        if not self.drop_last:
+            if len(self.action_indices) % self.batch_size != 0:
+                action_batches += 1
+            if len(self.cot_indices) % self.batch_size != 0:
+                cot_batches += 1
+        
+        return action_batches + cot_batches
 
 
 class ThinkVLNDataCollator:
@@ -275,22 +345,39 @@ class ThinkVLNDataCollator:
         }
     
     def _collate(self, samples: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        """Collate samples into padded batch."""
+        """
+        Collate samples into padded batch.
+        Assumes all samples in the batch are of the same type (homogeneous batch).
+        """
+        if not samples:
+            raise ValueError("Empty batch")
+        
         batch_size = len(samples)
+        batch_type = samples[0]['data_type']
+        
+        # Verify all samples are the same type (should be guaranteed by HomogeneousBatchSampler)
+        if not all(s['data_type'] == batch_type for s in samples):
+            raise ValueError(f"Mixed batch detected! Expected all {batch_type}, but got mixed types")
+        
         max_len = max(s['input_ids'].shape[0] for s in samples)
         pad_id = self.processor.tokenizer.pad_token_id
         
-        # Initialize tensors
+        # Initialize common tensors
         input_ids = torch.full((batch_size, max_len), pad_id, dtype=torch.long)
         attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
-        labels = torch.full((batch_size, max_len), -100, dtype=torch.long)
-        
-        has_action = any(s['action_labels'] is not None for s in samples)
-        action_labels = torch.full((batch_size, self.num_query_tokens), -100, dtype=torch.long) if has_action else None
-        progress_labels = torch.full((batch_size, self.num_query_tokens), -100.0, dtype=torch.float32) if has_action else None
         
         pixel_values_list = []
         image_grid_list = []
+        
+        # Type-specific initialization
+        if batch_type == 'action':
+            action_labels = torch.zeros((batch_size, self.num_query_tokens), dtype=torch.long)
+            progress_labels = torch.zeros((batch_size, self.num_query_tokens), dtype=torch.float32)
+            labels = None
+        else:  # CoT
+            labels = torch.full((batch_size, max_len), -100, dtype=torch.long)
+            action_labels = None
+            progress_labels = None
         
         # Fill batch
         for i, s in enumerate(samples):
@@ -298,34 +385,23 @@ class ThinkVLNDataCollator:
             input_ids[i, :seq_len] = s['input_ids']
             attention_mask[i, :seq_len] = s['attention_mask']
             
-            if s['data_type'] == 'cot':
-                labels[i, :seq_len] = s['labels']
-            elif has_action and s['action_labels'] is not None:
+            if batch_type == 'action':
                 action_labels[i] = s['action_labels']
                 progress_labels[i] = s['progress_labels']
+            else:  # CoT
+                labels[i, :seq_len] = s['labels']
             
             if s['pixel_values'] is not None:
                 pixel_values_list.append(s['pixel_values'])
             if s['image_grid_thw'] is not None:
                 image_grid_list.append(s['image_grid_thw'])
         
-        # Set None for uniform batches
-        if all(s['data_type'] == 'action' for s in samples):
-            labels = None
-        if all(s['data_type'] == 'cot' for s in samples):
-            action_labels = None
-            progress_labels = None
-        
-        # Concatenate pixel_values and image_grid_thw properly
-        # Each sample has pixel_values [1, num_patches, hidden] and image_grid_thw [1, 3]
-        # We need to concatenate across the batch: [total_patches, hidden] and [total_images, 3]
+        # Concatenate visual inputs
         batch_pixel_values = None
         batch_image_grid_thw = None
         if pixel_values_list:
-            # Concatenate along the patches dimension (after removing batch dim)
             batch_pixel_values = torch.cat([pv.view(-1, pv.shape[-1]) for pv in pixel_values_list], dim=0)
         if image_grid_list:
-            # Concatenate along the images dimension
             batch_image_grid_thw = torch.cat(image_grid_list, dim=0)
         
         return {

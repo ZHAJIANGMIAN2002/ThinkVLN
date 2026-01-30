@@ -124,9 +124,18 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
                 action_labels.view(-1)
             ) if action_labels is not None else None
             
-            progress_loss = nn.MSELoss()(
-                progress_values, progress_labels
-            ) if progress_labels is not None else None
+            # Compute progress loss with masking for -100 (CoT sample padding)
+            if progress_labels is not None:
+                valid_mask = progress_labels != -100.0
+                if valid_mask.any():
+                    progress_loss = nn.MSELoss()(
+                        progress_values[valid_mask], 
+                        progress_labels[valid_mask]
+                    )
+                else:
+                    progress_loss = None
+            else:
+                progress_loss = None
             
             # Combine action and progress losses only
             total_loss = torch.tensor(0.0, device=hidden_states.device)

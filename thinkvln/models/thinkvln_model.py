@@ -86,8 +86,9 @@ class ThinkVLNModel(Qwen3VLModel):
             action_query_mask = input_ids == self.config.action_query_token_id
             if action_query_mask.any():
                 batch_size = input_ids.shape[0]
-                # Expand query embeddings to batch size
+                # Expand query embeddings to batch size and match dtype/device
                 query_embeds = self.query_embeddings.unsqueeze(0).expand(batch_size, -1, -1)
+                query_embeds = query_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 # Flatten to match masked_scatter requirements
                 query_embeds_flat = query_embeds.reshape(-1, query_embeds.shape[-1])
                 # Create expanded mask for embeddings
