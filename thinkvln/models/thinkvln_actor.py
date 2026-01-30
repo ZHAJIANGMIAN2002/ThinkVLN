@@ -48,7 +48,7 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
         hidden_size = config.text_config.hidden_size
         
         # Setup projection layers for action/progress prediction
-        proj_size = getattr(self.actor_config, 'projector_hidden_size', hidden_size // 2)
+        proj_size = self.actor_config.projector_hidden_size or hidden_size // 2
         self.shared_projector = SharedProjector(hidden_size, proj_size, 
                                               getattr(self.actor_config, 'projector_dropout', 0.1))
         self.action_head = ActionClassificationHead(proj_size, self.actor_config.num_action_classes, 

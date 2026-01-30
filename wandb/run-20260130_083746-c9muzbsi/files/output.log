@@ -1,0 +1,52 @@
+  0%|                                                                                                                                                                        | 0/6095 [00:00<?, ?it/s]Traceback (most recent call last):
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 565, in <module>
+    main()
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 538, in main
+    train_result = trainer.train()
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2325, in train
+    return inner_training_loop(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2618, in _inner_training_loop
+    batch_samples, num_items_in_batch = self.get_batch_samples(epoch_iterator, num_batches, args.device)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 5654, in get_batch_samples
+    batch_samples.append(next(epoch_iterator))
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/data_loader.py", line 567, in __iter__
+    current_batch = next(dataloader_iter)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 734, in __next__
+    data = self._next_data()
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 790, in _next_data
+    data = self._dataset_fetcher.fetch(index)  # may raise StopIteration
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/_utils/fetch.py", line 55, in fetch
+    return self.collate_fn(data)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer_utils.py", line 872, in __call__
+    return self.data_collator(features)
+  File "/mnt/swx/ThinkVLN/thinkvln/dataset/dataset.py", line 158, in __call__
+    return self._collate(processed)
+  File "/mnt/swx/ThinkVLN/thinkvln/dataset/dataset.py", line 283, in _collate
+    max_len = max(s['input_ids'].shape[0] for s in samples)
+ValueError: max() arg is an empty sequence
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 565, in <module>
+[rank0]:     main()
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 538, in main
+[rank0]:     train_result = trainer.train()
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2325, in train
+[rank0]:     return inner_training_loop(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2618, in _inner_training_loop
+[rank0]:     batch_samples, num_items_in_batch = self.get_batch_samples(epoch_iterator, num_batches, args.device)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 5654, in get_batch_samples
+[rank0]:     batch_samples.append(next(epoch_iterator))
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/data_loader.py", line 567, in __iter__
+[rank0]:     current_batch = next(dataloader_iter)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 734, in __next__
+[rank0]:     data = self._next_data()
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 790, in _next_data
+[rank0]:     data = self._dataset_fetcher.fetch(index)  # may raise StopIteration
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/_utils/fetch.py", line 55, in fetch
+[rank0]:     return self.collate_fn(data)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer_utils.py", line 872, in __call__
+[rank0]:     return self.data_collator(features)
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/dataset/dataset.py", line 158, in __call__
+[rank0]:     return self._collate(processed)
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/dataset/dataset.py", line 283, in _collate
+[rank0]:     max_len = max(s['input_ids'].shape[0] for s in samples)
+[rank0]: ValueError: max() arg is an empty sequence

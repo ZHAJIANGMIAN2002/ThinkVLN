@@ -28,7 +28,7 @@ class ThinkVLNDataset(Dataset):
         self,
         action_data_path: Optional[str] = None,
         cot_data_path: Optional[str] = None,
-        image_root: str = "/mnt/nvme/swx/dataset/R2R",
+        image_root: Optional[str] = None,
         seed: int = 42,
     ):
         self.action_data_path = action_data_path
@@ -112,6 +112,14 @@ class ThinkVLNDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         return self.samples[idx]
+    
+    def __getstate__(self):
+        """Custom pickling to ensure samples list is preserved."""
+        return self.__dict__.copy()
+    
+    def __setstate__(self, state):
+        """Custom unpickling to restore dataset state."""
+        self.__dict__.update(state)
 
 
 class ThinkVLNDataCollator:
@@ -122,7 +130,7 @@ class ThinkVLNDataCollator:
         processor,
         num_query_tokens: int = 4,
         query_token_id: int = 151700,
-        image_root: str = "/mnt/nvme/swx/dataset/R2R",
+        image_root: Optional[str] = None,
     ):
         self.processor = processor
         self.num_query_tokens = num_query_tokens
@@ -137,6 +145,8 @@ class ThinkVLNDataCollator:
         processed = []
         
         for sample in batch:
+            if sample is None or ('data_type' not in sample):
+                continue
             if sample['data_type'] == 'action':
                 processed.append(self._process_action(sample))
             else:
@@ -195,8 +205,8 @@ class ThinkVLNDataCollator:
         return {
             'input_ids': input_ids,
             'attention_mask': attention_mask,
-            'pixel_values': inputs['pixel_values'][0] if 'pixel_values' in inputs else None,
-            'image_grid_thw': inputs['image_grid_thw'][0] if 'image_grid_thw' in inputs else None,
+            'pixel_values': inputs['pixel_values'] if 'pixel_values' in inputs else None,
+            'image_grid_thw': inputs['image_grid_thw'] if 'image_grid_thw' in inputs else None,
             'action_labels': torch.tensor(actions, dtype=torch.long),
             'progress_labels': torch.tensor(progress, dtype=torch.float32),
             'labels': None,
@@ -256,8 +266,8 @@ class ThinkVLNDataCollator:
         return {
             'input_ids': input_ids,
             'attention_mask': inputs['attention_mask'][0],
-            'pixel_values': inputs['pixel_values'][0] if 'pixel_values' in inputs else None,
-            'image_grid_thw': inputs['image_grid_thw'][0] if 'image_grid_thw' in inputs else None,
+            'pixel_values': inputs['pixel_values'] if 'pixel_values' in inputs else None,
+            'image_grid_thw': inputs['image_grid_thw'] if 'image_grid_thw' in inputs else None,
             'action_labels': None,
             'progress_labels': None,
             'labels': labels,
@@ -306,11 +316,23 @@ class ThinkVLNDataCollator:
             action_labels = None
             progress_labels = None
         
+        # Concatenate pixel_values and image_grid_thw properly
+        # Each sample has pixel_values [1, num_patches, hidden] and image_grid_thw [1, 3]
+        # We need to concatenate across the batch: [total_patches, hidden] and [total_images, 3]
+        batch_pixel_values = None
+        batch_image_grid_thw = None
+        if pixel_values_list:
+            # Concatenate along the patches dimension (after removing batch dim)
+            batch_pixel_values = torch.cat([pv.view(-1, pv.shape[-1]) for pv in pixel_values_list], dim=0)
+        if image_grid_list:
+            # Concatenate along the images dimension
+            batch_image_grid_thw = torch.cat(image_grid_list, dim=0)
+        
         return {
             'input_ids': input_ids,
             'attention_mask': attention_mask,
-            'pixel_values': torch.stack(pixel_values_list) if pixel_values_list else None,
-            'image_grid_thw': torch.stack(image_grid_list) if image_grid_list else None,
+            'pixel_values': batch_pixel_values,
+            'image_grid_thw': batch_image_grid_thw,
             'action_labels': action_labels,
             'progress_labels': progress_labels,
             'labels': labels,

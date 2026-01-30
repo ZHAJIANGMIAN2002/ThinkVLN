@@ -12,16 +12,16 @@ from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
-# client = OpenAI(
-#     base_url="https://openrouter.ai/api/v1",
-#     api_key=os.environ.get("OPENROUTER_API_KEY", "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"),
-# )
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY", "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"),
+)
 
 # # # Initialize OpenAI client
-client = OpenAI(
-    base_url="http://localhost:11451/v1",
-    api_key="EMPTY"
-)
+# client = OpenAI(
+#     base_url="http://localhost:11451/v1",
+#     api_key="EMPTY"
+# )
 
 def identify_action_change_keyframes(actions: List[int], window_size: int = 3) -> List[int]:
     """Identify keyframes where actions change using sliding window to filter noise."""
@@ -665,7 +665,52 @@ def get_episode_key(scene_id, episode_id):
     return str(episode_id)
 
 
-def process_single_episode(episode_data, episode_idx, total_episodes, subtask_splits, trajectory_dir, output_file, write_lock, processed_episode_keys):
+def build_composite_frames_from_dir(frame_dir: str, episode_key: str) -> list:
+    rgb_files = [f for f in os.listdir(frame_dir) if f.endswith("_rgb.jpg")]
+    indices = []
+    for name in rgb_files:
+        try:
+            indices.append(int(name.split("_")[0]))
+        except ValueError:
+            continue
+    indices = sorted(set(indices))
+    if not indices:
+        return []
+
+    tmp_dir = "/tmp/streamvln_frames_deploy"
+    os.makedirs(tmp_dir, exist_ok=True)
+    frame_paths = []
+
+    for idx in indices:
+        rgb_path = os.path.join(frame_dir, f"{idx:06d}_rgb.jpg")
+        map_path = os.path.join(frame_dir, f"{idx:06d}_map.jpg")
+        rgb = cv2.imread(rgb_path)
+        map_img = cv2.imread(map_path)
+        if rgb is None or map_img is None:
+            continue
+        if map_img.shape[0] != rgb.shape[0]:
+            new_w = int(map_img.shape[1] * (rgb.shape[0] / map_img.shape[0]))
+            map_img = cv2.resize(map_img, (new_w, rgb.shape[0]), interpolation=cv2.INTER_AREA)
+        composite = np.concatenate([rgb, map_img], axis=1)
+        frame_path = os.path.join(tmp_dir, f"{episode_key}_{idx:06d}.jpg")
+        cv2.imwrite(frame_path, composite)
+        frame_paths.append(frame_path)
+
+    return frame_paths
+
+
+def process_single_episode(
+    episode_data,
+    episode_idx,
+    total_episodes,
+    subtask_splits,
+    trajectory_dir,
+    output_file,
+    write_lock,
+    processed_episode_keys,
+    frame_base_dir: str = None,
+    use_frames_only: bool = False,
+):
     """Process a single episode and determine subtasks
     
     Returns:
@@ -689,32 +734,48 @@ def process_single_episode(episode_data, episode_idx, total_episodes, subtask_sp
     video_rel_path = episode_data.get("video", "")
     actions = episode_data.get("actions", [])
     
-    if not video_rel_path or not actions:
+    if not actions:
         return (episode_key, "skipped", None)
-    
-    video_path = os.path.join(trajectory_dir, video_rel_path, "trajectory.mp4")
-    if not os.path.exists(video_path):
-        return (episode_key, "failed", f"Video not found: {video_path}")
+
+    frame_dir = None
+    if frame_base_dir and video_rel_path:
+        frame_dir = os.path.join(frame_base_dir, os.path.basename(video_rel_path))
+        if not os.path.exists(frame_dir):
+            frame_dir = None
+
+    video_path = ""
+    if video_rel_path:
+        video_path = os.path.join(trajectory_dir, video_rel_path, "trajectory.mp4")
+        if not os.path.exists(video_path):
+            video_path = ""
+
+    if use_frames_only and not frame_dir:
+        return (episode_key, "failed", "Frame directory not found for frames-only mode")
+    if not use_frames_only and not video_path and not frame_dir:
+        return (episode_key, "failed", f"Video not found: {os.path.join(trajectory_dir, video_rel_path, 'trajectory.mp4')}")
     
     print(f"[{episode_idx+1}/{total_episodes}] Processing {episode_key}")
     
     try:
         # Extract frames
         frame_paths = []
-        cap = cv2.VideoCapture(video_path)
-        frame_idx = 0
-        temp_frame_dir = "/tmp/streamvln_frames_deploy"
-        os.makedirs(temp_frame_dir, exist_ok=True)
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame_path = os.path.join(temp_frame_dir, f"{episode_key}_{frame_idx:06d}.jpg")
-            cv2.imwrite(frame_path, frame)
-            frame_paths.append(frame_path)
-            frame_idx += 1
-        cap.release()
+        if use_frames_only or (not video_path and frame_dir):
+            frame_paths = build_composite_frames_from_dir(frame_dir, episode_key)
+        else:
+            cap = cv2.VideoCapture(video_path)
+            frame_idx = 0
+            temp_frame_dir = "/tmp/streamvln_frames_deploy"
+            os.makedirs(temp_frame_dir, exist_ok=True)
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame_path = os.path.join(temp_frame_dir, f"{episode_key}_{frame_idx:06d}.jpg")
+                cv2.imwrite(frame_path, frame)
+                frame_paths.append(frame_path)
+                frame_idx += 1
+            cap.release()
         
         if not frame_paths:
             return (episode_key, "failed", "No frames extracted")
@@ -819,7 +880,9 @@ def determine_subtasks_for_all_episodes(
     trajectory_dir: str,
     subtask_splits_file: str,
     output_file: str,
-    max_workers: int = 4
+    max_workers: int = 4,
+    frame_base_dir: str = None,
+    use_frames_only: bool = False,
 ):
     """Process all episodes to determine subtasks for each frame
     
@@ -906,7 +969,9 @@ def determine_subtasks_for_all_episodes(
                 trajectory_dir,
                 output_file,
                 write_lock,
-                processed_episode_keys
+                processed_episode_keys,
+                frame_base_dir,
+                use_frames_only,
             )
             for idx, episode_data in enumerate(episodes)
         ]
@@ -946,6 +1011,10 @@ def main():
                        help="Output JSONL file to save all results (one line per episode)")
     parser.add_argument("--max_workers", type=int, default=4,
                        help="Maximum number of concurrent workers")
+    parser.add_argument("--frame_base_dir", type=str, default=None,
+                       help="Base dir with *_rgb.jpg and *_map.jpg frames")
+    parser.add_argument("--use_frames_only", action="store_true",
+                       help="Use rgb/map frames only (no mp4 required)")
     
     args = parser.parse_args()
     
@@ -953,7 +1022,9 @@ def main():
         trajectory_dir=args.trajectory_dir,
         subtask_splits_file=args.subtask_splits_file,
         output_file=args.output_file,
-        max_workers=args.max_workers
+        max_workers=args.max_workers,
+        frame_base_dir=args.frame_base_dir,
+        use_frames_only=args.use_frames_only,
     )
 
 

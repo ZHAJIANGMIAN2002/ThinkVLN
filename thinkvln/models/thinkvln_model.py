@@ -13,8 +13,6 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 )
 from transformers.modeling_outputs import ModelOutput
 from transformers.cache_utils import Cache
-from transformers.utils import Unpack
-from transformers.utils.generic import TransformersKwargs
 
 from .thinkvln_config import ThinkVLNConfig
 
@@ -45,7 +43,7 @@ class ThinkVLNModel(Qwen3VLModel):
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        **kwargs: Unpack[TransformersKwargs],
+        **kwargs
     ) -> Union[tuple, Qwen3VLModelOutputWithPast]:
         """
         Forward pass with action query token injection.

@@ -1,0 +1,70 @@
+  0%|                                                                                                                                                                       | 0/71375 [00:00<?, ?it/s]/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+  warnings.warn(
+`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+  0%|                                                                                                                                                                       | 0/71375 [00:00<?, ?it/s]Traceback (most recent call last):
+{'train/action_loss': 1.3203125, 'train/progress_loss': 0.07958984375, 'epoch': 0}
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 647, in <module>
+    main()
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 614, in main
+    train_result = trainer.train()
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2325, in train
+    return inner_training_loop(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2674, in _inner_training_loop
+    tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 4071, in training_step
+    self.accelerator.backward(loss, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/accelerator.py", line 2726, in backward
+    self.deepspeed_engine_wrapped.backward(loss, sync_gradients=self.sync_gradients, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/utils/deepspeed.py", line 270, in backward
+    self.engine.backward(loss, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/utils/nvtx.py", line 20, in wrapped_fn
+    ret_val = func(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/engine.py", line 2216, in backward
+    self._do_optimizer_backward(loss, retain_graph)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/engine.py", line 2162, in _do_optimizer_backward
+    self.optimizer.backward(loss, retain_graph=retain_graph)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/zero/stage_1_and_2.py", line 2082, in backward
+    self.loss_scaler.backward(loss.float(), retain_graph=retain_graph)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/fp16/loss_scaler.py", line 63, in backward
+    scaled_loss.backward(retain_graph=retain_graph)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/_tensor.py", line 647, in backward
+    torch.autograd.backward(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/autograd/__init__.py", line 354, in backward
+    _engine_run_backward(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/autograd/graph.py", line 829, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+RuntimeError: element 0 of tensors does not require grad and does not have a grad_fn
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 647, in <module>
+[rank0]:     main()
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 614, in main
+[rank0]:     train_result = trainer.train()
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2325, in train
+[rank0]:     return inner_training_loop(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2674, in _inner_training_loop
+[rank0]:     tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 4071, in training_step
+[rank0]:     self.accelerator.backward(loss, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/accelerator.py", line 2726, in backward
+[rank0]:     self.deepspeed_engine_wrapped.backward(loss, sync_gradients=self.sync_gradients, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/utils/deepspeed.py", line 270, in backward
+[rank0]:     self.engine.backward(loss, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/utils/nvtx.py", line 20, in wrapped_fn
+[rank0]:     ret_val = func(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/engine.py", line 2216, in backward
+[rank0]:     self._do_optimizer_backward(loss, retain_graph)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/engine.py", line 2162, in _do_optimizer_backward
+[rank0]:     self.optimizer.backward(loss, retain_graph=retain_graph)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/zero/stage_1_and_2.py", line 2082, in backward
+[rank0]:     self.loss_scaler.backward(loss.float(), retain_graph=retain_graph)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/fp16/loss_scaler.py", line 63, in backward
+[rank0]:     scaled_loss.backward(retain_graph=retain_graph)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/_tensor.py", line 647, in backward
+[rank0]:     torch.autograd.backward(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/autograd/__init__.py", line 354, in backward
+[rank0]:     _engine_run_backward(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/autograd/graph.py", line 829, in _engine_run_backward
+[rank0]:     return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+[rank0]: RuntimeError: element 0 of tensors does not require grad and does not have a grad_fn

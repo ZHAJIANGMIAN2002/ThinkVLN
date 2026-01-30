@@ -65,9 +65,9 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         progress_loss_weight: Weight for progress regression loss
     
     Data Arguments:
-        data_root: Root directory containing data files
-        action_data_path: Path to action JSONL file (relative to data_root)
-        cot_data_path: Path to CoT JSONL file (relative to data_root)
+        image_root: Root directory containing image files
+        action_data_path: Path to action JSONL file (absolute path)
+        cot_data_path: Path to CoT JSONL file (absolute path)
         val_split_ratio: Ratio of data to use for validation (0.1 = 10% validation)
     
     Training Arguments:
@@ -96,18 +96,52 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         metadata={"help": "Weight for progress regression loss"}
     )
     
+    # LoRA configuration
+    use_lora: bool = field(
+        default=False,
+        metadata={"help": "Enable LoRA for parameter-efficient fine-tuning"}
+    )
+    lora_r: int = field(
+        default=8,
+        metadata={"help": "LoRA rank"}
+    )
+    lora_alpha: int = field(
+        default=16,
+        metadata={"help": "LoRA alpha (scaling factor)"}
+    )
+    lora_dropout: float = field(
+        default=0.05,
+        metadata={"help": "LoRA dropout"}
+    )
+    lora_target_modules: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated list of module names to apply LoRA"}
+    )
+    
+    # Vision tower configuration
+    freeze_vision_tower: bool = field(
+        default=False,
+        metadata={"help": "Freeze vision encoder to save memory"}
+    )
+    
+    # Attention optimization
+    use_flash_attention_2: bool = field(
+        default=False,
+        metadata={"help": "Use FlashAttention-2 for faster and more memory-efficient attention"}
+    )
+    
     # Data arguments
-    data_root: str = field(
-        default="data",
-        metadata={"help": "Root directory for data files"}
+    image_root: str = field(
+        default="/mnt/nvme/swx/dataset/R2R",
+        metadata={"help": "Root directory for image files"}
     )
     action_data_path: Optional[str] = field(
         default=None,
-        metadata={"help": "Path to action data JSONL file (summary_full.jsonl), relative to data_root"}
+        metadata={"help": "Path to action data JSONL file (absolute path)"}
     )
     cot_data_path: Optional[str] = field(
         default=None,
-        metadata={"help": "Path to CoT data JSONL file (cot_dataset_*.jsonl), relative to data_root"}
+        metadata={"help": "Path to CoT data JSONL file (absolute path)"}
     )
 
     val_split_ratio: float = field(
@@ -256,13 +290,13 @@ class ThinkVLNSFTTrainer(Trainer):
 
 def load_model(args: ThinkVLNTrainingArguments):
     """
-    Load ThinkVLNActor model from pretrained Qwen3VL.
+    Load ThinkVLNActor model from pretrained Qwen3VL with optional LoRA.
     
     Args:
         args: Training arguments containing model configuration
     
     Returns:
-        ThinkVLNActor model with initialized actor heads
+        ThinkVLNActor model with initialized actor heads and optional LoRA adapters
     """
     from thinkvln.models.thinkvln_actor import ThinkVLNActor
     from thinkvln.models.actor_config import ThinkVLNActorConfig
@@ -279,22 +313,82 @@ def load_model(args: ThinkVLNTrainingArguments):
     
     logger.info(f"Actor config: {actor_config}")
     
+    # Prepare model loading kwargs
+    model_kwargs = {
+        "actor_config": actor_config,
+        "dtype": torch.bfloat16 if args.bf16 else torch.float32,
+        "trust_remote_code": True,
+    }
+    
+    # Enable FlashAttention-2 if requested
+    if args.use_flash_attention_2:
+        logger.info("Enabling FlashAttention-2 for efficient attention computation")
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+    
     # Load model from pretrained Qwen3VL
     model = ThinkVLNActor.from_pretrained(
         args.model_name_or_path,
-        actor_config=actor_config,
-        torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
-        trust_remote_code=True,
+        **model_kwargs
     )
     
-    # Enable gradient checkpointing for memory efficiency
+    # Freeze vision tower if requested (do this FIRST)
+    if args.freeze_vision_tower:
+        logger.info("Freezing vision tower")
+        for param in model.model.visual.parameters():
+            param.requires_grad = False
+        logger.info("Vision tower frozen")
+    
+    # Apply LoRA if enabled
+    if args.use_lora:
+        from peft import LoraConfig, get_peft_model
+        
+        logger.info("Applying LoRA configuration")
+        
+        # Parse target modules (only apply LoRA to language model projections)
+        if args.lora_target_modules:
+            target_modules = [m.strip() for m in args.lora_target_modules.split(',')]
+        else:
+            target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+        
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            target_modules=target_modules,
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+            # Keep actor-specific modules fully trainable
+            modules_to_save=["query_embeddings", "shared_projector", "action_head", "progress_head"],
+        )
+        
+        model = get_peft_model(model, lora_config)
+        logger.info(f"LoRA applied with r={args.lora_r}, alpha={args.lora_alpha}")
+        model.print_trainable_parameters()
+    
+    # Enable gradient checkpointing AFTER applying LoRA
     if args.gradient_checkpointing:
         logger.info("Enabling gradient checkpointing")
-        model.gradient_checkpointing_enable()
+        if args.use_lora:
+            # For PEFT models, call on the base model
+            model.base_model.gradient_checkpointing_enable()
+            # Enable input gradients to allow backprop through frozen layers
+            model.enable_input_require_grads()
+            logger.info("Enabled gradient checkpointing and input gradients for PEFT model")
+        else:
+            model.gradient_checkpointing_enable()
+            if hasattr(model, 'enable_input_require_grads'):
+                model.enable_input_require_grads()
+                logger.info("Enabled gradient checkpointing and input gradients")
     
     logger.info(f"Model loaded successfully")
     logger.info(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
     logger.info(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    
+    # Debug: Print trainable parameter names
+    trainable_params = [name for name, param in model.named_parameters() if param.requires_grad]
+    logger.info(f"Number of trainable parameter tensors: {len(trainable_params)}")
+    if args.use_lora:
+        logger.info(f"First few trainable params: {trainable_params[:10]}")
     
     return model
 
@@ -319,7 +413,7 @@ def create_datasets(args: ThinkVLNTrainingArguments, processor):
     from torch.utils.data import random_split
     
     logger.info("Creating datasets")
-    logger.info(f"Data root: {args.data_root}")
+    logger.info(f"Image root: {args.image_root}")
     logger.info(f"Action data: {args.action_data_path}")
     logger.info(f"CoT data: {args.cot_data_path}")
     logger.info(f"Validation split ratio: {args.val_split_ratio}")
@@ -327,8 +421,8 @@ def create_datasets(args: ThinkVLNTrainingArguments, processor):
     # Create full dataset
     full_dataset = ThinkVLNDataset(
         action_data_path=args.action_data_path,
-        cot_data_path=args.cot_data_path,
-        image_root=args.data_root,
+        cot_data_path=args.cot_data_path, 
+        image_root=args.image_root,
     )
     
     logger.info(f"Full dataset created with {len(full_dataset)} samples")
@@ -355,7 +449,7 @@ def create_datasets(args: ThinkVLNTrainingArguments, processor):
     data_collator = ThinkVLNDataCollator(
         processor=processor,
         num_query_tokens=args.num_query_tokens,
-        data_root=args.data_root,
+        image_root=args.image_root,
     )
     
     logger.info("Data collator created")
@@ -404,11 +498,29 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
         flat_config['num_action_classes'] = model_cfg.get('num_action_classes', 4)
         flat_config['action_loss_weight'] = model_cfg.get('action_loss_weight', 1.0)
         flat_config['progress_loss_weight'] = model_cfg.get('progress_loss_weight', 1.0)
+        
+        # LoRA config
+        flat_config['use_lora'] = model_cfg.get('use_lora', False)
+        flat_config['lora_r'] = model_cfg.get('lora_r', 8)
+        flat_config['lora_alpha'] = model_cfg.get('lora_alpha', 16)
+        flat_config['lora_dropout'] = model_cfg.get('lora_dropout', 0.05)
+        if 'lora_target_modules' in model_cfg:
+            target_modules = model_cfg['lora_target_modules']
+            if isinstance(target_modules, list):
+                flat_config['lora_target_modules'] = ','.join(target_modules)
+            else:
+                flat_config['lora_target_modules'] = target_modules
+        
+        # Vision tower config
+        flat_config['freeze_vision_tower'] = model_cfg.get('freeze_vision_tower', False)
+        
+        # Attention optimization
+        flat_config['use_flash_attention_2'] = model_cfg.get('use_flash_attention_2', False)
     
     # Data config
     if 'data' in config:
         data_cfg = config['data']
-        flat_config['data_root'] = data_cfg.get('data_root', 'data')
+        flat_config['image_root'] = data_cfg.get('image_root', 'data')
         flat_config['action_data_path'] = data_cfg.get('action_data_path')
         flat_config['cot_data_path'] = data_cfg.get('cot_data_path')
 
@@ -418,6 +530,7 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
     if 'training' in config:
         train_cfg = config['training']
         flat_config.update({
+            'remove_unused_columns': False,
             'output_dir': train_cfg.get('output_dir', 'checkpoints/thinkvln_actor'),
             'num_train_epochs': train_cfg.get('num_train_epochs', 3),
             'max_steps': train_cfg.get('max_steps', -1),
@@ -435,7 +548,6 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
             'logging_first_step': train_cfg.get('logging_first_step', True),
             'save_steps': train_cfg.get('save_steps', 1000),
             'save_total_limit': train_cfg.get('save_total_limit', 3),
-            'evaluation_strategy': train_cfg.get('evaluation_strategy', 'no'),
             'eval_steps': train_cfg.get('eval_steps', 1000),
             'deepspeed': train_cfg.get('deepspeed'),
             'dataloader_num_workers': train_cfg.get('dataloader_num_workers', 4),
@@ -545,7 +657,13 @@ def main():
     
     # Save final model
     logger.info(f"Saving final model to {args.output_dir}")
-    trainer.save_model(args.output_dir)
+    if args.use_lora:
+        # For LoRA models, save the adapter weights
+        logger.info("Saving LoRA adapter weights")
+        model.save_pretrained(args.output_dir)
+    else:
+        # For full fine-tuning, save the complete model
+        trainer.save_model(args.output_dir)
     processor.save_pretrained(args.output_dir)
     
     # Save training metrics

@@ -1,0 +1,65 @@
+  0%|                                                                                                                                                                       | 0/35688 [00:00<?, ?it/s]Traceback (most recent call last):
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 565, in <module>
+    main()
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 538, in main
+    train_result = trainer.train()
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2325, in train
+    return inner_training_loop(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2618, in _inner_training_loop
+    batch_samples, num_items_in_batch = self.get_batch_samples(epoch_iterator, num_batches, args.device)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 5654, in get_batch_samples
+    batch_samples.append(next(epoch_iterator))
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/data_loader.py", line 567, in __iter__
+    current_batch = next(dataloader_iter)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 734, in __next__
+    data = self._next_data()
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 1516, in _next_data
+    return self._process_data(data, worker_id)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 1551, in _process_data
+    data.reraise()
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/_utils.py", line 769, in reraise
+    raise exception
+KeyError: Caught KeyError in DataLoader worker process 0.
+Original Traceback (most recent call last):
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/_utils/worker.py", line 349, in _worker_loop
+    data = fetcher.fetch(index)  # type: ignore[possibly-undefined]
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/_utils/fetch.py", line 55, in fetch
+    return self.collate_fn(data)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer_utils.py", line 872, in __call__
+    return self.data_collator(features)
+  File "/mnt/swx/ThinkVLN/thinkvln/dataset/dataset.py", line 140, in __call__
+    if sample['data_type'] == 'action':
+KeyError: 'data_type'
+
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 565, in <module>
+[rank0]:     main()
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 538, in main
+[rank0]:     train_result = trainer.train()
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2325, in train
+[rank0]:     return inner_training_loop(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2618, in _inner_training_loop
+[rank0]:     batch_samples, num_items_in_batch = self.get_batch_samples(epoch_iterator, num_batches, args.device)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 5654, in get_batch_samples
+[rank0]:     batch_samples.append(next(epoch_iterator))
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/data_loader.py", line 567, in __iter__
+[rank0]:     current_batch = next(dataloader_iter)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 734, in __next__
+[rank0]:     data = self._next_data()
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 1516, in _next_data
+[rank0]:     return self._process_data(data, worker_id)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/dataloader.py", line 1551, in _process_data
+[rank0]:     data.reraise()
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/_utils.py", line 769, in reraise
+[rank0]:     raise exception
+[rank0]: KeyError: Caught KeyError in DataLoader worker process 0.
+[rank0]: Original Traceback (most recent call last):
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/_utils/worker.py", line 349, in _worker_loop
+[rank0]:     data = fetcher.fetch(index)  # type: ignore[possibly-undefined]
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/data/_utils/fetch.py", line 55, in fetch
+[rank0]:     return self.collate_fn(data)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer_utils.py", line 872, in __call__
+[rank0]:     return self.data_collator(features)
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/dataset/dataset.py", line 140, in __call__
+[rank0]:     if sample['data_type'] == 'action':
+[rank0]: KeyError: 'data_type'

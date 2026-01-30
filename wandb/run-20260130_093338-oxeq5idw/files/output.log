@@ -1,0 +1,87 @@
+  0%|                                                                                                                                                                       | 0/71375 [00:00<?, ?it/s]`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+  0%|                                                                                                                                                                       | 0/71375 [00:01<?, ?it/s]`loss_type=None` was set in the config but it is unrecognized. Using the default loss: `ForCausalLMLoss`.
+{'train/action_loss': 1.4375, 'train/progress_loss': 0.005584716796875, 'epoch': 0}
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+{'train/action_loss': 1.359375, 'train/progress_loss': 0.11474609375, 'epoch': 0}
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+  0%|                                                                                                                                                            | 1/71375 [00:04<81:43:25,  4.12s/it]
+{'train/lm_loss': 2.7170069217681885, 'epoch': 0}
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+{'train/action_loss': 1.3359375, 'train/progress_loss': 0.0213623046875, 'epoch': 0}
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+{'train/action_loss': 1.234375, 'train/progress_loss': 0.2294921875, 'epoch': 0}
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+{'train/lm_loss': 3.4310450553894043, 'epoch': 0}
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+{'train/lm_loss': 2.6881914138793945, 'epoch': 0}
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+{'train/action_loss': 1.2265625, 'train/progress_loss': 0.126953125, 'epoch': 0}
+{'loss': 1.991, 'grad_norm': 43.34073257446289, 'learning_rate': 4e-08, 'epoch': 0.0}
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+pixel_values shape: torch.Size([1200, 1536])
+image_grid_thw shape: torch.Size([1, 3])
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 566, in <module>
+    main()
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 539, in main
+    train_result = trainer.train()
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2325, in train
+    return inner_training_loop(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2674, in _inner_training_loop
+    tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 4071, in training_step
+    self.accelerator.backward(loss, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/accelerator.py", line 2726, in backward
+    self.deepspeed_engine_wrapped.backward(loss, sync_gradients=self.sync_gradients, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/utils/deepspeed.py", line 281, in backward
+    self.engine.step()
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/engine.py", line 2378, in step
+    self._take_model_step(lr_kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/engine.py", line 2281, in _take_model_step
+    self.optimizer.step()
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/zero/stage_1_and_2.py", line 1901, in step
+    single_grad_partition = self.flatten_dense_tensors_aligned(
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 7.93 GiB. GPU 0 has a total capacity of 47.50 GiB of which 6.53 GiB is free. Including non-PyTorch memory, this process has 40.96 GiB memory in use. Of the allocated memory 35.77 GiB is allocated by PyTorch, and 3.90 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 566, in <module>
+[rank0]:     main()
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 539, in main
+[rank0]:     train_result = trainer.train()
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2325, in train
+[rank0]:     return inner_training_loop(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2674, in _inner_training_loop
+[rank0]:     tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 4071, in training_step
+[rank0]:     self.accelerator.backward(loss, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/accelerator.py", line 2726, in backward
+[rank0]:     self.deepspeed_engine_wrapped.backward(loss, sync_gradients=self.sync_gradients, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/accelerate/utils/deepspeed.py", line 281, in backward
+[rank0]:     self.engine.step()
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/engine.py", line 2378, in step
+[rank0]:     self._take_model_step(lr_kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/engine.py", line 2281, in _take_model_step
+[rank0]:     self.optimizer.step()
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/zero/stage_1_and_2.py", line 1901, in step
+[rank0]:     single_grad_partition = self.flatten_dense_tensors_aligned(
+[rank0]: torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 7.93 GiB. GPU 0 has a total capacity of 47.50 GiB of which 6.53 GiB is free. Including non-PyTorch memory, this process has 40.96 GiB memory in use. Of the allocated memory 35.77 GiB is allocated by PyTorch, and 3.90 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

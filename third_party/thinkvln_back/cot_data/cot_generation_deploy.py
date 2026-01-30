@@ -5,19 +5,20 @@ import base64
 import argparse
 import re
 import shutil
+import numpy as np
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
 # Initialize OpenAI client
-# client = OpenAI(
-#     base_url="https://openrouter.ai/api/v1",
-#     api_key=os.environ.get("OPENROUTER_API_KEY", "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"),
-# )
 client = OpenAI(
-    base_url="http://localhost:11451/v1",
-    api_key="EMPTY"
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY", "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"),
 )
+# client = OpenAI(
+#     base_url="http://localhost:11451/v1",
+#     api_key="EMPTY"
+# )
 
 # ==============================================================================
 # 1. STATIC SYSTEM PROMPT (NO VARIABLES)
@@ -129,6 +130,47 @@ def extract_frames_from_video(video_path: str, episode_id: int) -> list:
         frame_paths.append(frame_path)
         frame_idx += 1
     cap.release()
+    return frame_paths
+
+def extract_frames_from_dir(frame_dir: str, episode_id: int) -> list:
+    tmp_frame_dir = os.path.join("/tmp", f"cot_frames_{episode_id}")
+    os.makedirs(tmp_frame_dir, exist_ok=True)
+    
+    # Clear existing
+    for filename in os.listdir(tmp_frame_dir):
+        file_path = os.path.join(tmp_frame_dir, filename)
+        if os.path.isfile(file_path) or os.path.islink(file_path):
+            os.unlink(file_path)
+        elif os.path.isdir(file_path):
+            shutil.rmtree(file_path)
+    
+    rgb_files = [f for f in os.listdir(frame_dir) if f.endswith("_rgb.jpg")]
+    indices = []
+    for name in rgb_files:
+        try:
+            indices.append(int(name.split("_")[0]))
+        except ValueError:
+            continue
+    indices = sorted(set(indices))
+    if not indices:
+        return []
+
+    frame_paths = []
+    for idx in indices:
+        rgb_path = os.path.join(frame_dir, f"{idx:06d}_rgb.jpg")
+        map_path = os.path.join(frame_dir, f"{idx:06d}_map.jpg")
+        rgb = cv2.imread(rgb_path)
+        map_img = cv2.imread(map_path)
+        if rgb is None or map_img is None:
+            continue
+        if map_img.shape[0] != rgb.shape[0]:
+            new_w = int(map_img.shape[1] * (rgb.shape[0] / map_img.shape[0]))
+            map_img = cv2.resize(map_img, (new_w, rgb.shape[0]), interpolation=cv2.INTER_AREA)
+        composite = np.concatenate([rgb, map_img], axis=1)
+        frame_path = os.path.join(tmp_frame_dir, f"frame_{idx:03d}.jpg")
+        cv2.imwrite(frame_path, composite)
+        frame_paths.append(frame_path)
+
     return frame_paths
 
 def extract_subtask_index_from_cot(cot_text: str) -> int:
@@ -297,8 +339,16 @@ def process_single_frame(episode_key: str, step_id: int, episode_id: int,
 # 5. MAIN PROCESS LOOP WITH CONCURRENCY
 # ==============================================================================
 
-def process_episode_concurrent(episode_data: dict, video_dir: str, aggregate_file: str,
-                              write_lock: Lock, processed_frame_keys: set, max_workers: int = 4) -> int:
+def process_episode_concurrent(
+    episode_data: dict,
+    video_dir: str,
+    aggregate_file: str,
+    write_lock: Lock,
+    processed_frame_keys: set,
+    max_workers: int = 4,
+    frame_base_dir: str = None,
+    use_frames_only: bool = False,
+) -> int:
     """Process episode with concurrent frame processing. Returns count of processed frames.
     
     Frames are independent - state (previous_subtask_index, previous_action) is retrieved
@@ -330,12 +380,28 @@ def process_episode_concurrent(episode_data: dict, video_dir: str, aggregate_fil
         subtask_sequence.extend([subtask_sequence[-1]] * (len(actions) - len(subtask_sequence)))
     
     # Extract Frames
+    frame_paths = []
+    frame_dir = None
+    if frame_base_dir:
+        frame_dir = os.path.join(frame_base_dir, os.path.basename(video_dir))
+        if not os.path.exists(frame_dir):
+            frame_dir = None
+
     video_path = os.path.join(video_dir, "trajectory.mp4")
-    if not os.path.exists(video_path):
-        print(f"  Video missing: {video_path}")
-        return 0
-        
-    frame_paths = extract_frames_from_video(video_path, episode_id)
+
+    if use_frames_only:
+        if not frame_dir:
+            print(f"  Frame dir missing: {frame_base_dir}")
+            return 0
+        frame_paths = extract_frames_from_dir(frame_dir, episode_id)
+    else:
+        if os.path.exists(video_path):
+            frame_paths = extract_frames_from_video(video_path, episode_id)
+        elif frame_dir:
+            frame_paths = extract_frames_from_dir(frame_dir, episode_id)
+        else:
+            print(f"  Video missing: {video_path}")
+            return 0
     if len(frame_paths) != len(actions):
         print(f"  Mismatch: {len(frame_paths)} frames vs {len(actions)} actions")
         return 0
@@ -428,6 +494,10 @@ def main():
                        help="Maximum number of episodes to process")
     parser.add_argument("--max_workers", type=int, default=4,
                        help="Maximum number of concurrent workers for frame processing (default: 4)")
+    parser.add_argument("--frame_base_dir", type=str, default=None,
+                       help="Base dir with *_rgb.jpg and *_map.jpg frames")
+    parser.add_argument("--use_frames_only", action="store_true",
+                       help="Use rgb/map frames only (no mp4 required)")
     
     args = parser.parse_args()
     
@@ -484,7 +554,9 @@ def main():
                 args.output_file,
                 write_lock,
                 processed_frame_keys,
-                max_workers=args.max_workers
+                max_workers=args.max_workers,
+                frame_base_dir=args.frame_base_dir,
+                use_frames_only=args.use_frames_only,
             )
             
             total_frames += frame_count

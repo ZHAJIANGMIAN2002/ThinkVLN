@@ -23,8 +23,6 @@ class ThinkVLNActorConfig:
     projector_dropout: float = 0.1
     
     # Head architecture configuration
-    action_head_hidden_size: Optional[int] = None  # Deprecated - now uses projector_hidden_size
-    progress_head_hidden_size: Optional[int] = None  # Deprecated - now uses projector_hidden_size
     action_head_dropout: float = 0.1
     progress_head_dropout: float = 0.1
     

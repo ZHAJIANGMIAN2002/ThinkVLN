@@ -1,23 +1,23 @@
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
 # Load model and processor from local path
-model_path = "/mnt/swx/ThinkVLN/models/qwen3vl-2"
+model_path = "/mnt/swx/ThinkVLN/model_weights/qwen3vl-2"
 model = Qwen3VLForConditionalGeneration.from_pretrained(model_path)
 processor = AutoProcessor.from_pretrained(model_path)
 
 # Prepare messages with image and text
 messages = [
-    {
-        "role": "user",
-        "content": [
             {
-                "type": "image",
-                "image": "/mnt/swx/ThinkVLN/test/pipeline-cat-chonk.jpeg",
-            },
-            {"type": "text", "text": "Describe the image."},
-        ],
-    }
-]
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "image": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/pipeline-cat-chonk.jpeg",
+                    },
+                    {"type": "text", "text": "Describe the image."},
+                ],
+            }
+        ]
 
 # Apply chat template and prepare inputs
 inputs = processor.apply_chat_template(
@@ -27,6 +27,9 @@ inputs = processor.apply_chat_template(
     return_dict=True,
     return_tensors="pt"
 )
+
+print(f"inputs shape: {inputs.pixel_values.shape}")
+print(f"inputs image_grid_thw shape: {inputs.image_grid_thw.shape}")
 
 # Generate
 generated_ids = model.generate(**inputs, max_new_tokens=1024)

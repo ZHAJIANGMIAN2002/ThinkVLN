@@ -75,7 +75,7 @@ def load_model_and_processor(model_path: str, device: str = "cuda"):
     
     model = Qwen3VLForConditionalGeneration.from_pretrained(
         model_path,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="auto" if use_device_map else None,
         trust_remote_code=True
     )

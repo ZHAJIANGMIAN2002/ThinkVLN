@@ -12,7 +12,7 @@
 # ============================================================================
 model:
   # Pretrained Qwen3VL model path or HuggingFace model identifier
-  model_name_or_path: "Qwen/Qwen3-VL-2B"
+  model_name_or_path: "/mnt/swx/ThinkVLN/model_weights/qwen3vl-2"
   
   # Number of learnable query tokens for action/progress prediction
   # These tokens are appended to the input sequence for action mode
@@ -25,23 +25,32 @@ model:
   # Loss weights for multi-task learning
   action_loss_weight: 1.0      # Weight for action classification loss
   progress_loss_weight: 1.0    # Weight for progress regression loss
+  
+  # LoRA configuration for parameter-efficient fine-tuning
+  use_lora: true               # Enable LoRA adapters
+  lora_r: 32                    # LoRA rank (4, 8, 16, 32)
+  lora_alpha: 64               # LoRA scaling factor (usually 2*r)
+  lora_dropout: 0.05           # Dropout for LoRA layers
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  
+  # Vision tower freezing
+  freeze_vision_tower: true    # Freeze vision encoder to save memory
+  
+  # Attention optimization
+  use_flash_attention_2: true  # Use FlashAttention-2 for faster and more memory-efficient attention
 
 
 # ============================================================================
 # Data Configuration
 # ============================================================================
 data:
-  # Root directory containing all data files
-  data_root: "data/"
-  
-  # Path to action data JSONL file (relative to data_root)
-  # Format: summary_full.jsonl with trajectory, actions, subtask_sequence
-  action_data_path: "trajectory_data/R2R_back/summary_full.jsonl"
-  
-  # Path to CoT data JSONL file (relative to data_root)
-  # Format: cot_dataset_*.jsonl with frame_key, instruction, answer (reasoning)
-  cot_data_path: "cot_dataset/cot_dataset_answer.jsonl"
-  
+  # Root directory for images
+  image_root: "/mnt/nvme/swx/dataset/R2R"
+
+  # Path to action prediction data (JSONL, relative to data_root)
+  action_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/R2R_back/summary_full.jsonl"
+  # Path to Chain-of-Thought (CoT) data (JSONL, relative to data_root)
+  cot_data_path: "/mnt/swx/ThinkVLN/data/cot_dataset/cot_dataset_answer.jsonl"
   
   # Validation split ratio
   # 0.1 means 10% of data will be used for validation
@@ -54,17 +63,17 @@ data:
 # ============================================================================
 training:
   # Output directory for checkpoints and logs
-  output_dir: "checkpoints/thinkvln_actor"
+  output_dir: "outputs/thinkvln_actor"
   
   # Training duration
   num_train_epochs: 3
   max_steps: -1  # -1 means use num_train_epochs instead
   
   # Batch size and gradient accumulation
-  per_device_train_batch_size: 2      # Batch size per GPU
-  gradient_accumulation_steps: 8      # Accumulate gradients over N steps
+  per_device_train_batch_size: 24      # Batch size per GPU (increased with LoRA)
+  gradient_accumulation_steps: 4      # Accumulate gradients over N steps
   # Effective batch size = per_device_batch_size × gradient_accumulation_steps × num_gpus
-  # Example: 2 × 8 × 8 = 128 (for 8 GPUs)
+  # Example: 2 × 4 × 8 = 64 (for 8 GPUs)
   
   # Optimizer settings
   learning_rate: 2.0e-5
@@ -80,7 +89,7 @@ training:
   fp16: false         # Use float16 (for V100)
   
   # Memory optimization
-  gradient_checkpointing: true  # Enable to save memory
+  gradient_checkpointing: false  # Enable to save memory
   
   # Logging and checkpointing
   logging_steps: 10
@@ -95,10 +104,10 @@ training:
   
   # Distributed training
   # For DeepSpeed ZeRO-2 or ZeRO-3
-  deepspeed: "scripts/zero2.json"
+  deepspeed: null
   
   # Data loading
-  dataloader_num_workers: 4
+  dataloader_num_workers: 4  # Set to 0 to avoid multiprocessing issues with large dataset
   dataloader_pin_memory: true
   
   # Reproducibility
@@ -146,24 +155,40 @@ logging:
 # Hardware Recommendations
 # ============================================================================
 #
+# With LoRA + Frozen Vision Tower + FlashAttention-2 (recommended, 60-70% memory reduction):
+# For 8x A100 (80GB):
+#   - per_device_train_batch_size: 8
+#   - gradient_accumulation_steps: 2
+#   - bf16: true
+#   - use_lora: true, lora_r: 16
+#   - use_flash_attention_2: true
+#
+# For 8x V100 (32GB):
+#   - per_device_train_batch_size: 4
+#   - gradient_accumulation_steps: 4
+#   - fp16: true (FlashAttention-2 requires Ampere+ for best performance)
+#   - use_lora: true, lora_r: 8
+#   - gradient_checkpointing: true
+#
+# For 8x RTX 3090/4090 (24GB):
+#   - per_device_train_batch_size: 2
+#   - gradient_accumulation_steps: 8
+#   - bf16: true (if supported)
+#   - use_lora: true, lora_r: 8
+#   - use_flash_attention_2: true
+#   - gradient_checkpointing: true
+#
+# Without LoRA (full fine-tuning, higher memory):
 # For 8x A100 (80GB):
 #   - per_device_train_batch_size: 4
 #   - gradient_accumulation_steps: 4
-#   - bf16: true
-#   - gradient_checkpointing: false (optional, more memory available)
+#   - freeze_vision_tower: true (recommended)
 #
 # For 8x V100 (32GB):
 #   - per_device_train_batch_size: 2
 #   - gradient_accumulation_steps: 8
-#   - fp16: true
-#   - gradient_checkpointing: true (recommended)
-#   - deepspeed: scripts/zero3.json (for larger models)
-#
-# For 8x RTX 3090/4090 (24GB):
-#   - per_device_train_batch_size: 1
-#   - gradient_accumulation_steps: 16
-#   - bf16: true (if supported)
 #   - gradient_checkpointing: true
+#   - freeze_vision_tower: true
 #   - deepspeed: scripts/zero3.json
 
 
@@ -191,3 +216,15 @@ logging:
 #    - Set val_split_ratio > 0 to enable validation
 #    - Validation metrics will be logged to WandB
 #    - Best model will be saved based on validation loss
+#
+# 5. FlashAttention-2 Installation (if not already installed):
+#    - pip install flash-attn --no-build-isolation
+#    - Requires CUDA 11.6+ and Ampere+ GPU (A100, RTX 3090/4090, etc.)
+#    - Provides 2-3x speedup and 30% memory reduction for attention
+#
+# 6. Memory Optimization Summary:
+#    - LoRA (r=8): Reduces trainable params by 99.6% (8.7M vs 2.1B)
+#    - Frozen Vision Tower: Saves ~40% of gradient memory
+#    - FlashAttention-2: Saves ~30% attention memory, 2-3x faster
+#    - Gradient Checkpointing: Trades compute for memory (25% slower, 50% less memory)
+#    - Combined: ~70% total memory reduction with 10-15% training speedup

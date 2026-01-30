@@ -1,0 +1,662 @@
+  0%|                                                                                                                                                                       | 0/71375 [00:00<?, ?it/s]/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+  warnings.warn(
+`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+  0%|                                                                                                                                                            | 3/71375 [00:06<39:19:27,  1.98s/it]
+{'train/action_loss': 1.265625, 'train/progress_loss': 0.044921875, 'epoch': 0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.3515625, 'train/progress_loss': 5056.0, 'epoch': 0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.71875, 'train/progress_loss': 5056.0, 'epoch': 0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.0859375, 'train/progress_loss': 5056.0, 'epoch': 0}
+{'loss': 3793.3667, 'grad_norm': 500.8190002441406, 'learning_rate': 4e-08, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'loss': 1546.3448, 'grad_norm': 336.96160888671875, 'learning_rate': 4.0000000000000003e-07, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.34375, 'train/progress_loss': 0.11181640625, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.3203125, 'train/progress_loss': 0.1640625, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.2734375, 'train/progress_loss': 0.0242919921875, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.53125, 'train/progress_loss': 0.1650390625, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+  0%|                                                                                                                                                           | 15/71375 [00:26<34:01:52,  1.72s/it]
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'loss': 1139.1104, 'grad_norm': 178.57630920410156, 'learning_rate': 8.000000000000001e-07, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.34375, 'train/progress_loss': 0.267578125, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.5703125, 'train/progress_loss': 0.10888671875, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.1875, 'train/progress_loss': 0.0191650390625, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.5390625, 'train/progress_loss': 0.10498046875, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'loss': 1391.9239, 'grad_norm': 345.4329833984375, 'learning_rate': 1.2000000000000002e-06, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.2109375, 'train/progress_loss': 0.0208740234375, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.5859375, 'train/progress_loss': 0.2158203125, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.3125, 'train/progress_loss': 0.10791015625, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.171875, 'train/progress_loss': 0.130859375, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'loss': 1518.3666, 'grad_norm': 168.44976806640625, 'learning_rate': 1.6000000000000001e-06, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.4296875, 'train/progress_loss': 5056.0, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.21875, 'train/progress_loss': 5056.0, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.53125, 'train/progress_loss': 0.091796875, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.4453125, 'train/progress_loss': 5056.0, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'loss': 1391.9738, 'grad_norm': 168.63827514648438, 'learning_rate': 2.0000000000000003e-06, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.65625, 'train/progress_loss': 0.27734375, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.140625, 'train/progress_loss': 5056.0, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.453125, 'train/progress_loss': 0.107421875, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+{'train/action_loss': 1.265625, 'train/progress_loss': 0.0098876953125, 'epoch': 0.0}
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+pixel_values shape: torch.Size([2400, 1536])
+image_grid_thw shape: torch.Size([2, 3])
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 665, in <module>
+    main()
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 632, in main
+    train_result = trainer.train()
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2325, in train
+    return inner_training_loop(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2674, in _inner_training_loop
+    tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 4020, in training_step
+    loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
+  File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 225, in compute_loss
+    outputs = model(**inputs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/utils/nvtx.py", line 20, in wrapped_fn
+    ret_val = func(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/engine.py", line 2054, in forward
+    loss = self.module(*inputs, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1879, in _call_impl
+    return inner()
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1827, in inner
+    result = forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/peft_model.py", line 1850, in forward
+    return self.base_model(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/tuners/tuners_utils.py", line 222, in forward
+    return self.model.forward(*args, **kwargs)
+  File "/mnt/swx/ThinkVLN/thinkvln/models/thinkvln_actor.py", line 93, in forward
+    outputs = self.model(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/generic.py", line 1064, in wrapper
+    outputs = func(self, *args, **kwargs)
+  File "/mnt/swx/ThinkVLN/thinkvln/models/thinkvln_model.py", line 173, in forward
+    attention_mask=attention_mask,
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/generic.py", line 1064, in wrapper
+    outputs = func(self, *args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/models/qwen3_vl/modeling_qwen3_vl.py", line 850, in forward
+    layer_outputs = decoder_layer(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/modeling_layers.py", line 93, in __call__
+    return self._gradient_checkpointing_func(partial(super().__call__, **kwargs), *args)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/_compile.py", line 53, in inner
+    return disable_fn(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/_dynamo/eval_frame.py", line 929, in _fn
+    return fn(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/checkpoint.py", line 488, in checkpoint
+    return CheckpointFunction.apply(function, preserve, *args)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/autograd/function.py", line 576, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/checkpoint.py", line 262, in forward
+    outputs = run_function(*args)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/deprecation.py", line 172, in wrapped_func
+    return func(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/models/qwen3_vl/modeling_qwen3_vl.py", line 502, in forward
+    hidden_states, _ = self.self_attn(
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/deprecation.py", line 172, in wrapped_func
+    return func(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/models/qwen3_vl/modeling_qwen3_vl.py", line 456, in forward
+    attn_output = self.o_proj(attn_output)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/tuners/lora/layer.py", line 771, in forward
+    result = result + lora_B(lora_A(dropout(x))) * scaling
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/linear.py", line 125, in forward
+    return F.linear(input, self.weight, self.bias)
+  File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1949, in __getattr__
+    def __getattr__(self, name: str) -> Union[Tensor, "Module"]:
+KeyboardInterrupt
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 665, in <module>
+[rank0]:     main()
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 632, in main
+[rank0]:     train_result = trainer.train()
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2325, in train
+[rank0]:     return inner_training_loop(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 2674, in _inner_training_loop
+[rank0]:     tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/trainer.py", line 4020, in training_step
+[rank0]:     loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/engine/sft_trainer.py", line 225, in compute_loss
+[rank0]:     outputs = model(**inputs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/utils/nvtx.py", line 20, in wrapped_fn
+[rank0]:     ret_val = func(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/deepspeed/runtime/engine.py", line 2054, in forward
+[rank0]:     loss = self.module(*inputs, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1879, in _call_impl
+[rank0]:     return inner()
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1827, in inner
+[rank0]:     result = forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/peft_model.py", line 1850, in forward
+[rank0]:     return self.base_model(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/tuners/tuners_utils.py", line 222, in forward
+[rank0]:     return self.model.forward(*args, **kwargs)
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/models/thinkvln_actor.py", line 93, in forward
+[rank0]:     outputs = self.model(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/generic.py", line 1064, in wrapper
+[rank0]:     outputs = func(self, *args, **kwargs)
+[rank0]:   File "/mnt/swx/ThinkVLN/thinkvln/models/thinkvln_model.py", line 173, in forward
+[rank0]:     attention_mask=attention_mask,
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/generic.py", line 1064, in wrapper
+[rank0]:     outputs = func(self, *args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/models/qwen3_vl/modeling_qwen3_vl.py", line 850, in forward
+[rank0]:     layer_outputs = decoder_layer(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/modeling_layers.py", line 93, in __call__
+[rank0]:     return self._gradient_checkpointing_func(partial(super().__call__, **kwargs), *args)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/_compile.py", line 53, in inner
+[rank0]:     return disable_fn(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/_dynamo/eval_frame.py", line 929, in _fn
+[rank0]:     return fn(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/checkpoint.py", line 488, in checkpoint
+[rank0]:     return CheckpointFunction.apply(function, preserve, *args)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/autograd/function.py", line 576, in apply
+[rank0]:     return super().apply(*args, **kwargs)  # type: ignore[misc]
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/utils/checkpoint.py", line 262, in forward
+[rank0]:     outputs = run_function(*args)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/deprecation.py", line 172, in wrapped_func
+[rank0]:     return func(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/models/qwen3_vl/modeling_qwen3_vl.py", line 502, in forward
+[rank0]:     hidden_states, _ = self.self_attn(
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/utils/deprecation.py", line 172, in wrapped_func
+[rank0]:     return func(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/transformers/models/qwen3_vl/modeling_qwen3_vl.py", line 456, in forward
+[rank0]:     attn_output = self.o_proj(attn_output)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/peft/tuners/lora/layer.py", line 771, in forward
+[rank0]:     result = result + lora_B(lora_A(dropout(x))) * scaling
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/linear.py", line 125, in forward
+[rank0]:     return F.linear(input, self.weight, self.bias)
+[rank0]:   File "/home/swx/miniforge3/envs/vln/lib/python3.9/site-packages/torch/nn/modules/module.py", line 1949, in __getattr__
+[rank0]:     def __getattr__(self, name: str) -> Union[Tensor, "Module"]:
+[rank0]: KeyboardInterrupt

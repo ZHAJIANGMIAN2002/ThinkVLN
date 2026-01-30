@@ -38,7 +38,7 @@ PLAN: [Break down the instruction into a sequence of numbered, high-level sub-ta
 """
 
 
-# # Initialize OpenAI client
+# Initialize OpenAI client
 # client = OpenAI(
 #     base_url="http://localhost:11451/v1",
 #     api_key="EMPTY"
