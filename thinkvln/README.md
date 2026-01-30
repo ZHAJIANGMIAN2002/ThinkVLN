@@ -7,103 +7,92 @@ Vision-Language Navigation model with Chain-of-Thought reasoning capabilities.
 ```
 thinkvln/
 ├── models/              # Model architectures
-│   ├── thinkvln_sequential.py    # Main ThinkVLN model implementation
-│   └── layers/                   # Custom neural network layers
-├── engine/              # Training & evaluation infrastructure
-│   ├── env_eval.py              # Habitat environment evaluation
-│   └── openloop_eval.py         # Open-loop evaluation
-├── data/                # Data processing & datasets
-│   ├── dataset.py               # PyTorch dataset classes
-│   ├── preprocessing/           # Data preprocessing scripts
-│   └── generation/              # CoT and trajectory data generation
-├── tools/               # Utility tools & scripts
-│   ├── inference.py             # Inference utilities
-│   ├── web_refinement/          # Web-based annotation tool
-│   └── dev_scripts/             # Original development scripts (for reference)
-├── habitat_extensions/  # Habitat simulator extensions
-│   ├── maps.py                  # Custom map utilities
-│   └── measures.py              # Custom evaluation metrics
-├── scripts/             # Training/evaluation entry points
-│   └── train.py                 # Main training script
-├── tests/               # Unit tests
-└── datasets/            # Dataset storage (gitignored)
+│   ├── thinkvln_model.py       # Base VLN model (ThinkVLNForConditionalGeneration)
+│   ├── thinkvln_actor.py      # Actor with action/progress heads
+│   ├── thinkvln_config.py     # Model config
+│   └── actor_config.py        # Actor training config
+├── engine/              # Training & inference
+│   ├── sft_trainer.py         # SFT training entry point
+│   └── inference.py           # Model loading and inference utilities
+├── eval/                 # Evaluation scripts
+│   ├── env_eval.py            # Habitat simulator evaluation
+│   └── openloop_eval.py       # Open-loop evaluation
+├── dataset/              # Dataset classes
+│   └── dataset.py             # ThinkVLNDataset for mixed action + CoT
+├── datagen/              # Data generation & preprocessing
+│   ├── generation/            # CoT, subtask, trajectory generation
+│   └── preprocessing/         # SFT dataset creation, frame extraction
+├── tools/                # Utilities
+│   ├── dataset_utils.py       # Data loading helpers
+│   ├── web_refinement/        # Web-based annotation tool
+│   └── dev_scripts/           # Reference scripts
+├── habitat_extensions/   # Habitat simulator extensions
+│   ├── maps.py                # Map utilities
+│   └── measures.py            # Custom evaluation metrics
+└── tests/                # Unit tests
 ```
 
 ## Quick Start
 
 ### Training
 ```bash
-python scripts/train.py \
-    --model_path ./models/qwen3vl-2 \
-    --dataset_path ./datasets/train.json \
-    --output_dir ./outputs \
-    --batch_size 4 \
-    --num_epochs 3
+# Single GPU
+python thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
+
+# Multi-GPU (DeepSpeed)
+torchrun --nproc_per_node=4 thinkvln/engine/sft_trainer.py --config config/sft_training.yaml
 ```
 
 ### Evaluation
 ```bash
-# Environment evaluation
-python -m thinkvln.engine.env_eval \
-    --model_path ./outputs/checkpoint-epoch-3 \
-    --config_path ./configs/eval.yaml
+# Habitat environment evaluation
+python -m thinkvln.eval.env_eval --config_path <path> --model_path <path>
 
 # Open-loop evaluation
-python -m thinkvln.engine.openloop_eval \
-    --model_path ./outputs/checkpoint-epoch-3 \
-    --dataset_path ./datasets/test.json
+python -m thinkvln.eval.openloop_eval --model_path <path> --dataset_path <path>
 ```
 
 ### Data Generation
 ```bash
-# Generate CoT data
-python -m thinkvln.data.generation.cot_generation \
-    --input_path ./raw_data/trajectories.json \
-    --output_path ./datasets/cot_data.jsonl
+# CoT generation
+python -m thinkvln.datagen.generation.cot_generation --input_path <path> --output_path <path>
 
-# Generate subtask data
-python -m thinkvln.data.generation.subtask_determination \
-    --input_path ./raw_data/instructions.json \
-    --output_path ./datasets/subtasks.jsonl
+# Subtask determination
+python -m thinkvln.datagen.generation.subtask_determination --input_path <path> --output_path <path>
 ```
 
 ## Key Components
 
 ### Model (`thinkvln.models`)
-- **ThinkVLNModel**: Sequential VLN model with action head for navigation
-- Based on Qwen3-VL with custom action prediction layer
+- **ThinkVLNModel / ThinkVLNForConditionalGeneration**: Base VLN model based on Qwen3-VL
+- **ThinkVLNActor**: Actor with ActionClassificationHead and ProgressRegressionHead for navigation
+- Supports LoRA, vision tower freezing, FlashAttention-2
 
 ### Engine (`thinkvln.engine`)
-- **env_eval.py**: Evaluate model in Habitat simulator environment
-- **openloop_eval.py**: Evaluate model predictions without environment interaction
+- **sft_trainer.py**: SFT training with mixed action and CoT data
+- **inference.py**: Model loading, single/batch inference utilities
 
-### Data (`thinkvln.data`)
-- **dataset.py**: PyTorch Dataset classes for training
-- **preprocessing/**: Scripts to prepare SFT datasets, extract frames
-- **generation/**: Scripts to generate CoT reasoning, subtasks, and trajectories
+### Eval (`thinkvln.eval`)
+- **env_eval.py**: Evaluate in Habitat simulator
+- **openloop_eval.py**: Evaluate predictions without environment
 
-### Tools (`thinkvln.tools`)
-- **inference.py**: Inference utilities and helpers
-- **web_refinement/**: Web interface for manual data refinement
-- **deploy/**: Production deployment scripts
+### Dataset (`thinkvln.dataset`)
+- **ThinkVLNDataset**: Mixed action + CoT samples, JSONL format
 
-## Development
+### Datagen (`thinkvln.datagen`)
+- **generation/**: CoT reasoning, subtask determination, trajectory generation
+- **preprocessing/**: SFT dataset creation, frame extraction
 
-### Adding New Models
-Place new model architectures in `thinkvln/models/` and register in `__init__.py`.
+## Data Format
 
-### Adding Tests
-Add test files to `thinkvln/tests/` following pytest conventions.
-
-### Data Format
-Training data should be in JSON format with the following structure:
+**Action data (JSONL):**
 ```json
-{
-  "messages": [...],
-  "images": ["path/to/image.jpg"],
-  "action": 0,
-  "action_label": 0
-}
+{"episode_key": "...", "instruction": "...", "plan": [...], "actions": [...], "subtask_sequence": [...], "num_frames": N}
+```
+
+**CoT data (JSONL):**
+```json
+{"frame_key": "...", "episode_key": "...", "instruction": "...", "plan": [...], "answer": "..."}
 ```
 
 ## License
