@@ -26,6 +26,9 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+# Disable tokenizers parallelism warning in multiprocessing
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import torch
 import logging
 import yaml
@@ -95,7 +98,11 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         default=1.0,
         metadata={"help": "Weight for progress regression loss"}
     )
-    
+    use_huber_loss_for_progress: bool = field(
+        default=False,
+        metadata={"help": "Use Huber (SmoothL1) instead of MSE for progress regression, more robust to outliers"}
+    )
+
     # LoRA configuration
     use_lora: bool = field(
         default=False,
@@ -148,11 +155,19 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         default=0.1,
         metadata={"help": "Ratio of data to use for validation (0.1 = 10% validation)"}
     )
+    sample_ratio: float = field(
+        default=1.0,
+        metadata={"help": "Ratio of full dataset to use for training (1.0 = all data, 0.1 = 10%). Val split applied after subsampling."}
+    )
     
     # Training-specific
     gradient_checkpointing: bool = field(
         default=True,
         metadata={"help": "Enable gradient checkpointing to save memory"}
+    )
+    resume_from_checkpoint: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to checkpoint directory to resume training from (e.g., outputs/actor/checkpoint-1000)"}
     )
     
     def __post_init__(self):
@@ -166,6 +181,8 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         # Validate validation split
         if not 0.0 <= self.val_split_ratio < 1.0:
             raise ValueError(f"val_split_ratio must be between 0 and 1, got {self.val_split_ratio}")
+        if not 0.0 < self.sample_ratio <= 1.0:
+            raise ValueError(f"sample_ratio must be in (0, 1], got {self.sample_ratio}")
         
         # Validate loss weights
         if self.action_loss_weight < 0 or self.progress_loss_weight < 0:
@@ -305,8 +322,8 @@ class ThinkVLNSFTTrainer(Trainer):
         
         Overrides parent method to also save loss component history.
         """
-        # Call parent save
-        super()._save_checkpoint(model, trial, metrics)
+        # Call parent save (metrics not supported in parent signature)
+        super()._save_checkpoint(model, trial)
         
         # Save loss history
         if self.args.should_save:
@@ -322,6 +339,10 @@ def load_model(args: ThinkVLNTrainingArguments):
     """
     Load ThinkVLNActor model from pretrained Qwen3VL with optional LoRA.
     
+    Supports loading from:
+    1. Base Qwen3VL model (fresh training)
+    2. Previously trained LoRA adapter (resume with pretrained weights)
+    
     Args:
         args: Training arguments containing model configuration
     
@@ -333,12 +354,31 @@ def load_model(args: ThinkVLNTrainingArguments):
     
     logger.info(f"Loading model from {args.model_name_or_path}")
     
+    # Check if model_name_or_path is a LoRA adapter checkpoint
+    adapter_config_path = os.path.join(args.model_name_or_path, "adapter_config.json")
+    is_lora_checkpoint = os.path.exists(adapter_config_path)
+    
+    if is_lora_checkpoint:
+        logger.info(f"Detected LoRA adapter checkpoint at {args.model_name_or_path}")
+        # Load adapter config to get base model path
+        import json
+        with open(adapter_config_path, 'r') as f:
+            adapter_config_dict = json.load(f)
+        base_model_path = adapter_config_dict.get("base_model_name_or_path")
+        if not base_model_path:
+            raise ValueError(f"adapter_config.json missing base_model_name_or_path")
+        logger.info(f"Loading base model from {base_model_path}")
+        actual_model_path = base_model_path
+    else:
+        actual_model_path = args.model_name_or_path
+    
     # Create actor configuration
     actor_config = ThinkVLNActorConfig(
         num_query_tokens=args.num_query_tokens,
         num_action_classes=args.num_action_classes,
         action_loss_weight=args.action_loss_weight,
         progress_loss_weight=args.progress_loss_weight,
+        use_huber_loss_for_progress=getattr(args, 'use_huber_loss_for_progress', False),
     )
     
     logger.info(f"Actor config: {actor_config}")
@@ -355,21 +395,30 @@ def load_model(args: ThinkVLNTrainingArguments):
         logger.info("Enabling FlashAttention-2 for efficient attention computation")
         model_kwargs["attn_implementation"] = "flash_attention_2"
     
-    # Load model from pretrained Qwen3VL
+    # Load base model
     model = ThinkVLNActor.from_pretrained(
-        args.model_name_or_path,
+        actual_model_path,
         **model_kwargs
     )
+    
+    # If loading from LoRA checkpoint, load the adapter weights
+    if is_lora_checkpoint:
+        from peft import PeftModel
+        logger.info(f"Loading LoRA adapter weights from {args.model_name_or_path}")
+        model = PeftModel.from_pretrained(model, args.model_name_or_path)
+        logger.info("LoRA adapter loaded successfully")
     
     # Freeze vision tower if requested (do this FIRST)
     if args.freeze_vision_tower:
         logger.info("Freezing vision tower")
-        for param in model.model.visual.parameters():
+        # Access visual encoder through base_model if it's a PEFT model
+        visual_module = model.base_model.model.visual if is_lora_checkpoint else model.model.visual
+        for param in visual_module.parameters():
             param.requires_grad = False
         logger.info("Vision tower frozen")
     
-    # Apply LoRA if enabled
-    if args.use_lora:
+    # Apply LoRA if enabled (skip if already loaded from LoRA checkpoint)
+    if args.use_lora and not is_lora_checkpoint:
         from peft import LoraConfig, get_peft_model
         
         logger.info("Applying LoRA configuration")
@@ -394,11 +443,16 @@ def load_model(args: ThinkVLNTrainingArguments):
         model = get_peft_model(model, lora_config)
         logger.info(f"LoRA applied with r={args.lora_r}, alpha={args.lora_alpha}")
         model.print_trainable_parameters()
+    elif is_lora_checkpoint:
+        logger.info("Continuing training with loaded LoRA adapter")
+        model.print_trainable_parameters()
     
     # Enable gradient checkpointing AFTER applying LoRA
     if args.gradient_checkpointing:
         logger.info("Enabling gradient checkpointing")
-        if args.use_lora:
+        # Check if model is a PEFT model (either freshly applied or loaded from checkpoint)
+        is_peft_model = args.use_lora or is_lora_checkpoint
+        if is_peft_model:
             # For PEFT models, call on the base model
             model.base_model.gradient_checkpointing_enable()
             # Enable input gradients to allow backprop through frozen layers
@@ -417,10 +471,101 @@ def load_model(args: ThinkVLNTrainingArguments):
     # Debug: Print trainable parameter names
     trainable_params = [name for name, param in model.named_parameters() if param.requires_grad]
     logger.info(f"Number of trainable parameter tensors: {len(trainable_params)}")
-    if args.use_lora:
+    if args.use_lora or is_lora_checkpoint:
         logger.info(f"First few trainable params: {trainable_params[:10]}")
     
     return model
+
+
+def load_lora_checkpoint(
+    base_model_path: str,
+    adapter_path: str,
+    actor_config=None,
+    use_flash_attention_2: bool = False,
+    **kwargs
+):
+    """
+    Load LoRA checkpoint for inference. Base model + adapter (includes actor heads from modules_to_save).
+
+    Args:
+        base_model_path: Path to pretrained Qwen3VL (base model)
+        adapter_path: Path to saved adapter (output_dir from training)
+        actor_config: ThinkVLNActorConfig, or None to use defaults
+        use_flash_attention_2: Enable FlashAttention-2
+        **kwargs: Passed to from_pretrained
+
+    Returns:
+        PeftModel wrapping ThinkVLNActor with adapter loaded
+    """
+    from thinkvln.models.thinkvln_actor import ThinkVLNActor
+    from thinkvln.models.actor_config import ThinkVLNActorConfig
+    from peft import PeftModel
+
+    actor_config = actor_config or ThinkVLNActorConfig()
+    model_kwargs = {"actor_config": actor_config, "trust_remote_code": True, **kwargs}
+    if use_flash_attention_2:
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+
+    base_model = ThinkVLNActor.from_pretrained(base_model_path, **model_kwargs)
+    model = PeftModel.from_pretrained(base_model, adapter_path)
+    return model
+
+
+def verify_lora_save(output_dir: str, expected_modules: list = None):
+    """Verify LoRA save contains adapter and modules_to_save weights."""
+    import json
+    import time
+    
+    expected_modules = expected_modules or ["query_embeddings", "shared_projector", "action_head", "progress_head"]
+    adapter_file = os.path.join(output_dir, "adapter_model.safetensors")
+    if not os.path.exists(adapter_file):
+        adapter_file = os.path.join(output_dir, "adapter_model.bin")
+    config_file = os.path.join(output_dir, "adapter_config.json")
+
+    if not os.path.exists(adapter_file):
+        logger.warning(f"LoRA adapter file not found: {adapter_file}")
+        return False
+    if not os.path.exists(config_file):
+        logger.warning(f"adapter_config.json not found in {output_dir}")
+        return False
+    
+    # Check if config file is empty (may still be writing)
+    file_size = os.path.getsize(config_file)
+    if file_size == 0:
+        logger.warning(f"adapter_config.json is empty, may still be writing")
+        # Wait briefly and check again
+        time.sleep(0.5)
+        file_size = os.path.getsize(config_file)
+        if file_size == 0:
+            logger.warning("adapter_config.json still empty after waiting")
+            return False
+
+    try:
+        with open(config_file, 'r') as f:
+            content = f.read()
+            if not content.strip():
+                logger.warning("adapter_config.json contains no data")
+                return False
+            cfg = json.loads(content)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse adapter_config.json: {e}")
+        logger.warning("LoRA adapter files exist but config may be incomplete")
+        return False
+    except Exception as e:
+        logger.warning(f"Error reading adapter_config.json: {e}")
+        return False
+    
+    if "base_model_name_or_path" not in cfg:
+        logger.warning("adapter_config.json missing base_model_name_or_path")
+    else:
+        logger.info(f"Adapter base_model: {cfg['base_model_name_or_path']}")
+    if "modules_to_save" in cfg:
+        saved = set(cfg["modules_to_save"])
+        for m in expected_modules:
+            if m not in saved:
+                logger.warning(f"modules_to_save missing expected: {m}")
+    logger.info(f"LoRA checkpoint verified: {adapter_file}")
+    return True
 
 
 def create_datasets(args: ThinkVLNTrainingArguments, processor):
@@ -440,39 +585,46 @@ def create_datasets(args: ThinkVLNTrainingArguments, processor):
         eval_dataset is None if val_split_ratio is 0
     """
     from thinkvln.dataset.dataset import ThinkVLNDataset, ThinkVLNDataCollator
-    from torch.utils.data import random_split
+    from torch.utils.data import random_split, Subset
     
     logger.info("Creating datasets")
     logger.info(f"Image root: {args.image_root}")
     logger.info(f"Action data: {args.action_data_path}")
     logger.info(f"CoT data: {args.cot_data_path}")
-    logger.info(f"Validation split ratio: {args.val_split_ratio}")
+    logger.info(f"Sample ratio: {args.sample_ratio}, Val split ratio: {args.val_split_ratio}")
     
-    # Create full dataset
     full_dataset = ThinkVLNDataset(
         action_data_path=args.action_data_path,
-        cot_data_path=args.cot_data_path, 
+        cot_data_path=args.cot_data_path,
         image_root=args.image_root,
     )
-    
     logger.info(f"Full dataset created with {len(full_dataset)} samples")
+    
+    # Subsample by sample_ratio if < 1.0
+    if args.sample_ratio < 1.0:
+        n_total = len(full_dataset)
+        n_use = max(1, int(n_total * args.sample_ratio))
+        perm = torch.randperm(n_total, generator=torch.Generator().manual_seed(args.seed))
+        indices = perm[:n_use].tolist()
+        dataset_for_split = Subset(full_dataset, indices)
+        logger.info(f"Subsampled to {n_use} samples ({args.sample_ratio:.2%} of {n_total})")
+    else:
+        dataset_for_split = full_dataset
     
     # Split into train and validation if val_split_ratio > 0
     eval_dataset = None
     if args.val_split_ratio > 0:
-        val_size = int(len(full_dataset) * args.val_split_ratio)
-        train_size = len(full_dataset) - val_size
-        
-        # Use random_split for train/val split
+        n_split = len(dataset_for_split)
+        val_size = int(n_split * args.val_split_ratio)
+        train_size = n_split - val_size
         train_dataset, eval_dataset = random_split(
-            full_dataset,
+            dataset_for_split,
             [train_size, val_size],
             generator=torch.Generator().manual_seed(args.seed)
         )
-        
         logger.info(f"Split into {len(train_dataset)} train and {len(eval_dataset)} validation samples")
     else:
-        train_dataset = full_dataset
+        train_dataset = dataset_for_split
         logger.info("No validation split - using all data for training")
     
     # Create data collator
@@ -528,7 +680,8 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
         flat_config['num_action_classes'] = model_cfg.get('num_action_classes', 4)
         flat_config['action_loss_weight'] = model_cfg.get('action_loss_weight', 1.0)
         flat_config['progress_loss_weight'] = model_cfg.get('progress_loss_weight', 1.0)
-        
+        flat_config['use_huber_loss_for_progress'] = model_cfg.get('use_huber_loss_for_progress', False)
+
         # LoRA config
         flat_config['use_lora'] = model_cfg.get('use_lora', False)
         flat_config['lora_r'] = model_cfg.get('lora_r', 8)
@@ -555,6 +708,7 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
         flat_config['cot_data_path'] = data_cfg.get('cot_data_path')
 
         flat_config['val_split_ratio'] = data_cfg.get('val_split_ratio', 0.1)
+        flat_config['sample_ratio'] = data_cfg.get('sample_ratio', 1.0)
     
     # Training config
     if 'training' in config:
@@ -574,6 +728,7 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
             'bf16': train_cfg.get('bf16', True),
             'fp16': train_cfg.get('fp16', False),
             'gradient_checkpointing': train_cfg.get('gradient_checkpointing', True),
+            'resume_from_checkpoint': train_cfg.get('resume_from_checkpoint'),
             'logging_steps': train_cfg.get('logging_steps', 10),
             'logging_first_step': train_cfg.get('logging_first_step', True),
             'save_steps': train_cfg.get('save_steps', 1000),
@@ -584,7 +739,7 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
             'dataloader_pin_memory': train_cfg.get('dataloader_pin_memory', True),
             'seed': train_cfg.get('seed', 42),
             # Distributed training
-            'ddp_find_unused_parameters': train_cfg.get('ddp_find_unused_parameters', False),
+            'ddp_find_unused_parameters': train_cfg.get('ddp_find_unused_parameters', True),  # Required for HomogeneousBatchSampler
             'ddp_backend': train_cfg.get('ddp_backend', 'nccl'),
         })
     
@@ -676,9 +831,11 @@ def main():
     
     # Train
     logger.info("Starting training...")
+    if args.resume_from_checkpoint:
+        logger.info(f"Resuming from checkpoint: {args.resume_from_checkpoint}")
     logger.info("=" * 80)
     
-    train_result = trainer.train()
+    train_result = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     
     logger.info("=" * 80)
     logger.info("Training completed!")
@@ -688,9 +845,11 @@ def main():
     # Save final model
     logger.info(f"Saving final model to {args.output_dir}")
     if args.use_lora:
-        # For LoRA models, save the adapter weights
-        logger.info("Saving LoRA adapter weights")
+        logger.info("Saving LoRA adapter weights (includes actor heads from modules_to_save)")
         model.save_pretrained(args.output_dir)
+        # Only verify on main process to avoid race conditions
+        if args.should_save:
+            verify_lora_save(args.output_dir)
     else:
         # For full fine-tuning, save the complete model
         trainer.save_model(args.output_dir)
@@ -708,7 +867,21 @@ def main():
     logger.info("=" * 80)
     logger.info("All done!")
     logger.info("=" * 80)
+    
+    # Clean up distributed training
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("Training interrupted by user")
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+    except Exception as e:
+        logger.error(f"Training failed with error: {e}")
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        raise

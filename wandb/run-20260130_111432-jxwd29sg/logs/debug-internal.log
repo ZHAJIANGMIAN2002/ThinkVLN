@@ -4,3 +4,4 @@
 {"time":"2026-01-30T11:14:33.470273503Z","level":"INFO","msg":"stream: started","id":"jxwd29sg"}
 {"time":"2026-01-30T11:14:33.470313746Z","level":"INFO","msg":"writer: started","stream_id":"jxwd29sg"}
 {"time":"2026-01-30T11:14:33.47031553Z","level":"INFO","msg":"sender: started","stream_id":"jxwd29sg"}
+{"time":"2026-01-30T18:10:19.850437113Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/shiwenxiang86-shanghai-jiao-tong-university/huggingface/jxwd29sg/file_stream\": unexpected EOF"}

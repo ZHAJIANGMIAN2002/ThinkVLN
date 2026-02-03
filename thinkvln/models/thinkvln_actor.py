@@ -128,17 +128,21 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
             if progress_labels is not None:
                 valid_mask = progress_labels != -100.0
                 if valid_mask.any():
-                    progress_loss = nn.MSELoss()(
-                        progress_values[valid_mask], 
-                        progress_labels[valid_mask]
-                    )
+                    if getattr(self.actor_config, 'use_huber_loss_for_progress', False):
+                        progress_loss = nn.SmoothL1Loss()(
+                            progress_values[valid_mask], progress_labels[valid_mask]
+                        )
+                    else:
+                        progress_loss = nn.MSELoss()(
+                            progress_values[valid_mask], progress_labels[valid_mask]
+                        )
                 else:
                     progress_loss = None
             else:
                 progress_loss = None
-            
-            # Combine action and progress losses only
-            total_loss = torch.tensor(0.0, device=hidden_states.device)
+
+            # Combine action and progress losses (dtype for mixed precision)
+            total_loss = torch.tensor(0.0, device=hidden_states.device, dtype=hidden_states.dtype)
             if action_loss is not None:
                 total_loss += self.actor_config.action_loss_weight * action_loss
             if progress_loss is not None:
@@ -163,8 +167,8 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
             action_loss = None
             progress_loss = None
             
-            # Total loss is just LM loss
-            total_loss = lm_loss if lm_loss is not None else torch.tensor(0.0, device=hidden_states.device)
+            # Total loss is just LM loss (dtype for mixed precision)
+            total_loss = lm_loss if lm_loss is not None else torch.tensor(0.0, device=hidden_states.device, dtype=hidden_states.dtype)
         
         if not return_dict:
             return (total_loss, lm_logits, action_logits, progress_values, 
@@ -211,5 +215,18 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
         model.model.visual.load_state_dict(base_model.model.visual.state_dict())
         model.model.language_model.load_state_dict(base_model.model.language_model.state_dict())
         model.lm_head.load_state_dict(base_model.lm_head.state_dict())
+        
+        # Initialize query_embeddings with "Action" token embedding after loading weights
+        with torch.no_grad():
+            try:
+                from transformers import AutoTokenizer
+                tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
+                action_token_id = tokenizer.encode("Action", add_special_tokens=False)[0]
+            except:
+                action_token_id = 4227  # Fallback default for Qwen3VL
+            
+            embedding_layer = model.model.get_input_embeddings()
+            action_embedding = embedding_layer.weight[action_token_id]
+            model.query_embeddings.data.copy_(action_embedding.unsqueeze(0).repeat(actor_config.num_query_tokens, 1))
         
         return model

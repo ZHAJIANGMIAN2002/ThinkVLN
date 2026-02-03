@@ -24,8 +24,9 @@ model:
   
   # Loss weights for multi-task learning
   action_loss_weight: 1.0      # Weight for action classification loss
-  progress_loss_weight: 1.0    # Weight for progress regression loss
-  
+  progress_loss_weight: 10.0    # Weight for progress regression loss
+  use_huber_loss_for_progress: true  # Use Huber (SmoothL1) instead of MSE for progress, more robust to outliers
+
   # LoRA configuration for parameter-efficient fine-tuning
   use_lora: true               # Enable LoRA adapters
   lora_r: 32                    # LoRA rank (4, 8, 16, 32)
@@ -52,9 +53,11 @@ data:
   # Path to Chain-of-Thought (CoT) data (JSONL, relative to data_root)
   cot_data_path: "/mnt/swx/ThinkVLN/data/cot_dataset/cot_dataset_answer.jsonl"
   
-  # Validation split ratio
-  # 0.1 means 10% of data will be used for validation
-  # Set to 0 to disable validation split
+  # Sample ratio: proportion of full dataset to use (1.0 = all, 0.1 = 10%)
+  # Val split is applied after subsampling
+  sample_ratio: 0.5
+  # Validation split ratio (applied to subsampled data)
+  # 0.1 means 10% for validation. Set to 0 to disable
   val_split_ratio: 0.1
 
 
@@ -63,14 +66,20 @@ data:
 # ============================================================================
 training:
   # Output directory for checkpoints and logs
-  output_dir: "outputs/thinkvln_actor"
+  output_dir: "outputs/actor/lora/run-2-3-11-07"
+  
+  # Resume from checkpoint (optional)
+  # Set to checkpoint directory path to resume training
+  # Example: "outputs/thinkvln_actor/checkpoint-1000"
+  # Leave as null or comment out to start fresh training
+  resume_from_checkpoint: null
   
   # Training duration
-  num_train_epochs: 3
+  num_train_epochs: 2
   max_steps: -1  # -1 means use num_train_epochs instead
   
   # Batch size and gradient accumulation
-  per_device_train_batch_size: 8      # Batch size per GPU (increased with LoRA)
+  per_device_train_batch_size: 16      # Batch size per GPU (increased with LoRA)
   gradient_accumulation_steps: 8      # Accumulate gradients over N steps
   # Effective batch size = per_device_batch_size × gradient_accumulation_steps × num_gpus
   # Example: 2 × 4 × 8 = 64 (for 8 GPUs)
@@ -89,7 +98,7 @@ training:
   fp16: false         # Use float16 (for V100)
   
   # Memory optimization
-  gradient_checkpointing: false  # Enable to save memory
+  gradient_checkpointing: true  # Enable to save memory
   
   # Logging and checkpointing
   logging_steps: 10
@@ -104,17 +113,17 @@ training:
   
   # Distributed training
   # For DeepSpeed ZeRO-2 or ZeRO-3
-  deepspeed: null
+  deepspeed: "config/zero2.json"
   
   # Data loading
-  dataloader_num_workers: 4  # Set to 0 to avoid multiprocessing issues with large dataset
+  dataloader_num_workers: 0  # Set to 0 to avoid multiprocessing issues with large dataset
   dataloader_pin_memory: true
   
   # Reproducibility
   seed: 42
   
   # Distributed training settings
-  ddp_find_unused_parameters: false  # Set to true if you have unused parameters
+  ddp_find_unused_parameters: true   # Required for HomogeneousBatchSampler (action vs CoT batches use different params)
   ddp_backend: "nccl"                # Use "nccl" for NVIDIA GPUs, "gloo" for CPU
 
 

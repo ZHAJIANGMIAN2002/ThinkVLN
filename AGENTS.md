@@ -1,7 +1,7 @@
 # Project Instructions
 ## Documentations
 - You should not add markdown files to explain what you do every time you generated code. I'll ask you to generate documents
-- Never write something like Summary doc, Summary file.
+- Never write doc unless I have asked to.
 
 
 ## Code 
