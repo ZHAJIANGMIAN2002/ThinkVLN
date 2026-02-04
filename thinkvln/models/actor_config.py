@@ -30,6 +30,9 @@ class ThinkVLNActorConfig:
     action_loss_weight: float = 1.0
     progress_loss_weight: float = 1.0
     use_huber_loss_for_progress: bool = False  # Huber (SmoothL1) more robust than MSE for outliers
+    
+    # Training configuration
+    freeze_llm: bool = False  # Whether to freeze the LLM during training
 
     def get_action_token_names(self) -> List[str]:
         """DEPRECATED: Get list of action token names. Use learnable query embeddings instead."""

@@ -27,7 +27,12 @@ class ThinkVLNModel(Qwen3VLModel):
         self.config = config
         
         # Placeholder for query embeddings (will be set by parent class)
-        self.query_embeddings = None
+        # OLD: Single learnable query_embeddings
+        # self.query_embeddings = None
+        
+        # NEW: Two non-learnable zero query embeddings (action and progress)
+        self.action_query_embeddings = None
+        self.progress_query_embeddings = None
     
     @auto_docstring
     @check_model_inputs
@@ -81,20 +86,49 @@ class ThinkVLNModel(Qwen3VLModel):
             )
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
-        # Step 3: Process action query tokens (NEW - similar to vision processing)
-        if self.query_embeddings is not None and input_ids is not None:
-            action_query_mask = input_ids == self.config.action_query_token_id
-            if action_query_mask.any():
-                batch_size = input_ids.shape[0]
-                # Expand query embeddings to batch size and match dtype/device
-                query_embeds = self.query_embeddings.unsqueeze(0).expand(batch_size, -1, -1)
-                query_embeds = query_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-                # Flatten to match masked_scatter requirements
-                query_embeds_flat = query_embeds.reshape(-1, query_embeds.shape[-1])
-                # Create expanded mask for embeddings
-                action_query_mask_expanded = action_query_mask.unsqueeze(-1).expand_as(inputs_embeds)
-                # Inject query embeddings using masked_scatter (like vision tokens)
-                inputs_embeds = inputs_embeds.masked_scatter(action_query_mask_expanded, query_embeds_flat)
+        # Step 3: Process action and progress query tokens (NEW - two query types with zero embeddings)
+        # OLD: Single query type
+        # if self.query_embeddings is not None and input_ids is not None:
+        #     action_query_mask = input_ids == self.config.action_query_token_id
+        #     if action_query_mask.any():
+        #         batch_size = input_ids.shape[0]
+        #         query_embeds = self.query_embeddings.unsqueeze(0).expand(batch_size, -1, -1)
+        #         query_embeds = query_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+        #         query_embeds_flat = query_embeds.reshape(-1, query_embeds.shape[-1])
+        #         action_query_mask_expanded = action_query_mask.unsqueeze(-1).expand_as(inputs_embeds)
+        #         inputs_embeds = inputs_embeds.masked_scatter(action_query_mask_expanded, query_embeds_flat)
+        
+        # NEW: Two query types (action and progress) with non-learnable zero embeddings
+        if input_ids is not None:
+            batch_size = input_ids.shape[0]
+            
+            # Process action query tokens
+            if self.action_query_embeddings is not None:
+                action_query_mask = input_ids == self.config.action_query_token_id
+                if action_query_mask.any():
+                    # Expand action query embeddings to batch size and match dtype/device
+                    action_embeds = self.action_query_embeddings.unsqueeze(0).expand(batch_size, -1, -1)
+                    action_embeds = action_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                    # Flatten to match masked_scatter requirements
+                    action_embeds_flat = action_embeds.reshape(-1, action_embeds.shape[-1])
+                    # Create expanded mask for embeddings
+                    action_query_mask_expanded = action_query_mask.unsqueeze(-1).expand_as(inputs_embeds)
+                    # Inject action query embeddings using masked_scatter (like vision tokens)
+                    inputs_embeds = inputs_embeds.masked_scatter(action_query_mask_expanded, action_embeds_flat)
+            
+            # Process progress query tokens
+            if self.progress_query_embeddings is not None:
+                progress_query_mask = input_ids == self.config.progress_query_token_id
+                if progress_query_mask.any():
+                    # Expand progress query embeddings to batch size and match dtype/device
+                    progress_embeds = self.progress_query_embeddings.unsqueeze(0).expand(batch_size, -1, -1)
+                    progress_embeds = progress_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                    # Flatten to match masked_scatter requirements
+                    progress_embeds_flat = progress_embeds.reshape(-1, progress_embeds.shape[-1])
+                    # Create expanded mask for embeddings
+                    progress_query_mask_expanded = progress_query_mask.unsqueeze(-1).expand_as(inputs_embeds)
+                    # Inject progress query embeddings using masked_scatter (like vision tokens)
+                    inputs_embeds = inputs_embeds.masked_scatter(progress_query_mask_expanded, progress_embeds_flat)
 
         # Aggregate visual masks (like Qwen3VL lines 1154-1175)
         visual_pos_masks = None
@@ -203,13 +237,29 @@ class ThinkVLNForConditionalGeneration(Qwen3VLForConditionalGeneration):
         # LM head (same as Qwen3VL)
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
         
-        # Add learnable query embeddings parameter
+        # OLD: Single learnable query embeddings parameter
+        # hidden_size = config.text_config.hidden_size
+        # num_query_tokens = config.num_query_tokens
+        # self.query_embeddings = nn.Parameter(torch.randn(num_query_tokens, hidden_size) * 0.02)
+        # self.model.query_embeddings = self.query_embeddings
+        
+        # NEW: Two non-learnable zero query embeddings (action and progress)
         hidden_size = config.text_config.hidden_size
         num_query_tokens = config.num_query_tokens
-        self.query_embeddings = nn.Parameter(torch.randn(num_query_tokens, hidden_size) * 0.02)
+        
+        # Register as buffers (not parameters) so they're saved/loaded but not trained
+        self.register_buffer(
+            'action_query_embeddings', 
+            torch.zeros(num_query_tokens, hidden_size)
+        )
+        self.register_buffer(
+            'progress_query_embeddings', 
+            torch.zeros(num_query_tokens, hidden_size)
+        )
         
         # Share query embeddings with the model
-        self.model.query_embeddings = self.query_embeddings
+        self.model.action_query_embeddings = self.action_query_embeddings
+        self.model.progress_query_embeddings = self.progress_query_embeddings
         
         # Initialize weights
         self.post_init()

@@ -12,6 +12,7 @@ class ThinkVLNConfig(Qwen3VLConfig):
     def __init__(
         self,
         action_query_token_id: int = 151700,
+        progress_query_token_id: int = 151701,
         num_query_tokens: int = 4,
         **kwargs
     ):
@@ -20,9 +21,11 @@ class ThinkVLNConfig(Qwen3VLConfig):
         
         Args:
             action_query_token_id: Token ID for action query placeholder (default: 151700, an unused ID)
-            num_query_tokens: Number of learnable query tokens for action/progress prediction
+            progress_query_token_id: Token ID for progress query placeholder (default: 151701, an unused ID)
+            num_query_tokens: Number of query token pairs (each pair = action + progress) for prediction
             **kwargs: Additional arguments passed to Qwen3VLConfig
         """
         super().__init__(**kwargs)
         self.action_query_token_id = action_query_token_id
+        self.progress_query_token_id = progress_query_token_id
         self.num_query_tokens = num_query_tokens

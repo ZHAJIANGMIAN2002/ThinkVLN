@@ -131,6 +131,12 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         metadata={"help": "Freeze vision encoder to save memory"}
     )
     
+    # LLM configuration
+    freeze_llm: bool = field(
+        default=False,
+        metadata={"help": "Freeze language model to save memory and train only actor heads"}
+    )
+    
     # Attention optimization
     use_flash_attention_2: bool = field(
         default=False,
@@ -158,6 +164,16 @@ class ThinkVLNTrainingArguments(TrainingArguments):
     sample_ratio: float = field(
         default=1.0,
         metadata={"help": "Ratio of full dataset to use for training (1.0 = all data, 0.1 = 10%). Val split applied after subsampling."}
+    )
+    
+    # Custom evaluation metrics
+    progress_metric: str = field(
+        default="l1",
+        metadata={"help": "Metric for progress evaluation: 'l1', 'mse', or 'huber'"}
+    )
+    action_metric: str = field(
+        default="accuracy",
+        metadata={"help": "Metric for action evaluation: 'accuracy' or 'loss'"}
     )
     
     # Training-specific
@@ -213,6 +229,10 @@ class ThinkVLNSFTTrainer(Trainer):
             "progress_loss": [],
             "lm_loss": [],
         }
+        
+        # Store eval metric config
+        self.progress_metric = self.args.progress_metric
+        self.action_metric = self.args.action_metric
     
     def get_train_dataloader(self):
         """
@@ -316,6 +336,150 @@ class ThinkVLNSFTTrainer(Trainer):
         if metrics:
             self.log(metrics)
     
+    def evaluation_loop(
+        self,
+        dataloader,
+        description: str,
+        prediction_loss_only: Optional[bool] = None,
+        ignore_keys: Optional[list] = None,
+        metric_key_prefix: str = "eval",
+    ):
+        """
+        Custom evaluation loop that properly handles action and CoT samples.
+        """
+        import numpy as np
+        
+        model = self._wrap_model(self.model, training=False, dataloader=dataloader)
+        model.eval()
+        
+        # Initialize metric accumulators
+        all_losses = []
+        action_metrics = {"preds": [], "labels": [], "progress_preds": [], "progress_labels": []}
+        cot_metrics = {"losses": []}
+        
+        for step, inputs in enumerate(dataloader):
+            # Move inputs to device
+            inputs = self._prepare_inputs(inputs)
+            
+            with torch.no_grad():
+                outputs = model(**inputs)
+                loss = outputs.get("loss")
+                
+                if loss is not None:
+                    all_losses.append(loss.item())
+                
+                # Collect predictions based on sample type
+                if inputs.get("action_labels") is not None:
+                    # Action mode
+                    action_logits = outputs.get("action_logits")  # [batch, 4, num_classes]
+                    progress_preds = outputs.get("progress_preds")  # [batch, 4]
+                    action_labels = inputs.get("action_labels")  # [batch, 4]
+                    progress_labels = inputs.get("progress_labels")  # [batch, 4]
+                    
+                    if action_logits is not None:
+                        action_preds = torch.argmax(action_logits, dim=-1)  # [batch, 4]
+                        action_metrics["preds"].append(action_preds.cpu())
+                        action_metrics["labels"].append(action_labels.cpu())
+                    
+                    if progress_preds is not None and progress_labels is not None:
+                        action_metrics["progress_preds"].append(progress_preds.cpu())
+                        action_metrics["progress_labels"].append(progress_labels.cpu())
+                else:
+                    # CoT mode
+                    cot_loss = outputs.get("lm_loss")
+                    if cot_loss is not None:
+                        cot_metrics["losses"].append(cot_loss.item())
+        
+        # Compute metrics
+        metrics = {}
+        
+        # Overall loss
+        if all_losses:
+            metrics[f"{metric_key_prefix}_loss"] = np.mean(all_losses)
+        
+        # Action metrics
+        if action_metrics["preds"]:
+            action_preds = torch.cat(action_metrics["preds"], dim=0).numpy()  # [total_samples, 4]
+            action_labels = torch.cat(action_metrics["labels"], dim=0).numpy()  # [total_samples, 4]
+            
+            # Compute action accuracy
+            if self.action_metric == "accuracy":
+                valid_mask = action_labels != -100
+                if valid_mask.sum() > 0:
+                    correct = (action_preds == action_labels) & valid_mask
+                    accuracy = correct.sum() / valid_mask.sum()
+                    metrics[f"{metric_key_prefix}_action_accuracy"] = accuracy
+        
+        if action_metrics["progress_preds"]:
+            progress_preds = torch.cat(action_metrics["progress_preds"], dim=0).numpy()
+            progress_labels = torch.cat(action_metrics["progress_labels"], dim=0).numpy()
+            
+            # Compute progress metric
+            valid_mask = ~np.isnan(progress_labels) & ~np.isinf(progress_labels) & (progress_labels != -100)
+            if valid_mask.sum() > 0:
+                valid_preds = progress_preds[valid_mask]
+                valid_labels = progress_labels[valid_mask]
+                
+                if self.progress_metric == "l1":
+                    progress_error = np.abs(valid_preds - valid_labels).mean()
+                    metrics[f"{metric_key_prefix}_progress_l1"] = progress_error
+                elif self.progress_metric == "mse":
+                    progress_error = ((valid_preds - valid_labels) ** 2).mean()
+                    metrics[f"{metric_key_prefix}_progress_mse"] = progress_error
+                elif self.progress_metric == "huber":
+                    delta = 1.0
+                    abs_error = np.abs(valid_preds - valid_labels)
+                    huber = np.where(
+                        abs_error <= delta,
+                        0.5 * abs_error ** 2,
+                        delta * (abs_error - 0.5 * delta)
+                    )
+                    metrics[f"{metric_key_prefix}_progress_huber"] = huber.mean()
+        
+        # CoT metrics
+        if cot_metrics["losses"]:
+            metrics[f"{metric_key_prefix}_lm_loss"] = np.mean(cot_metrics["losses"])
+            metrics[f"{metric_key_prefix}_perplexity"] = np.exp(np.mean(cot_metrics["losses"]))
+        
+        # Return in the format expected by Trainer
+        from transformers.trainer_utils import EvalLoopOutput
+        return EvalLoopOutput(
+            predictions=None,
+            label_ids=None,
+            metrics=metrics,
+            num_samples=len(dataloader.dataset) if hasattr(dataloader, 'dataset') else None,
+        )
+    
+    def get_eval_dataloader(self, eval_dataset=None):
+        """
+        Returns evaluation dataloader with HomogeneousBatchSampler.
+        """
+        from torch.utils.data import DataLoader
+        from thinkvln.dataset.dataset import HomogeneousBatchSampler
+        
+        if eval_dataset is None:
+            eval_dataset = self.eval_dataset
+        
+        if eval_dataset is None:
+            raise ValueError("Trainer: evaluation requires an eval_dataset.")
+        
+        # Create homogeneous batch sampler for eval
+        eval_sampler = HomogeneousBatchSampler(
+            dataset=eval_dataset,
+            batch_size=self.args.per_device_eval_batch_size,
+            drop_last=False,
+            shuffle=False,  # No shuffle for eval
+            seed=self.args.seed,
+        )
+        
+        return DataLoader(
+            eval_dataset,
+            batch_sampler=eval_sampler,
+            collate_fn=self.data_collator,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
+    
     def _save_checkpoint(self, model, trial, metrics=None):
         """
         Save checkpoint with loss history.
@@ -417,6 +581,15 @@ def load_model(args: ThinkVLNTrainingArguments):
             param.requires_grad = False
         logger.info("Vision tower frozen")
     
+    # Freeze LLM if requested (similar to vision tower)
+    if args.freeze_llm:
+        logger.info("Freezing language model")
+        # Access language model through base_model if it's a PEFT model
+        language_module = model.base_model.model.model.language_model if is_lora_checkpoint else model.model.language_model
+        for param in language_module.parameters():
+            param.requires_grad = False
+        logger.info("Language model frozen")
+    
     # Apply LoRA if enabled (skip if already loaded from LoRA checkpoint)
     if args.use_lora and not is_lora_checkpoint:
         from peft import LoraConfig, get_peft_model
@@ -437,7 +610,8 @@ def load_model(args: ThinkVLNTrainingArguments):
             bias="none",
             task_type="CAUSAL_LM",
             # Keep actor-specific modules fully trainable
-            modules_to_save=["query_embeddings", "shared_projector", "action_head", "progress_head"],
+            # Note: query embeddings are now buffers (non-learnable), not saved in modules_to_save
+            modules_to_save=["shared_projector", "action_head", "progress_head"],
         )
         
         model = get_peft_model(model, lora_config)
@@ -628,9 +802,15 @@ def create_datasets(args: ThinkVLNTrainingArguments, processor):
         logger.info("No validation split - using all data for training")
     
     # Create data collator
+    # Get query token IDs from model config (or use defaults)
+    action_query_token_id = getattr(model.config, 'action_query_token_id', 151700)
+    progress_query_token_id = getattr(model.config, 'progress_query_token_id', 151701)
+    
     data_collator = ThinkVLNDataCollator(
         processor=processor,
         num_query_tokens=args.num_query_tokens,
+        action_query_token_id=action_query_token_id,
+        progress_query_token_id=progress_query_token_id,
         image_root=args.image_root,
     )
     
@@ -694,8 +874,9 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
             else:
                 flat_config['lora_target_modules'] = target_modules
         
-        # Vision tower config
+        # Freezing config
         flat_config['freeze_vision_tower'] = model_cfg.get('freeze_vision_tower', False)
+        flat_config['freeze_llm'] = model_cfg.get('freeze_llm', False)
         
         # Attention optimization
         flat_config['use_flash_attention_2'] = model_cfg.get('use_flash_attention_2', False)
@@ -733,7 +914,15 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
             'logging_first_step': train_cfg.get('logging_first_step', True),
             'save_steps': train_cfg.get('save_steps', 1000),
             'save_total_limit': train_cfg.get('save_total_limit', 3),
+            # Evaluation settings
+            'eval_strategy': train_cfg.get('eval_strategy', 'no'),
             'eval_steps': train_cfg.get('eval_steps', 1000),
+            'per_device_eval_batch_size': train_cfg.get('per_device_eval_batch_size', 2),
+            'eval_accumulation_steps': train_cfg.get('eval_accumulation_steps', 1),
+            # Custom eval metrics
+            'progress_metric': train_cfg.get('custom_eval_metrics', {}).get('progress_metric', 'l1'),
+            'action_metric': train_cfg.get('custom_eval_metrics', {}).get('action_metric', 'accuracy'),
+            # DeepSpeed and data loading
             'deepspeed': train_cfg.get('deepspeed'),
             'dataloader_num_workers': train_cfg.get('dataloader_num_workers', 4),
             'dataloader_pin_memory': train_cfg.get('dataloader_pin_memory', True),
@@ -817,6 +1006,14 @@ def main():
     
     # Create datasets
     train_dataset, eval_dataset, data_collator = create_datasets(args, processor)
+    
+    # Log evaluation settings
+    if eval_dataset is not None:
+        logger.info(f"Evaluation enabled with custom metrics:")
+        logger.info(f"  - Progress metric: {args.progress_metric}")
+        logger.info(f"  - Action metric: {args.action_metric}")
+        logger.info(f"  - Evaluation strategy: {args.eval_strategy}")
+        logger.info(f"  - Eval steps: {args.eval_steps}")
     
     # Create trainer
     logger.info("Initializing trainer...")

@@ -23,8 +23,8 @@ model:
   num_action_classes: 4
   
   # Loss weights for multi-task learning
-  action_loss_weight: 1.0      # Weight for action classification loss
-  progress_loss_weight: 10.0    # Weight for progress regression loss
+  action_loss_weight: 0.1     # Weight for action classification loss
+  progress_loss_weight: 1.0    # Weight for progress regression loss
   use_huber_loss_for_progress: true  # Use Huber (SmoothL1) instead of MSE for progress, more robust to outliers
 
   # LoRA configuration for parameter-efficient fine-tuning
@@ -34,8 +34,13 @@ model:
   lora_dropout: 0.05           # Dropout for LoRA layers
   lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   
-  # Vision tower freezing
+  # Model freezing configuration
   freeze_vision_tower: true    # Freeze vision encoder to save memory
+  freeze_llm: false            # Freeze language model (only train actor heads and query embeddings)
+  
+  # Query token IDs (optional, defaults: action=151700, progress=151701)
+  # action_query_token_id: 151700
+  # progress_query_token_id: 151701
   
   # Attention optimization
   use_flash_attention_2: true  # Use FlashAttention-2 for faster and more memory-efficient attention
@@ -51,7 +56,8 @@ data:
   # Path to action prediction data (JSONL, relative to data_root)
   action_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/R2R_back/summary_full.jsonl"
   # Path to Chain-of-Thought (CoT) data (JSONL, relative to data_root)
-  cot_data_path: "/mnt/swx/ThinkVLN/data/cot_dataset/cot_dataset_answer.jsonl"
+  # cot_data_path: "/mnt/swx/ThinkVLN/data/cot_dataset/cot_dataset_answer.jsonl"
+  cot_data_path: null
   
   # Sample ratio: proportion of full dataset to use (1.0 = all, 0.1 = 10%)
   # Val split is applied after subsampling
@@ -66,7 +72,7 @@ data:
 # ============================================================================
 training:
   # Output directory for checkpoints and logs
-  output_dir: "outputs/actor/lora/run-2-3-11-07"
+  output_dir: "outputs/actor/lora/run-2-4-1-no-cot"
   
   # Resume from checkpoint (optional)
   # Set to checkpoint directory path to resume training
@@ -75,12 +81,12 @@ training:
   resume_from_checkpoint: null
   
   # Training duration
-  num_train_epochs: 2
+  num_train_epochs: 1
   max_steps: -1  # -1 means use num_train_epochs instead
   
   # Batch size and gradient accumulation
   per_device_train_batch_size: 16      # Batch size per GPU (increased with LoRA)
-  gradient_accumulation_steps: 8      # Accumulate gradients over N steps
+  gradient_accumulation_steps: 4      # Accumulate gradients over N steps
   # Effective batch size = per_device_batch_size × gradient_accumulation_steps × num_gpus
   # Example: 2 × 4 × 8 = 64 (for 8 GPUs)
   
@@ -107,8 +113,9 @@ training:
   save_total_limit: 3           # Keep only last 3 checkpoints
   
   # Evaluation (if eval dataset is provided)
-  evaluation_strategy: "steps"  # "no", "steps", or "epoch"
+  eval_strategy: "steps"  # "no", "steps", or "epoch"
   eval_steps: 1000
+  per_device_eval_batch_size: 16  # Batch size per GPU for evaluation
   eval_accumulation_steps: 1    # Number of batches to accumulate before moving to CPU
   
   # Distributed training
@@ -125,6 +132,14 @@ training:
   # Distributed training settings
   ddp_find_unused_parameters: true   # Required for HomogeneousBatchSampler (action vs CoT batches use different params)
   ddp_backend: "nccl"                # Use "nccl" for NVIDIA GPUs, "gloo" for CPU
+
+  # Custom evaluation metrics
+  # Configure which metrics to compute during evaluation
+  custom_eval_metrics:
+    # For progress prediction: use L1 loss instead of default loss
+    progress_metric: "l1"  # Options: "l1", "mse", "huber"
+    # For action classification: compute accuracy
+    action_metric: "accuracy"  # Options: "accuracy", "loss"
 
 
 # ============================================================================

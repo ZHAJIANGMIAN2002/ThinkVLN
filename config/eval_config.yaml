@@ -1,0 +1,97 @@
+# ThinkVLN Actor Evaluation Configuration
+# 
+# This configuration file provides settings for evaluating trained ThinkVLN actor models.
+#
+# Usage:
+#   python thinkvln/engine/evaluate.py --config config/eval_config.yaml
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model:
+  # Path to trained model checkpoint (LoRA adapter or full model)
+  # Examples:
+  #   - "outputs/actor/lora/run-2-3-11-07"  (LoRA checkpoint)
+  #   - "outputs/actor/final_model"          (Full model)
+  model_path: "outputs/actor/lora/run-2-3-11-07"
+  
+  # Base model path (required for LoRA checkpoints, ignored for full models)
+  # This should point to the pretrained Qwen3VL model used during training
+  base_model_path: "/mnt/swx/ThinkVLN/model_weights/qwen3vl-2"
+  
+  # Device to run evaluation on
+  device: "cuda"  # "cuda" or "cpu"
+
+
+# ============================================================================
+# Data Configuration
+# ============================================================================
+data:
+  # Root directory for images
+  image_root: "/mnt/nvme/swx/dataset/R2R"
+
+  # Path to action prediction data (JSONL)
+  action_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/R2R_back/summary_full.jsonl"
+  
+  # Path to Chain-of-Thought (CoT) data (JSONL)
+  cot_data_path: "/mnt/swx/ThinkVLN/data/cot_dataset/cot_dataset_answer.jsonl"
+  
+  # Number of learnable query tokens (must match training config)
+  num_query_tokens: 4
+  
+  # Sample ratio: proportion of dataset to use for evaluation (1.0 = all, 0.1 = 10%)
+  # Useful for quick evaluation on a subset
+  sample_ratio: 0.1
+
+
+# ============================================================================
+# Evaluation Configuration
+# ============================================================================
+evaluation:
+  # Batch size per device for evaluation
+  batch_size: 16
+  
+  # Number of dataloader workers
+  num_workers: 0
+  
+  # Custom evaluation metrics
+  metrics:
+    # Metric for progress evaluation: "l1", "mse", or "huber"
+    progress_metric: "l1"
+    
+    # Metric for action evaluation: "accuracy"
+    action_metric: "accuracy"
+  
+  # Output directory for evaluation results
+  output_dir: "eval_results"
+
+
+# ============================================================================
+# Notes
+# ============================================================================
+#
+# 1. Model Path:
+#    - For LoRA checkpoints: 
+#      * model_path: Point to the checkpoint directory containing adapter_config.json
+#      * base_model_path: Point to the pretrained Qwen3VL model (REQUIRED for LoRA)
+#    - For full models: 
+#      * model_path: Point to the directory containing config.json and model weights
+#      * base_model_path: Not needed (will be ignored)
+#
+# 2. Data Paths:
+#    - Must use the same data configuration as training
+#    - image_root should point to the R2R image directory
+#    - action_data_path and cot_data_path should contain evaluation samples
+#    - sample_ratio: Use 0.1 for quick testing on 10% of data, 1.0 for full evaluation
+#
+# 3. Metrics:
+#    - Progress metrics:
+#      * "l1": Mean Absolute Error (MAE)
+#      * "mse": Mean Squared Error
+#      * "huber": Huber loss (robust to outliers)
+#    - Action metrics:
+#      * "accuracy": Classification accuracy
+#
+# 4. Output:
+#    - Results are saved to {output_dir}/eval_results.json
+#    - Includes all computed metrics (loss, accuracy, progress error, perplexity)

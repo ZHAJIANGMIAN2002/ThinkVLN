@@ -199,12 +199,20 @@ class ThinkVLNDataCollator:
         self,
         processor,
         num_query_tokens: int = 4,
-        query_token_id: int = 151700,
+        action_query_token_id: int = 151700,
+        progress_query_token_id: int = 151701,
         image_root: Optional[str] = None,
     ):
         self.processor = processor
         self.num_query_tokens = num_query_tokens
-        self.query_token_id = query_token_id
+        
+        # OLD: Single query token ID (commented out)
+        # self.query_token_id = query_token_id
+        
+        # NEW: Two query token IDs (action and progress)
+        self.action_query_token_id = action_query_token_id
+        self.progress_query_token_id = progress_query_token_id
+        
         self.image_root = image_root
         
         self.action_prompt = "Based on the current observation and subgoal '{subgoal}', predict the next 4 actions."
@@ -257,12 +265,27 @@ class ThinkVLNDataCollator:
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.processor(text=[text], images=[image], return_tensors="pt", padding=False)
         
-        # Extract and append query tokens
+        # OLD: Single query type (commented out)
+        # input_ids = inputs['input_ids'][0]
+        # attention_mask = inputs['attention_mask'][0]
+        # query_tokens = torch.full((self.num_query_tokens,), self.query_token_id, dtype=torch.long)
+        # input_ids = torch.cat([input_ids, query_tokens])
+        # attention_mask = torch.cat([attention_mask, torch.ones(self.num_query_tokens, dtype=torch.long)])
+        
+        # NEW: Two query types (action and progress), alternating
         input_ids = inputs['input_ids'][0]
         attention_mask = inputs['attention_mask'][0]
-        query_tokens = torch.full((self.num_query_tokens,), self.query_token_id, dtype=torch.long)
+        
+        # Build query tokens: [action_0, progress_0, action_1, progress_1, ...]
+        query_tokens = []
+        for _ in range(self.num_query_tokens):
+            query_tokens.append(self.action_query_token_id)
+            query_tokens.append(self.progress_query_token_id)
+        query_tokens = torch.tensor(query_tokens, dtype=torch.long)  # Shape: (2 * num_query_tokens,)
+        
+        # Append query tokens to input_ids and extend attention_mask
         input_ids = torch.cat([input_ids, query_tokens])
-        attention_mask = torch.cat([attention_mask, torch.ones(self.num_query_tokens, dtype=torch.long)])
+        attention_mask = torch.cat([attention_mask, torch.ones(2 * self.num_query_tokens, dtype=torch.long)])
         
         # Extract labels
         actions, progress = extract_action_chunk(
