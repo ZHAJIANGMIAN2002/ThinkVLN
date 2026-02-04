@@ -7,3 +7,6 @@
 [submodule "third_party/LH-VLN"]
 	path = third_party/LH-VLN
 	url = https://github.com/HCPLab-SYSU/LH-VLN.git
+[submodule "openvla-oft"]
+	path = openvla-oft
+	url = https://github.com/moojink/openvla-oft.git
