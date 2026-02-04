@@ -41,6 +41,7 @@ logs/
 *.log
 wandb/
 tensorboard/
+third_party/
 
 # Environment
 .env
