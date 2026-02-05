@@ -9,7 +9,7 @@ from transformers.generation.utils import GenerateOutput
 from transformers import Qwen2ForCausalLM
 from llava.model.language_model.llava_qwen import LlavaQwenModel
 from llava.model.llava_arch import LlavaMetaForCausalLM
-from utils.utils import IGNORE_INDEX, IMAGE_TOKEN_INDEX, MEMORY_TOKEN_INDEX
+from streamvln.utils.utils import IGNORE_INDEX, IMAGE_TOKEN_INDEX, MEMORY_TOKEN_INDEX
 
 class StreamVLNModel(LlavaQwenModel):
     def __init__(
@@ -112,7 +112,7 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             memory_features = []
             image_features_ = []
             for b in range(batch_size):
-                if time_ids[b] is not None:
+                if time_ids is not None and b < len(time_ids) and time_ids[b] is not None and len(time_ids[b]) > 0:
                     start_idx = time_ids[b][0]
                 else:
                     start_idx = 0
@@ -182,7 +182,6 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
             num_memories = (cur_input_ids == MEMORY_TOKEN_INDEX).sum()
-            # print(batch_idx, num_images, num_memories)
             num_specials = num_images + num_memories
             image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist()
             memory_token_indices = torch.where(cur_input_ids == MEMORY_TOKEN_INDEX)[0].tolist()
@@ -207,23 +206,42 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             cur_img_id = 0
             cur_mem_id = 0
             
-            for i in range(num_specials + 1):  # num_images = 1? [0, 1]
+            for i in range(num_specials + 1):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
                 if i < num_specials:
-                    # print(f"Batch Index: {batch_idx}\n, Current Image Index: {cur_image_idx}\n, Num Images: {num_images}")
                     special_token = special_tokens[i]
                 
                     if special_token == IMAGE_TOKEN_INDEX:
                         cur_image_feature = image_features[batch_idx][cur_img_id]
                         cur_img_id += 1
-                        # print(batch_idx, i, 'cur_image_feature shape:', cur_image_feature.shape)
                         cur_new_input_embeds.append(cur_image_feature)
                         cur_new_labels.append(torch.full((cur_image_feature.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
                     elif special_token == MEMORY_TOKEN_INDEX:
-                        cur_memory_feature = memory_features[batch_idx][cur_mem_id]
-                        cur_mem_id += 1
-                        # print(batch_idx, i, 'cur_memory_feature shape:', cur_memory_feature.shape)
+                        # Check if memory_features[batch_idx] is None or empty
+                        if memory_features is None or batch_idx >= len(memory_features) or memory_features[batch_idx] is None:
+                            # No memory available, create a zero placeholder with same dimension as image feature
+                            # Use the first image feature's shape as reference
+                            if len(image_features[batch_idx]) > 0:
+                                ref_feature = image_features[batch_idx][0]
+                                placeholder_shape = (ref_feature.shape[0], ref_feature.shape[1]) if len(ref_feature.shape) == 2 else (ref_feature.shape[0],)
+                                cur_memory_feature = torch.zeros(placeholder_shape, dtype=ref_feature.dtype, device=ref_feature.device)
+                            else:
+                                # Fallback: use a default shape (this should rarely happen)
+                                cur_memory_feature = torch.zeros((196, 1152), dtype=cur_labels.dtype, device=cur_labels.device)
+                            cur_mem_id += 1
+                        elif cur_mem_id >= len(memory_features[batch_idx]):
+                            # Not enough memory features, create placeholder
+                            if len(image_features[batch_idx]) > 0:
+                                ref_feature = image_features[batch_idx][0]
+                                placeholder_shape = (ref_feature.shape[0], ref_feature.shape[1]) if len(ref_feature.shape) == 2 else (ref_feature.shape[0],)
+                                cur_memory_feature = torch.zeros(placeholder_shape, dtype=ref_feature.dtype, device=ref_feature.device)
+                            else:
+                                cur_memory_feature = torch.zeros((196, 1152), dtype=cur_labels.dtype, device=cur_labels.device)
+                            cur_mem_id += 1
+                        else:
+                            cur_memory_feature = memory_features[batch_idx][cur_mem_id]
+                            cur_mem_id += 1
                         cur_new_input_embeds.append(cur_memory_feature)
                         cur_new_labels.append(torch.full((cur_memory_feature.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
                     else:
@@ -233,7 +251,6 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)
 
-            # assert len(cur_new_input_embeds) <= 4096
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
         
@@ -423,14 +440,11 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
         # Exception 1: when passing input_embeds, input_ids may be missing entries
         # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
-        # print('inputs_embeds', inputs_embeds.shape)
-        # print('input_ids', input_ids, cache_position)
         if past_key_values is not None:
             if inputs_embeds is not None:  # Exception 1
                 input_ids = input_ids[:, -cache_position.shape[0] :]
             elif input_ids.shape[1] != cache_position.shape[0]:  # Default case (the "else", a no op, is Exception 2)
                 input_ids = input_ids[:, cache_position]
-        # print('input_ids', input_ids, cache_position, cache_position.shape)
 
         if attention_mask is not None and position_ids is None:
             # create position_ids on the fly for batch generation
@@ -442,7 +456,6 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 # This `clone` call is needed to avoid recapturing cuda graphs with `torch.compile`'s  `mode="reduce-overhead`, as otherwise the input `position_ids` would have various stride during the decoding. Here, simply using `.contiguous()` is not sufficient as in the batch size = 1 case, `position_ids` is already contiguous but with varying stride which retriggers a capture.
                 position_ids = position_ids.clone(memory_format=torch.contiguous_format)
 
-        # print('cache_position_prepare:', cache_position, len(cache_position))
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and cache_position[0] == 0:
             model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
@@ -475,5 +488,17 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         self.cache = [dict()] * env_num
     
     def reset_for_env(self, env_idx):
+        # Ensure curr_t and cache are initialized
+        if not hasattr(self, 'curr_t') or len(self.curr_t) <= env_idx:
+            # Initialize if not already done
+            max_envs = max(env_idx + 1, len(self.curr_t) if hasattr(self, 'curr_t') else 0, 1)
+            if not hasattr(self, 'curr_t'):
+                self.curr_t = [0] * max_envs
+                self.cache = [dict()] * max_envs
+            else:
+                # Extend if needed
+                while len(self.curr_t) <= env_idx:
+                    self.curr_t.append(0)
+                    self.cache.append(dict())
         self.curr_t[env_idx] = 0
         self.cache[env_idx] = dict()

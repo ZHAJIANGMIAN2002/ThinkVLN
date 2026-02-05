@@ -1,0 +1,52 @@
+model:
+  model_name_or_path: "/mnt/swx/ThinkVLN/model_weights/qwen3vl-2"
+  use_flash_attention_2: true
+  # LoRA config
+  use_lora: false
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  # lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  # Freezing
+  freeze_vision_tower: true
+  freeze_llm: false
+
+data:
+  image_root: "/mnt/nvme/swx/dataset/R2R"
+  action_data_path: "/mnt/nvme/swx/dataset/R2R/train_action.jsonl"
+  action_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/R2R_back/summary_full.jsonl"
+  val_split_ratio: 0.1
+  sample_ratio: 1.0
+  num_future_steps: 4
+
+training:
+  output_dir: "outputs/ar_vln"
+  num_train_epochs: 1
+  max_steps: -1
+  per_device_train_batch_size: 16
+  gradient_accumulation_steps: 4
+  learning_rate: 2e-5
+  weight_decay: 0.01
+  warmup_steps: 500
+  max_grad_norm: 1.0
+  lr_scheduler_type: "cosine"
+  bf16: true
+  fp16: false
+  gradient_checkpointing: true
+  logging_steps: 10
+  logging_first_step: true
+  save_steps: 1000
+  save_total_limit: 3
+  eval_strategy: "steps"
+  eval_steps: 1000
+  deepspeed: null
+  dataloader_num_workers: 0
+  dataloader_pin_memory: true
+  seed: 42
+
+logging:
+  report_to: [wandb]
+  project: "thinkvln"
+  run_name: "thinkvln_ar_vln"
+  logging_dir: "logs/ar_vln"
+

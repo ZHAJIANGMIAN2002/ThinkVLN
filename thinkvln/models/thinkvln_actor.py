@@ -21,21 +21,24 @@ class SharedProjector(nn.Module):
     def forward(self, x): return self.net(x)
 
 
-# OLD: Simple single-layer heads (commented out, kept for reference)
-# class ActionClassificationHead(nn.Module):
-#     """MLP head for classifying discrete actions"""
-#     def __init__(self, hidden_size: int, num_classes: int = 4, dropout: float = 0.1):
-#         super().__init__()
-#         self.net = nn.Sequential(nn.Dropout(dropout), nn.Linear(hidden_size, num_classes))
-#     def forward(self, x): return self.net(x)
-# 
-# 
-# class ProgressRegressionHead(nn.Module):
-#     """MLP head for regressing continuous progress values"""
-#     def __init__(self, hidden_size: int, dropout: float = 0.1):
-#         super().__init__()
-#         self.net = nn.Sequential(nn.Dropout(dropout), nn.Linear(hidden_size, 1), nn.Sigmoid())
-#     def forward(self, x): return self.net(x).squeeze(-1)
+class ActionClassificationHead(nn.Module):
+    """Simple MLP head for classifying discrete actions (backward compatible)."""
+    def __init__(self, hidden_size: int, num_classes: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(nn.Dropout(dropout), nn.Linear(hidden_size, num_classes))
+
+    def forward(self, x): 
+        return self.net(x)
+
+
+class ProgressRegressionHead(nn.Module):
+    """Simple MLP head for regressing progress (backward compatible)."""
+    def __init__(self, hidden_size: int, dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(nn.Dropout(dropout), nn.Linear(hidden_size, 1), nn.Sigmoid())
+
+    def forward(self, x): 
+        return self.net(x).squeeze(-1)
 
 
 # NEW: OpenVLA-OFT style two-layer MLP heads with residual connections

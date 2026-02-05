@@ -35,7 +35,8 @@ from habitat.config.default_structured_configs import (
 from habitat.utils.visualizations import maps
 from thinkvln.habitat_extensions import measures
 
-from thinkvln.engine.inference import load_model_and_processor, run_batch_inference
+from thinkvln.engine.inference import load_model_and_processor
+from thinkvln.models.navigation_model import NavigationModel, ThinkVLNNavigationModel, StreamVLNNavigationModel
 import torch.distributed as dist
 
 
@@ -46,8 +47,9 @@ class VLNEvaluator:
         split: str = "val_seen",
         env_num: int = 8,
         output_path: str = None,
-        model: Any = None,
-        processor: Any = None,
+        nav_model: NavigationModel = None,  # Accept NavigationModel wrapper
+        model: Any = None,  # Keep for backward compatibility
+        processor: Any = None,  # Keep for backward compatibility
         epoch: int = 0,
         args: argparse.Namespace = None,
     ):
@@ -61,6 +63,9 @@ class VLNEvaluator:
         self.config = get_habitat_config(config_path)
         self.agent_config = get_agent_config(self.config.habitat.simulator)
         self.sim_sensors_config = self.config.habitat.simulator.agents.main_agent.sim_sensors
+        
+        # Store model type for conditional processing
+        self.model_type = getattr(args, 'model_type', 'thinkvln') if args else 'thinkvln'
 
         with habitat.config.read_write(self.config):
             self.config.habitat.dataset.split = self.split
@@ -85,16 +90,27 @@ class VLNEvaluator:
                 }
             )
 
-        self.model = model
-        self.processor = processor
+        # Use provided NavigationModel wrapper, or create one from model/processor
+        if nav_model is not None:
+            self.nav_model = nav_model
+        elif model is not None and processor is not None:
+            # Backward compatibility: create ThinkVLN wrapper
+            self.nav_model = ThinkVLNNavigationModel(
+                model=model,
+                processor=processor,
+                device=str(self.device),
+                max_new_tokens=getattr(args, 'model_max_length', 4096) if args else 1024
+            )
+        else:
+            self.nav_model = None
         
+        # Keep for backward compatibility and action name mapping
         self.actions2idx = OrderedDict({
             'stop': 0,
             'forward': 1,
             'turn_left': 2,
             'turn_right': 3
         })
-        
         self.idx2actions = {v: k for k, v in self.actions2idx.items()}
 
     def config_env(self) -> Env:
@@ -131,93 +147,6 @@ class VLNEvaluator:
         image = Image.fromarray(concatenated)
         return image
 
-    def build_user_message(
-        self,
-        instruction: str,
-        plan: str,
-        prev_subtask: Optional[str] = None
-    ) -> str:
-        """
-        Build user message in clean format.
-        
-        Args:
-            instruction: Navigation instruction text
-            plan: Step-by-step plan as string
-            prev_subtask: Previous subtask information (optional)
-        
-        Returns:
-            Formatted user message string
-        """
-        user_message = f"<image>\n**Instruction**: {instruction}\n\n**Plan**: {plan}"
-        
-        if prev_subtask:
-            user_message += f"\n**Previous Subtask**: {prev_subtask}"
-        
-        return user_message
-
-    def parse_action(self, output: str) -> int:
-        """
-        Parse action from model CoT output.
-        
-        Args:
-            output: Model output text containing [action] section
-        
-        Returns:
-            Action ID (0=stop, 1=forward, 2=turn_left, 3=turn_right)
-        """
-        # Look for [action] section
-        if "[action]" in output.lower():
-            action_start = output.lower().find("[action]")
-            action_lines = output[action_start:].split('\n')
-            
-            # Search for action value in lines after [action]
-            for line in action_lines[1:]:
-                line_lower = line.strip().lower()
-                
-                # Check for exact matches first
-                if line_lower in ['forward', 'turn_left', 'turn_right', 'stop']:
-                    return self.actions2idx[line_lower]
-                # Check for partial matches
-                elif 'forward' in line_lower:
-                    return self.actions2idx['forward']
-                elif 'turn_left' in line_lower or 'turn left' in line_lower:
-                    return self.actions2idx['turn_left']
-                elif 'turn_right' in line_lower or 'turn right' in line_lower:
-                    return self.actions2idx['turn_right']
-                elif 'stop' in line_lower:
-                    return self.actions2idx['stop']
-        
-        # Default to stop if action not found
-        return self.actions2idx['stop']
-
-    def extract_prev_subtask_from_output(self, output: str) -> Optional[str]:
-        """
-        Extract prev subtask from model output for next step's use.
-        
-        Args:
-            output: Model output text
-        
-        Returns:
-            Previous subtask as string or None
-        """
-        # Look for [subtask determination] or [cur subtask] section
-        if "[cur subtask]" in output.lower():
-            subtask_start = output.lower().find("[cur subtask]")
-            subtask_text = output[subtask_start:].split('\n')[0]
-            # Extract content after "[cur subtask]"
-            content = subtask_text.split("]", 1)[-1].strip()
-            if content:
-                return content
-        
-        if "[subtask determination]" in output.lower():
-            subtask_start = output.lower().find("[cur subtask]")
-            if subtask_start != -1:
-                subtask_text = output[subtask_start:].split('\n')[0]
-                content = subtask_text.split("]", 1)[-1].strip()
-                if content:
-                    return content
-        
-        return None
 
     def eval_action(self, idx) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -246,14 +175,17 @@ class VLNEvaluator:
                 for line in f.readlines():
                     try:
                         res = json.loads(line)
-                        done_res.append([res["scene_id"], res["episode_id"], res["episode_instruction"]])
-                        if get_rank() == 0:
-                            sucs.append(res['success'])
-                            spls.append(res['spl'])
-                            oss.append(res['os'])
-                            ones.append(res['ne'])
                     except json.JSONDecodeError:
                         continue
+                    # Skip summary or malformed lines that don't have per-episode fields
+                    if not all(k in res for k in ["scene_id", "episode_id", "episode_instruction"]):
+                        continue
+                    done_res.append([res["scene_id"], res["episode_id"], res["episode_instruction"]])
+                    if get_rank() == 0:
+                        sucs.append(res.get('success', 0.0))
+                        spls.append(res.get('spl', 0.0))
+                        oss.append(res.get('os', 0.0))
+                        ones.append(res.get('ne', 0.0))
 
         for scene in sorted(scene_episode_dict.keys()):
             episodes = scene_episode_dict[scene]
@@ -282,52 +214,63 @@ class VLNEvaluator:
                 step_id = 0
                 prev_subtask = None
                 
+                # Initialize episode-specific state for StreamVLN
+                if self.model_type == 'streamvln' and isinstance(self.nav_model, StreamVLNNavigationModel):
+                    # Reset StreamVLN state for new episode
+                    self.nav_model.rgb_list = []
+                    self.nav_model.depth_list = []
+                    self.nav_model.pose_list = []
+                    self.nav_model.intrinsic_list = []
+                    self.nav_model.time_ids = []
+                    self.nav_model.action_seq = []
+                    self.nav_model.past_key_values = None
+                    self.nav_model.output_ids = None
+                    self.nav_model.step_count = 0
+                    initial_height = env.sim.get_agent_state().position[1]
+                
                 while not env.episode_over:
-                    self.model.eval()
+                    if self.nav_model is None:
+                        raise ValueError("Navigation model not initialized")
+                    
+                    self.nav_model.eval()
                     
                     # Get current observation
                     rgb = observations["rgb"]
                     info = env.get_metrics()
                     
-                    # Prepare concatenated image (RGB + top-down map)
-                    image = self.prepare_image_with_map(rgb, info)
+                    # Prepare input based on model type
+                    if self.model_type == 'streamvln' and isinstance(self.nav_model, StreamVLNNavigationModel):
+                        # StreamVLN needs full observations dict with multi-modal data
+                        observation_dict = {
+                            'rgb': rgb,
+                            'depth': observations.get('depth'),
+                            'gps': observations.get('gps', [0, 0]),
+                            'compass': observations.get('compass', [0]),
+                            'env': env,
+                            'sensor_config': self.sim_sensors_config,
+                            'initial_height': initial_height,
+                            'camera_height': self.sim_sensors_config.rgb_sensor.position[1],
+                            'min_depth': self.sim_sensors_config.depth_sensor.min_depth,
+                            'max_depth': self.sim_sensors_config.depth_sensor.max_depth,
+                        }
+                        observation_input = observation_dict
+                    else:
+                        # ThinkVLN uses concatenated image (RGB + top-down map)
+                        image = self.prepare_image_with_map(rgb, info)
+                        observation_input = image
                     
-                    # Build prompt
                     # Extract plan from episode if available
                     plan = "1. Navigate to the goal."
                     if hasattr(episode, 'reference_path'):
-                        # Use a simple plan if available
                         plan = "1. Follow the reference path."
                     
-                    user_message = self.build_user_message(
+                    # Call model to predict action (encapsulates all model-specific logic)
+                    action, prev_subtask = self.nav_model.predict_action(
+                        observation=observation_input,
                         instruction=episode_instruction,
                         plan=plan,
                         prev_subtask=prev_subtask
                     )
-                    
-                    # Run inference
-                    print(f"Step {step_id}: Generating action...")
-                    try:
-                        llm_outputs = run_batch_inference(
-                            self.model,
-                            self.processor,
-                            [user_message],
-                            [image],
-                            self.device,
-                            max_new_tokens=1024
-                        )[0]
-                        
-                        print(f"Model output:\n{llm_outputs}", flush=True)
-                    except Exception as e:
-                        print(f"Error during inference: {e}")
-                        llm_outputs = "[action]\nstop"
-                    
-                    # Parse action
-                    action = self.parse_action(llm_outputs)
-                    print(f"Parsed action: {self.idx2actions[action]}", flush=True)
-                    
-                    # Extract previous subtask for next step
-                    prev_subtask = self.extract_prev_subtask_from_output(llm_outputs)
                     
                     # Execute action
                     observations = env.step(action)
@@ -404,12 +347,22 @@ def eval():
     parser = argparse.ArgumentParser()
     parser.add_argument("--local-rank", default=0, type=int, dest="local_rank", help="node rank")
     parser.add_argument("--model_path", type=str, default="", help="Path to model")
+    parser.add_argument("--model_type", type=str, default="thinkvln", choices=["thinkvln", "streamvln"],
+                        help="Model type: thinkvln or streamvln")
     parser.add_argument("--habitat_config_path", type=str, default='config/vln_r2r.yaml')
     parser.add_argument("--eval_split", type=str, default='val_unseen')
     parser.add_argument("--output_path", type=str, default='./results/env_eval')
     parser.add_argument("--save_video", action="store_true", default=False)
     parser.add_argument("--model_max_length", type=int, default=4096,
                         help="Maximum sequence length for model input")
+    
+    # StreamVLN specific parameters
+    parser.add_argument("--num_frames", type=int, default=32,
+                        help="Number of frames before resetting (StreamVLN)")
+    parser.add_argument("--num_future_steps", type=int, default=4,
+                        help="Future steps for history sampling (StreamVLN)")
+    parser.add_argument("--num_history", type=int, default=8,
+                        help="Number of history frames to use (StreamVLN)")
     
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument('--rank', default=0, type=int, help='rank')
@@ -427,22 +380,125 @@ def eval():
     # Set device
     device = f"cuda:{gpu}" if world_size > 1 else args.device
 
-    # Load tokenizer and model
-    print(f"Loading model from {args.model_path}...")
-    model, processor = load_model_and_processor(args.model_path, device)
-    model.requires_grad_(False)
-    model.eval()
+    # Load model based on type
+    print(f"Loading {args.model_type} model from {args.model_path}...")
+    
+    if args.model_type == "thinkvln":
+        model, processor = load_model_and_processor(args.model_path, device)
+        model.requires_grad_(False)
+        model.eval()
+        nav_model = ThinkVLNNavigationModel(
+            model=model,
+            processor=processor,
+            device=str(device),
+            max_new_tokens=args.model_max_length
+        )
+    elif args.model_type == "streamvln":
+        # StreamVLN requires LLaVA-NeXT codebase
+        # Try to find and add LLaVA-NeXT to Python path
+        import sys
+        thinkvln_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+        
+        # Possible LLaVA-NeXT paths
+        possible_llava_paths = [
+            os.path.join(thinkvln_root, "third_party", "LLaVA-NeXT"),
+            os.path.join(thinkvln_root, "LLaVA-NeXT"),
+            os.path.expanduser("~/LLaVA-NeXT"),
+        ]
+        
+        # Add ThinkVLN root first (for streamvln imports)
+        if thinkvln_root not in sys.path:
+            sys.path.insert(0, thinkvln_root)
+        
+        # Try to find and add LLaVA-NeXT
+        llava_found = False
+        for llava_path in possible_llava_paths:
+            if os.path.exists(llava_path) and os.path.exists(os.path.join(llava_path, "llava")):
+                if llava_path not in sys.path:
+                    sys.path.insert(0, llava_path)
+                
+                # Apply compatibility patch for transformers version issues
+                compat_patch_path = os.path.join(llava_path, "llava", "compat_patch.py")
+                if os.path.exists(compat_patch_path):
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location("llava.compat_patch", compat_patch_path)
+                    compat_patch = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(compat_patch)
+                    if rank == 0:
+                        print(f"✓ Applied compatibility patch for transformers")
+                
+                llava_found = True
+                if rank == 0:
+                    print(f"✓ Found LLaVA-NeXT at: {llava_path}")
+                break
+        
+        if not llava_found:
+            raise ImportError("LLaVA-NeXT not found. StreamVLN requires LLaVA-NeXT codebase.")
+        
+        import transformers
+        from streamvln.model.stream_video_vln import StreamVLNForCausalLM
+        
+        tokenizer = transformers.AutoTokenizer.from_pretrained(
+            args.model_path,
+            model_max_length=args.model_max_length,
+            padding_side="right"
+        )
+        config = transformers.AutoConfig.from_pretrained(args.model_path)
+        
+        # Fix compatibility: Add layer_types if missing (required by newer transformers)
+        if not hasattr(config, 'layer_types') or config.layer_types is None:
+            # Generate layer_types based on Qwen2Config logic
+            num_layers = getattr(config, 'num_hidden_layers', 32)
+            sliding_window = getattr(config, 'sliding_window', None)
+            max_window_layers = getattr(config, 'max_window_layers', num_layers)
+            
+            if sliding_window is not None:
+                config.layer_types = [
+                    "sliding_attention" if i >= max_window_layers else "full_attention"
+                    for i in range(num_layers)
+                ]
+            else:
+                config.layer_types = ["full_attention"] * num_layers
+        
+        model = StreamVLNForCausalLM.from_pretrained(
+            args.model_path,
+            attn_implementation="flash_attention_2",
+            torch_dtype=torch.bfloat16,
+            config=config,
+            low_cpu_mem_usage=False,
+        )
+        model.model.num_history = args.num_history
+        model.requires_grad_(False)
+        model.to(device)
+        model.eval()
+        
+        # Initialize StreamVLN model state for distributed evaluation
+        # This must be called before creating NavigationModel wrapper
+        model.reset(world_size)
+        
+        nav_model = StreamVLNNavigationModel(
+            model=model,
+            tokenizer=tokenizer,
+            device=str(device),
+            num_frames=args.num_frames,
+            num_future_steps=args.num_future_steps,
+            num_history=args.num_history,
+            env_id=rank
+        )
+        processor = None  # StreamVLN doesn't use processor
+    else:
+        raise ValueError(f"Unknown model type: {args.model_type}")
     
     # Create output directory
     os.makedirs(args.output_path, exist_ok=True)
     
-    # Run evaluation (pass rank and world_size to avoid re-initializing)
-    evaluate(model, processor, args, rank, world_size, gpu)
+    # Run evaluation
+    evaluate(nav_model, args, rank, world_size, gpu)
 
 
-def evaluate(model, processor, args, rank, world_size, gpu):
+def evaluate(nav_model, args, rank, world_size, gpu):
     """Run evaluation on all episodes."""
-    model.eval()
+    nav_model.eval()
     
     # Don't re-initialize distributed mode - it's already done in eval()
     
@@ -451,8 +507,7 @@ def evaluate(model, processor, args, rank, world_size, gpu):
         split=args.eval_split,
         env_num=world_size,
         output_path=args.output_path,
-        model=model,
-        processor=processor,
+        nav_model=nav_model,  # Pass NavigationModel wrapper directly
         epoch=0,
         args=args
     )

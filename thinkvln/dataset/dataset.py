@@ -215,7 +215,7 @@ class ThinkVLNDataCollator:
         
         self.image_root = image_root
         
-        self.action_prompt = "Based on the current observation and subgoal '{subgoal}', predict the next 4 actions."
+        self.action_prompt = "Based on the current observation and subtask '{subgoal}', predict the next 4 actions and the progress of the subtask."
         self.cot_prompt = "Based on the current observation and subgoal '{subgoal}', think step by step to determine the action."
     
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:

@@ -298,15 +298,26 @@ def evaluate_model(
     
     # Action metrics
     if action_metrics["preds"]:
-        action_preds = torch.cat(action_metrics["preds"], dim=0).numpy()
-        action_labels = torch.cat(action_metrics["labels"], dim=0).numpy()
+        action_preds = torch.cat(action_metrics["preds"], dim=0).numpy()   # [num_samples, 4]
+        action_labels = torch.cat(action_metrics["labels"], dim=0).numpy() # [num_samples, 4]
         
         if action_metric == "accuracy":
+            # Token-level accuracy across all 4 predicted steps
             valid_mask = action_labels != -100
             if valid_mask.sum() > 0:
                 correct = (action_preds == action_labels) & valid_mask
                 accuracy = correct.sum() / valid_mask.sum()
                 metrics["eval_action_accuracy"] = float(accuracy)
+
+            # First-step accuracy: only check the first of the 4 actions
+            if action_labels.shape[1] > 0:
+                first_preds = action_preds[:, 0]
+                first_labels = action_labels[:, 0]
+                first_valid = first_labels != -100
+                if first_valid.sum() > 0:
+                    first_correct = (first_preds == first_labels) & first_valid
+                    first_acc = first_correct.sum() / first_valid.sum()
+                    metrics["eval_action_first_step_accuracy"] = float(first_acc)
     
     # Progress metrics
     if action_metrics["progress_preds"]:

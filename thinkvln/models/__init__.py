@@ -9,6 +9,7 @@ from .thinkvln_actor import (
     SharedProjector,
 )
 from .actor_config import ThinkVLNActorConfig
+from .navigation_model import NavigationModel, ThinkVLNNavigationModel, StreamVLNNavigationModel
 
 __all__ = [
     "ThinkVLNConfig",
@@ -19,4 +20,7 @@ __all__ = [
     "ProgressRegressionHead",
     "SharedProjector",
     "ThinkVLNActorConfig",
+    "NavigationModel",
+    "ThinkVLNNavigationModel",
+    "StreamVLNNavigationModel",
 ]

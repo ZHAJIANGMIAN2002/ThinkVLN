@@ -64,7 +64,7 @@ data:
   sample_ratio: 0.5
   # Validation split ratio (applied to subsampled data)
   # 0.1 means 10% for validation. Set to 0 to disable
-  val_split_ratio: 0.1
+  val_split_ratio: 0.05
 
 
 # ============================================================================
@@ -114,7 +114,7 @@ training:
   
   # Evaluation (if eval dataset is provided)
   eval_strategy: "steps"  # "no", "steps", or "epoch"
-  eval_steps: 1000
+  eval_steps: 500
   per_device_eval_batch_size: 16  # Batch size per GPU for evaluation
   eval_accumulation_steps: 1    # Number of batches to accumulate before moving to CPU
   

@@ -379,11 +379,11 @@ class ThinkVLNSFTTrainer(Trainer):
                     if action_logits is not None:
                         action_preds = torch.argmax(action_logits, dim=-1)  # [batch, 4]
                         action_metrics["preds"].append(action_preds.cpu())
-                        action_metrics["labels"].append(action_labels.cpu())
+                        action_metrics["labels"].append(action_labels.to(torch.int64).cpu())
                     
                     if progress_preds is not None and progress_labels is not None:
-                        action_metrics["progress_preds"].append(progress_preds.cpu())
-                        action_metrics["progress_labels"].append(progress_labels.cpu())
+                        action_metrics["progress_preds"].append(progress_preds.float().cpu())
+                        action_metrics["progress_labels"].append(progress_labels.float().cpu())
                 else:
                     # CoT mode
                     cot_loss = outputs.get("lm_loss")
@@ -411,8 +411,8 @@ class ThinkVLNSFTTrainer(Trainer):
                     metrics[f"{metric_key_prefix}_action_accuracy"] = accuracy
         
         if action_metrics["progress_preds"]:
-            progress_preds = torch.cat(action_metrics["progress_preds"], dim=0).numpy()
-            progress_labels = torch.cat(action_metrics["progress_labels"], dim=0).numpy()
+            progress_preds = torch.cat(action_metrics["progress_preds"], dim=0).float().numpy()
+            progress_labels = torch.cat(action_metrics["progress_labels"], dim=0).float().numpy()
             
             # Compute progress metric
             valid_mask = ~np.isnan(progress_labels) & ~np.isinf(progress_labels) & (progress_labels != -100)
@@ -742,7 +742,7 @@ def verify_lora_save(output_dir: str, expected_modules: list = None):
     return True
 
 
-def create_datasets(args: ThinkVLNTrainingArguments, processor):
+def create_datasets(args: ThinkVLNTrainingArguments, processor, model):
     """
     Create training and evaluation datasets with optional train/val split.
     
@@ -802,9 +802,9 @@ def create_datasets(args: ThinkVLNTrainingArguments, processor):
         logger.info("No validation split - using all data for training")
     
     # Create data collator
-    # Get query token IDs from model config (or use defaults)
-    action_query_token_id = getattr(model.config, 'action_query_token_id', 151700)
-    progress_query_token_id = getattr(model.config, 'progress_query_token_id', 151701)
+    # Get query token IDs from model config (falls back to ThinkVLNConfig defaults)
+    action_query_token_id = getattr(model.config, "action_query_token_id", 151700)
+    progress_query_token_id = getattr(model.config, "progress_query_token_id", 151701)
     
     data_collator = ThinkVLNDataCollator(
         processor=processor,
@@ -1005,7 +1005,7 @@ def main():
     model = load_model(args)
     
     # Create datasets
-    train_dataset, eval_dataset, data_collator = create_datasets(args, processor)
+    train_dataset, eval_dataset, data_collator = create_datasets(args, processor, model)
     
     # Log evaluation settings
     if eval_dataset is not None:

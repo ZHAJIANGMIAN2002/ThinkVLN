@@ -62,7 +62,7 @@ evaluation:
     # Metric for action evaluation: "accuracy"
     action_metric: "accuracy"
   
-  # Output directory for evaluation results
+  # Output diresftctory for evaluation results
   output_dir: "eval_results"
 
 

@@ -16,6 +16,6 @@ echo "配置文件: $CONFIG_FILE"
 export CUDA_VISIBLE_DEVICES="$GPUS"
 
 # 启动 DeepSpeed
-torchrun --master_port 0 --nproc_per_node="$NUM_GPUS" \
+torchrun  --nproc_per_node="$NUM_GPUS" \
     thinkvln/engine/sft_trainer.py \
     --config "$CONFIG_FILE"
