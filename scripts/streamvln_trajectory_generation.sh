@@ -24,10 +24,10 @@ DATASET=ScaleVLN
 CONFIG_PATH=config/vln_r2r.yaml
 OUTPUT_PATH=data/trajectory_data/${DATASET}_back
 DATA_PATH=/mnt/swx/ThinkVLN/data/datasets/scalevln/scalevln_subset_150k.json.gz
-SCENES_DIR=/mnt/nvme/swx/hm3d/data/versioned_data/hm3d-0.2
+SCENES_DIR=/mnt/swx/ThinkVLN/data/scene_datasets/versioned_data/hm3d-0.2
 SCENE_ID_PREFIX=hm3d/
 SCENE_ID_REPLACEMENT=hm3d/train/
-FRAME_OUTPUT_DIR=/mnt/nvme/swx/dataset/scalevln
+FRAME_OUTPUT_DIR=/mnt/swx/ThinkVLN/data/trajectory_data/scalevln_back
 NUM_WORKERS=8  # Number of parallel workers, adjust based on your CPU cores
 
 mkdir -p ${OUTPUT_PATH}
@@ -40,6 +40,5 @@ python streamvln/streamvln_trajectory_generation.py \
     --scene_id_prefix ${SCENE_ID_PREFIX} \
     --scene_id_prefix_replacement ${SCENE_ID_REPLACEMENT} \
     --world_size ${NUM_WORKERS} \
-    --skip_video \
     --save_frame_images \
     --frame_output_dir ${FRAME_OUTPUT_DIR}

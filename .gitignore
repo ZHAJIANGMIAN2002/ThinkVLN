@@ -16,7 +16,8 @@ __pycache__/
 *.safetensors
 *.h5
 .cache/
-
+third_party/
+                                        
 # --- 数据集与输出 ---
 data/
 datasets/
@@ -26,6 +27,7 @@ runs/
 model_weights/
 wandb/
 third_party/
+llava/
 
 
 # --- 忽略 third_party 下可能产生的临时文件 (保留 submodule 链接本身) ---

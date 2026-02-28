@@ -1,0 +1,477 @@
+{
+  "config": {
+    "model_path": "/mnt/swx/ThinkVLN/model_weights/streamvln",
+    "cfg": "config/vln_r2r.yaml",
+    "split": "val_seen",
+    "data_path": null,
+    "scenes_dir": null,
+    "seed": 42,
+    "steps": 500,
+    "episode": null,
+    "use_memory": true,
+    "memory_window": 8,
+    "device": "cuda",
+    "max_new_tokens": 64,
+    "num_history": 8,
+    "attn": "flash_attention_2",
+    "model_dtype": "torch.bfloat16"
+  },
+  "episode": {
+    "scene_id": "r1Q1Z4BcV1o",
+    "episode_id": "7",
+    "instruction": "Turn around and then proceed to your left.  Enter large room that looks like a lobby.  Head left towards stairway.  Then take another left into large dining hall. "
+  },
+  "summary": {
+    "num_steps": 63,
+    "mean_ms": 506.41054153906197,
+    "std_ms": 82.94098786050108,
+    "min_ms": 276.31091300281696,
+    "max_ms": 598.3043640153483,
+    "p50_ms": 536.129425978288,
+    "p90_ms": 536.7351424007211,
+    "p95_ms": 536.8523802026175
+  },
+  "steps": [
+    {
+      "step": 0,
+      "latency_ms": 598.3043640153483,
+      "gt_action": 3,
+      "pred_action": 3,
+      "memory_frames_used": 1
+    },
+    {
+      "step": 1,
+      "latency_ms": 276.398606976727,
+      "gt_action": 3,
+      "pred_action": 3,
+      "memory_frames_used": 1
+    },
+    {
+      "step": 2,
+      "latency_ms": 276.58304100623354,
+      "gt_action": 3,
+      "pred_action": 3,
+      "memory_frames_used": 1
+    },
+    {
+      "step": 3,
+      "latency_ms": 279.2087229900062,
+      "gt_action": 1,
+      "pred_action": 2,
+      "memory_frames_used": 1
+    },
+    {
+      "step": 4,
+      "latency_ms": 276.5431970183272,
+      "gt_action": 1,
+      "pred_action": 2,
+      "memory_frames_used": 1
+    },
+    {
+      "step": 5,
+      "latency_ms": 277.8016160009429,
+      "gt_action": 3,
+      "pred_action": 2,
+      "memory_frames_used": 1
+    },
+    {
+      "step": 6,
+      "latency_ms": 277.04126699245535,
+      "gt_action": 1,
+      "pred_action": 2,
+      "memory_frames_used": 1
+    },
+    {
+      "step": 7,
+      "latency_ms": 276.31091300281696,
+      "gt_action": 1,
+      "pred_action": 2,
+      "memory_frames_used": 1
+    },
+    {
+      "step": 8,
+      "latency_ms": 411.33511302177794,
+      "gt_action": 1,
+      "pred_action": 3,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 9,
+      "latency_ms": 535.9304040030111,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 10,
+      "latency_ms": 536.129425978288,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 11,
+      "latency_ms": 536.7973120009992,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 12,
+      "latency_ms": 536.4963810134213,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 13,
+      "latency_ms": 536.7287639819551,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 14,
+      "latency_ms": 536.1593610141426,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 15,
+      "latency_ms": 536.0763760108966,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 16,
+      "latency_ms": 536.034116987139,
+      "gt_action": 2,
+      "pred_action": 2,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 17,
+      "latency_ms": 537.1576239995193,
+      "gt_action": 2,
+      "pred_action": 2,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 18,
+      "latency_ms": 536.8562020012178,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 19,
+      "latency_ms": 536.1513860116247,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 20,
+      "latency_ms": 536.1682570073754,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 21,
+      "latency_ms": 536.1553829861805,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 22,
+      "latency_ms": 536.2684339925181,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 23,
+      "latency_ms": 536.2745650054421,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 24,
+      "latency_ms": 536.4804900018498,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 25,
+      "latency_ms": 536.3471410237253,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 26,
+      "latency_ms": 535.4854809993412,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 27,
+      "latency_ms": 536.497741995845,
+      "gt_action": 3,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 28,
+      "latency_ms": 536.3350429979619,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 29,
+      "latency_ms": 536.040036007762,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 30,
+      "latency_ms": 536.0582679859363,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 31,
+      "latency_ms": 535.8982099860441,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 32,
+      "latency_ms": 536.2055749865249,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 33,
+      "latency_ms": 536.6170929919463,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 34,
+      "latency_ms": 536.074818985071,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 35,
+      "latency_ms": 536.3703329931013,
+      "gt_action": 3,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 36,
+      "latency_ms": 536.1379920213949,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 37,
+      "latency_ms": 536.2796099798288,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 38,
+      "latency_ms": 535.9733320074156,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 39,
+      "latency_ms": 537.0692840078846,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 40,
+      "latency_ms": 536.7367370054126,
+      "gt_action": 1,
+      "pred_action": 2,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 41,
+      "latency_ms": 536.2505869998131,
+      "gt_action": 3,
+      "pred_action": 2,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 42,
+      "latency_ms": 535.8549840166233,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 43,
+      "latency_ms": 536.5770339849405,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 44,
+      "latency_ms": 535.9796789998654,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 45,
+      "latency_ms": 536.1448109906632,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 46,
+      "latency_ms": 536.0384529922158,
+      "gt_action": 2,
+      "pred_action": 2,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 47,
+      "latency_ms": 535.6635969947092,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 48,
+      "latency_ms": 535.663062997628,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 49,
+      "latency_ms": 536.006525013363,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 50,
+      "latency_ms": 535.8786860015243,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 51,
+      "latency_ms": 535.8846940216608,
+      "gt_action": 2,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 52,
+      "latency_ms": 535.6848519877531,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 53,
+      "latency_ms": 535.8761420066003,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 54,
+      "latency_ms": 535.7292580010835,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 55,
+      "latency_ms": 535.6531649886165,
+      "gt_action": 1,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 56,
+      "latency_ms": 534.7112419840414,
+      "gt_action": 1,
+      "pred_action": 3,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 57,
+      "latency_ms": 535.8706689730752,
+      "gt_action": 1,
+      "pred_action": 3,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 58,
+      "latency_ms": 536.288189003244,
+      "gt_action": 3,
+      "pred_action": 1,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 59,
+      "latency_ms": 536.8179840152152,
+      "gt_action": 1,
+      "pred_action": 2,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 60,
+      "latency_ms": 536.5811430092435,
+      "gt_action": 1,
+      "pred_action": 2,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 61,
+      "latency_ms": 536.5616740018595,
+      "gt_action": 2,
+      "pred_action": 2,
+      "memory_frames_used": 9
+    },
+    {
+      "step": 62,
+      "latency_ms": 536.629666981753,
+      "gt_action": 1,
+      "pred_action": 2,
+      "memory_frames_used": 9
+    }
+  ]
+}

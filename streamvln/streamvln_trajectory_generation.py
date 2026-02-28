@@ -216,7 +216,7 @@ class StreamVLNHabitatRunner:
                 if self.save_frame_images:
                     frame_base_dir = self.frame_output_dir or os.path.join(self.output_path, "frames")
                     episode_frame_dir = os.path.join(
-                        frame_base_dir, f"{scene_id}_{self.dataset}_{episode_id:06d}"
+                        frame_base_dir, self.dataset, f"{scene_id}_{self.dataset}_{episode_id:06d}"
                     )
                     os.makedirs(episode_frame_dir, exist_ok=True)
 
