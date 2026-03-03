@@ -13,7 +13,7 @@ model:
   # Examples:
   #   - "outputs/actor/lora/run-2-3-11-07"  (LoRA checkpoint)
   #   - "outputs/actor/final_model"          (Full model)
-  model_path: "outputs/actor/lora/run-2-3-11-07"
+  model_path: "outputs/actor/full/run-3-2-seperate-2"
   
   # Base model path (required for LoRA checkpoints, ignored for full models)
   # This should point to the pretrained Qwen3VL model used during training
@@ -28,13 +28,13 @@ model:
 # ============================================================================
 data:
   # Root directory for images
-  image_root: "/mnt/nvme/swx/dataset/R2R"
+  image_root: "/mnt/swx/ThinkVLN/data/trajectory_data/R2R_back/r2r"
 
   # Path to action prediction data (JSONL)
   action_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/R2R_back/summary_full.jsonl"
   
   # Path to Chain-of-Thought (CoT) data (JSONL)
-  cot_data_path: "/mnt/swx/ThinkVLN/data/cot_dataset/cot_dataset_answer.jsonl"
+  cot_data_path: null
   
   # Number of learnable query tokens (must match training config)
   num_query_tokens: 4
@@ -45,7 +45,7 @@ data:
 
 
 # ============================================================================
-# Evaluation Configuration
+# Evaluation Configur ation
 # ============================================================================
 evaluation:
   # Batch size per device for evaluation

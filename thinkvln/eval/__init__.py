@@ -1,6 +1,5 @@
-"""Training and Evaluation Engine"""
+"""Evaluation package."""
 
-from .env_eval import *
-from .openloop_eval import *
+from .close_eval import VLNEvaluator, eval, evaluate
 
-__all__ = []
+__all__ = ["VLNEvaluator", "eval", "evaluate"]

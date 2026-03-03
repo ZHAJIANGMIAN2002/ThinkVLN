@@ -1,8 +1,8 @@
 """ThinkVLN Dataset and Collator for mixed action and CoT training"""
 
+import logging
 import torch
 from torch.utils.data import Dataset, Sampler
-from PIL import Image
 from typing import List, Dict, Any, Optional, Iterator
 import os
 import json
@@ -20,6 +20,20 @@ ACTION_MAPPING = {
     3: "turn_right"
 }
 
+logger = logging.getLogger(__name__)
+
+
+def _episode_key_to_dir_key(episode_key: str) -> str:
+    """Convert episode key to directory key if possible."""
+    parts = episode_key.split('_')
+    if len(parts) == 2:
+        scene_id, episode_id = parts
+        try:
+            return f"{scene_id}_r2r_{int(episode_id):06d}"
+        except ValueError:
+            return episode_key
+    return episode_key
+
 
 class ThinkVLNDataset(Dataset):
     """Mixed action and CoT dataset for ThinkVLN training."""
@@ -29,21 +43,37 @@ class ThinkVLNDataset(Dataset):
         action_data_path: Optional[str] = None,
         cot_data_path: Optional[str] = None,
         image_root: Optional[str] = None,
+        skip_missing_images: bool = False,
         seed: int = 42,
     ):
         self.action_data_path = action_data_path
         self.cot_data_path = cot_data_path
         self.image_root = image_root
+        self.skip_missing_images = skip_missing_images
         self.seed = seed
         
         self.action_samples = []
         self.cot_samples = []
         self.samples = []
+        self.missing_action_images = 0
+        self.missing_cot_images = 0
         
         self._load_action_data()
         self._load_cot_data()
         self._mix_samples()
         
+        if self.skip_missing_images and (self.missing_action_images or self.missing_cot_images):
+            logger.warning(
+                "Dataset skipped missing images: action=%d, cot=%d",
+                self.missing_action_images,
+                self.missing_cot_images,
+            )
+
+        if (self.action_data_path or self.cot_data_path) and not self.samples:
+            raise ValueError(
+                "No valid samples loaded. Check image_root/data paths; all candidate samples were filtered."
+            )
+
         print(f"Dataset: {len(self.action_samples)} action, "
               f"{len(self.cot_samples)} CoT, {len(self.samples)} total")
     
@@ -55,7 +85,18 @@ class ThinkVLNDataset(Dataset):
         with open(self.action_data_path, 'r') as f:
             for line in f:
                 traj = json.loads(line.strip())
+                dir_episode_key = _episode_key_to_dir_key(traj['episode_key'])
                 for frame_idx in range(traj['num_frames']):
+                    if self.skip_missing_images and self.image_root:
+                        image_path = os.path.join(
+                            self.image_root,
+                            dir_episode_key,
+                            f"{frame_idx:06d}_rgb.jpg",
+                        )
+                        if not os.path.exists(image_path):
+                            self.missing_action_images += 1
+                            continue
+
                     subtask_idx = traj['subtask_sequence'][frame_idx]
                     plan_step = traj['plan'][subtask_idx - 1] if subtask_idx > 0 else traj['plan'][0]
                     
@@ -78,6 +119,17 @@ class ThinkVLNDataset(Dataset):
         with open(self.cot_data_path, 'r') as f:
             for line in f:
                 entry = json.loads(line.strip())
+                if self.skip_missing_images and self.image_root:
+                    try:
+                        episode_key, step_id = parse_frame_key(entry['frame_key'])
+                    except ValueError:
+                        self.missing_cot_images += 1
+                        continue
+                    dir_episode_key = _episode_key_to_dir_key(episode_key)
+                    image_path = os.path.join(self.image_root, dir_episode_key, f"{step_id:06d}_rgb.jpg")
+                    if not os.path.exists(image_path):
+                        self.missing_cot_images += 1
+                        continue
                 
                 # Parse plan and get current step
                 plan_lines = [l.strip() for l in entry['plan'].split('\n') if l.strip()]
@@ -134,6 +186,7 @@ class HomogeneousBatchSampler(Sampler):
         self.drop_last = drop_last
         self.shuffle = shuffle
         self.seed = seed
+        self.epoch = 0
         
         # Group indices by data type
         self.action_indices = []
@@ -149,21 +202,25 @@ class HomogeneousBatchSampler(Sampler):
         print(f"HomogeneousBatchSampler: {len(self.action_indices)} action, {len(self.cot_indices)} CoT samples")
     
     def __iter__(self) -> Iterator[List[int]]:
+        action_indices = self.action_indices
+        cot_indices = self.cot_indices
+
         # Shuffle if needed
         if self.shuffle:
-            random.seed(self.seed)
-            random.shuffle(self.action_indices)
-            random.shuffle(self.cot_indices)
-            self.seed += 1  # Different shuffle each epoch
+            rng = random.Random(self.seed + self.epoch)
+            action_indices = self.action_indices.copy()
+            cot_indices = self.cot_indices.copy()
+            rng.shuffle(action_indices)
+            rng.shuffle(cot_indices)
         
         # Create batches for each type
         action_batches = [
-            self.action_indices[i:i + self.batch_size]
-            for i in range(0, len(self.action_indices), self.batch_size)
+            action_indices[i:i + self.batch_size]
+            for i in range(0, len(action_indices), self.batch_size)
         ]
         cot_batches = [
-            self.cot_indices[i:i + self.batch_size]
-            for i in range(0, len(self.cot_indices), self.batch_size)
+            cot_indices[i:i + self.batch_size]
+            for i in range(0, len(cot_indices), self.batch_size)
         ]
         
         # Drop last incomplete batch if needed
@@ -174,10 +231,13 @@ class HomogeneousBatchSampler(Sampler):
         # Interleave batches to mix action and CoT training
         all_batches = action_batches + cot_batches
         if self.shuffle:
-            random.shuffle(all_batches)
+            rng.shuffle(all_batches)
         
         for batch in all_batches:
             yield batch
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
     
     def __len__(self) -> int:
         action_batches = len(self.action_indices) // self.batch_size
@@ -217,6 +277,7 @@ class ThinkVLNDataCollator:
         
         self.action_prompt = "Based on the current observation and subtask '{subgoal}', predict the next 4 actions and the progress of the subtask."
         self.cot_prompt = "Based on the current observation and subgoal '{subgoal}', think step by step to determine the action."
+        self._missing_image_count = 0
     
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         """Process batch of mixed samples."""
@@ -225,24 +286,26 @@ class ThinkVLNDataCollator:
         for sample in batch:
             if sample is None or ('data_type' not in sample):
                 continue
-            if sample['data_type'] == 'action':
-                processed.append(self._process_action(sample))
-            else:
-                processed.append(self._process_cot(sample))
+
+            try:
+                if sample['data_type'] == 'action':
+                    processed.append(self._process_action(sample))
+                else:
+                    processed.append(self._process_cot(sample))
+            except FileNotFoundError as exc:
+                self._missing_image_count += 1
+                if self._missing_image_count <= 10 or self._missing_image_count % 100 == 0:
+                    logger.warning("Skipping sample with missing image: %s", exc)
+                continue
+
+        if not processed:
+            raise RuntimeError("All samples in batch were skipped due to missing images.")
         
         return self._collate(processed)
     
     def _process_action(self, sample: Dict[str, Any]) -> Dict[str, Any]:
         """Process action sample with query tokens."""
-        # Convert episode_key format: "17DRP5sb8fy_10154" -> "17DRP5sb8fy_r2r_010154"
-        episode_key = sample['episode_key']
-        parts = episode_key.split('_')
-        if len(parts) == 2:
-            scene_id = parts[0]
-            episode_id = parts[1]
-            dir_episode_key = f"{scene_id}_r2r_{int(episode_id):06d}"
-        else:
-            dir_episode_key = episode_key
+        dir_episode_key = _episode_key_to_dir_key(sample['episode_key'])
         
         # Load image
         image_path = os.path.join(
@@ -311,14 +374,7 @@ class ThinkVLNDataCollator:
         # Parse frame_key to get episode_key and step_id
         episode_key, step_id = parse_frame_key(sample['frame_key'])
         
-        # Convert episode_key format: "17DRP5sb8fy_10154" -> "17DRP5sb8fy_r2r_010154"
-        parts = episode_key.split('_')
-        if len(parts) == 2:
-            scene_id = parts[0]
-            episode_id = parts[1]
-            dir_episode_key = f"{scene_id}_r2r_{int(episode_id):06d}"
-        else:
-            dir_episode_key = episode_key
+        dir_episode_key = _episode_key_to_dir_key(episode_key)
         
         # Load image
         image_path = os.path.join(self.image_root, dir_episode_key, f"{step_id:06d}_rgb.jpg")

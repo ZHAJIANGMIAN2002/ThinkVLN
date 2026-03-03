@@ -226,6 +226,121 @@ class ThinkVLNNavigationModel(NavigationModel):
         return action, prev_subtask
 
 
+class ThinkVLNActorNavigationModel(NavigationModel):
+    """ThinkVLNActor wrapper for closed-loop action/progress inference."""
+
+    def __init__(self, model, processor, device: str = "cuda"):
+        self.model = model
+        self.processor = processor
+        self.device = device
+
+        self.actions2idx = {
+            "stop": 0,
+            "forward": 1,
+            "turn_left": 2,
+            "turn_right": 3,
+        }
+        self.num_query_tokens = int(getattr(model.config, "num_query_tokens", 4))
+        self.action_query_token_id = int(getattr(model.config, "action_query_token_id", 151700))
+        self.progress_query_token_id = int(getattr(model.config, "progress_query_token_id", 151701))
+        self.prompt_template = (
+            "Instruction: {instruction}\n"
+            "Current subgoal: {subgoal}\n"
+            "Predict the next 4 actions and subgoal progress."
+        )
+
+    def eval(self):
+        self.model.eval()
+
+    def _build_query_tokens(self) -> torch.Tensor:
+        tokens = []
+        for _ in range(self.num_query_tokens):
+            tokens.append(self.action_query_token_id)
+            tokens.append(self.progress_query_token_id)
+        return torch.tensor(tokens, dtype=torch.long, device=self.device).unsqueeze(0)
+
+    def _build_inputs(self, observation: Image.Image, prompt: str) -> dict:
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image", "image": observation},
+                {"type": "text", "text": prompt},
+            ],
+        }]
+        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = self.processor(
+            text=[text],
+            images=[observation],
+            return_tensors="pt",
+            padding=False,
+        )
+
+        input_ids = inputs["input_ids"].to(self.device)
+        attention_mask = inputs["attention_mask"].to(self.device)
+        query_tokens = self._build_query_tokens()
+        input_ids = torch.cat([input_ids, query_tokens], dim=1)
+        attention_mask = torch.cat(
+            [attention_mask, torch.ones((1, query_tokens.shape[1]), dtype=torch.long, device=self.device)],
+            dim=1,
+        )
+
+        model_inputs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "action_labels": torch.zeros((1, self.num_query_tokens), dtype=torch.long, device=self.device),
+            "progress_labels": torch.zeros((1, self.num_query_tokens), dtype=torch.float32, device=self.device),
+        }
+        if "pixel_values" in inputs and inputs["pixel_values"] is not None:
+            model_inputs["pixel_values"] = inputs["pixel_values"].to(self.device)
+        if "image_grid_thw" in inputs and inputs["image_grid_thw"] is not None:
+            model_inputs["image_grid_thw"] = inputs["image_grid_thw"].to(self.device)
+        return model_inputs
+
+    def predict_action_with_progress(
+        self,
+        observation: Image.Image,
+        instruction: str,
+        subgoal: str,
+    ) -> Tuple[int, float]:
+        prompt = self.prompt_template.format(instruction=instruction, subgoal=subgoal)
+        model_inputs = self._build_inputs(observation, prompt)
+
+        with torch.no_grad():
+            outputs = self.model(**model_inputs, return_dict=True)
+
+        action_logits = outputs.get("action_logits")
+        progress_preds = outputs.get("progress_preds")
+
+        if action_logits is None or action_logits.shape[1] == 0:
+            return self.actions2idx["stop"], 0.0
+
+        action = int(torch.argmax(action_logits[0, 0], dim=-1).item())
+        progress = 0.0
+        if progress_preds is not None and progress_preds.shape[1] > 0:
+            progress = float(progress_preds[0, 0].item())
+        progress = max(0.0, min(1.0, progress))
+        return action, progress
+
+    def predict_action(
+        self,
+        observation: Image.Image,
+        instruction: str,
+        plan: Optional[str] = None,
+        prev_subtask: Optional[str] = None,
+        **kwargs
+    ) -> Tuple[int, Optional[str]]:
+        subgoal = kwargs.get("subgoal") or plan or "Navigate to the goal."
+        try:
+            action, _ = self.predict_action_with_progress(
+                observation=observation,
+                instruction=instruction,
+                subgoal=subgoal,
+            )
+            return action, None
+        except Exception:
+            return self.actions2idx["stop"], None
+
+
 class StreamVLNNavigationModel(NavigationModel):
     """
     StreamVLN model wrapper implementing NavigationModel interface.

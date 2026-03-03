@@ -2,8 +2,8 @@
 set -e
 
 
-# export GPUS="0,1,2,3,4,5,6,7"
-export GPUS="4,5,6,7"
+export GPUS="0,1,2,3,4,5,6,7"
+# export GPUS="4,5,6,7"
 CONFIG_FILE="config/sft_training.yaml"
 
 NUM_GPUS=$(echo "$GPUS" | awk -F',' '{print NF}')

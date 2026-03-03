@@ -41,6 +41,7 @@ class StreamVLNHabitatRunner:
         scenes_dir: str = None,
         save_frame_images: bool = False,
         frame_output_dir: str = None,
+        split_tag: str = None,
     ):
         self.device = torch.device("cuda")
         self.dataset = dataset.lower()
@@ -50,6 +51,7 @@ class StreamVLNHabitatRunner:
         self.scenes_dir = scenes_dir
         self.save_frame_images = save_frame_images
         self.frame_output_dir = frame_output_dir
+        self.split_tag = (split_tag or "").strip()
 
         self.config = get_habitat_config(self.config_path)
         
@@ -105,8 +107,8 @@ class StreamVLNHabitatRunner:
                 for line in f:
                     try:
                         data = json.loads(line)
-                        # Use scene_id + id as unique key
-                        key = f"{data['scene_id']}_{data['id']}"
+                        # Prefer persisted key for backward/forward compatibility.
+                        key = data.get("key", f"{data['scene_id']}_{data['id']}")
                         processed_keys.add(key)
                     except json.JSONDecodeError:
                         continue
@@ -123,7 +125,15 @@ class StreamVLNHabitatRunner:
                 scene_id = episode.scene_id.split('/')[-2]
                 
                 # Use scene_id + episode_id as unique key
-                unique_key = f"{scene_id}_{episode_id}"
+                base_key = f"{scene_id}_{episode_id}"
+                unique_key = (
+                    f"{self.split_tag}:{base_key}" if self.split_tag else base_key
+                )
+                run_prefix = (
+                    f"{scene_id}_{self.dataset}_{self.split_tag}_{episode_id:06d}"
+                    if self.split_tag
+                    else f"{scene_id}_{self.dataset}_{episode_id:06d}"
+                )
                 
                 # Skip if already processed
                 if unique_key in processed_keys:
@@ -147,7 +157,7 @@ class StreamVLNHabitatRunner:
                 if self.save_frame_images and self.frame_output_dir:
                     episode_frame_dir = os.path.join(
                         self.frame_output_dir, self.dataset,
-                        f"{scene_id}_{self.dataset}_{episode_id:06d}"
+                        run_prefix,
                     )
                     os.makedirs(episode_frame_dir, exist_ok=True)
 
@@ -204,7 +214,7 @@ class StreamVLNHabitatRunner:
                 # Generate video from collected frames
                 if len(vis_frames) > 0:
                     video_dir = os.path.join(
-                        self.output_path, "images", f"{scene_id}_{self.dataset}_{episode_id:06d}"
+                        self.output_path, "images", run_prefix
                     )
                     os.makedirs(video_dir, exist_ok=True)
                     images_to_video(
@@ -219,7 +229,7 @@ class StreamVLNHabitatRunner:
                 result = {
                     "id": episode_id,
                     "key": unique_key,
-                    "video": os.path.join("images", f"{scene_id}_{self.dataset}_{episode_id:06d}"),
+                    "video": os.path.join("images", run_prefix),
                     "instructions": instructions if isinstance(instructions, list) else [instructions],
                     "actions": actions,
                     "trajectory_id": trajectory_id,
@@ -246,6 +256,7 @@ def worker(rank, world_size, args):
         scenes_dir=args.scenes_dir,
         save_frame_images=args.save_frame_images,
         frame_output_dir=args.frame_output_dir,
+        split_tag=args.split_tag,
     )
     # 每个进程调用相同的 generate 函数，但传入不同的 rank
     runner.generate(rank=rank, world_size=world_size)
@@ -261,6 +272,7 @@ if __name__ == "__main__":
     parser.add_argument("--scenes_dir", type=str, default=None)
     parser.add_argument("--save_frame_images", action="store_true")
     parser.add_argument("--frame_output_dir", type=str, default=None)
+    parser.add_argument("--split_tag", type=str, default=None)
     parser.add_argument(
         "--world_size", type=int, default=1, help="Number of concurrent processes to use."
     )
@@ -312,6 +324,7 @@ if __name__ == "__main__":
             scenes_dir=args.scenes_dir,
             save_frame_images=args.save_frame_images,
             frame_output_dir=args.frame_output_dir,
+            split_tag=args.split_tag,
         )
         runner.generate(rank=0, world_size=1)
         print("Trajectory generation completed.")

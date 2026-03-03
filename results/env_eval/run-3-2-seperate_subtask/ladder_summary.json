@@ -1,0 +1,14 @@
+{
+  "subtask_closed_loop": {
+    "subtask_success_rate": 0.0,
+    "steps_to_subgoal": 0.0,
+    "progress_mae": 0.0,
+    "total_subtasks": 0,
+    "successful_subtasks": 0,
+    "progress_samples": 0,
+    "episodes_total": 1839,
+    "episodes_evaluated": 0,
+    "episodes_missing_meta": 1839,
+    "episodes_malformed": 0
+  }
+}

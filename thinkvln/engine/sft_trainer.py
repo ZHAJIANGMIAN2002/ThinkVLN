@@ -33,6 +33,7 @@ import torch
 import logging
 import yaml
 import argparse
+import numpy as np
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, Any, Union, Tuple
 from transformers import (
@@ -256,14 +257,17 @@ class ThinkVLNSFTTrainer(Trainer):
             shuffle=True,
             seed=self.args.seed,
         )
-        
-        return DataLoader(
+
+        dataloader = DataLoader(
             train_dataset,
             batch_sampler=train_sampler,
             collate_fn=data_collator,
             num_workers=self.args.dataloader_num_workers,
             pin_memory=self.args.dataloader_pin_memory,
         )
+
+        # Important: let Accelerate shard this custom batch sampler across ranks.
+        return self.accelerator.prepare(dataloader)
     
     def compute_loss(
         self,
@@ -347,8 +351,6 @@ class ThinkVLNSFTTrainer(Trainer):
         """
         Custom evaluation loop that properly handles action and CoT samples.
         """
-        import numpy as np
-        
         model = self._wrap_model(self.model, training=False, dataloader=dataloader)
         model.eval()
         
@@ -440,6 +442,9 @@ class ThinkVLNSFTTrainer(Trainer):
         if cot_metrics["losses"]:
             metrics[f"{metric_key_prefix}_lm_loss"] = np.mean(cot_metrics["losses"])
             metrics[f"{metric_key_prefix}_perplexity"] = np.exp(np.mean(cot_metrics["losses"]))
+
+        # Convert numpy/tensor scalars to Python scalars for JSON serialization.
+        metrics = self._to_json_serializable_metrics(metrics)
         
         # Return in the format expected by Trainer
         from transformers.trainer_utils import EvalLoopOutput
@@ -449,6 +454,26 @@ class ThinkVLNSFTTrainer(Trainer):
             metrics=metrics,
             num_samples=len(dataloader.dataset) if hasattr(dataloader, 'dataset') else None,
         )
+
+    @staticmethod
+    def _to_json_serializable_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
+        sanitized: Dict[str, Any] = {}
+        for key, value in metrics.items():
+            if isinstance(value, torch.Tensor):
+                if value.numel() == 1:
+                    sanitized[key] = value.item()
+                else:
+                    sanitized[key] = value.detach().cpu().tolist()
+            elif isinstance(value, np.generic):
+                sanitized[key] = value.item()
+            elif isinstance(value, np.ndarray):
+                if value.size == 1:
+                    sanitized[key] = value.item()
+                else:
+                    sanitized[key] = value.tolist()
+            else:
+                sanitized[key] = value
+        return sanitized
     
     def get_eval_dataloader(self, eval_dataset=None):
         """
@@ -471,7 +496,7 @@ class ThinkVLNSFTTrainer(Trainer):
             shuffle=False,  # No shuffle for eval
             seed=self.args.seed,
         )
-        
+
         return DataLoader(
             eval_dataset,
             batch_sampler=eval_sampler,
@@ -771,6 +796,7 @@ def create_datasets(args: ThinkVLNTrainingArguments, processor, model):
         action_data_path=args.action_data_path,
         cot_data_path=args.cot_data_path,
         image_root=args.image_root,
+        skip_missing_images=True,
     )
     logger.info(f"Full dataset created with {len(full_dataset)} samples")
     

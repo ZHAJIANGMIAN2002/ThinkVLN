@@ -9,9 +9,13 @@ Supports both full fine-tuned models and LoRA adapters.
 Usage:
     python thinkvln/engine/evaluate.py \
         --model_path outputs/actor/checkpoint-1000 \
-        --data_config config/sft_training.yaml \
+        --config config/eval_config.yaml \
         --batch_size 16 \
         --output_dir eval_results
+
+    torchrun --nproc_per_node=4 thinkvln/engine/evaluate.py \
+        --config config/eval_config.yaml \
+        --model_path outputs/actor/checkpoint-1000
 """
 
 import sys
@@ -26,6 +30,7 @@ import json
 from pathlib import Path
 from typing import Dict, Any
 from torch.utils.data import DataLoader
+from torch.utils.data import Sampler
 import numpy as np
 from tqdm import tqdm
 
@@ -35,6 +40,62 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+
+class ShardedBatchSampler(Sampler):
+    """Shard a batch sampler by rank (rank gets batches i where i % world_size == rank)."""
+
+    def __init__(self, batch_sampler, num_replicas: int, rank: int):
+        self.batch_sampler = batch_sampler
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.batch_size = getattr(batch_sampler, "batch_size", None)
+        self.drop_last = getattr(batch_sampler, "drop_last", False)
+
+    def __iter__(self):
+        for i, batch in enumerate(self.batch_sampler):
+            if i % self.num_replicas == self.rank:
+                yield batch
+
+    def __len__(self):
+        total = len(self.batch_sampler)
+        if total <= self.rank:
+            return 0
+        return (total - 1 - self.rank) // self.num_replicas + 1
+
+    def set_epoch(self, epoch: int):
+        if hasattr(self.batch_sampler, "set_epoch"):
+            self.batch_sampler.set_epoch(epoch)
+
+
+def init_distributed(device_arg: str = None):
+    """Initialize distributed evaluation from torchrun env if available."""
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    distributed = world_size > 1
+
+    if distributed and not torch.distributed.is_initialized():
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        torch.distributed.init_process_group(backend=backend, init_method="env://")
+
+    if distributed:
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            device = f"cuda:{local_rank}"
+        else:
+            device = "cpu"
+    else:
+        device = device_arg or ("cuda" if torch.cuda.is_available() else "cpu")
+
+    return {
+        "distributed": distributed,
+        "world_size": world_size,
+        "rank": rank,
+        "local_rank": local_rank,
+        "device": device,
+        "is_main_process": rank == 0,
+    }
 
 
 def load_model(model_path: str, base_model_path: str = None, device: str = "cuda"):
@@ -54,6 +115,8 @@ def load_model(model_path: str, base_model_path: str = None, device: str = "cuda
     from thinkvln.models.actor_config import ThinkVLNActorConfig
     
     logger.info(f"Loading model from {model_path}")
+    use_cuda = str(device).startswith("cuda")
+    model_dtype = torch.bfloat16 if use_cuda else torch.float32
     
     # Check if it's a LoRA checkpoint
     adapter_config_path = os.path.join(model_path, "adapter_config.json")
@@ -98,7 +161,7 @@ def load_model(model_path: str, base_model_path: str = None, device: str = "cuda
             actual_base_model,
             actor_config=actor_config,
             device_map="cpu",  # Load on CPU first
-            torch_dtype=torch.bfloat16,
+            torch_dtype=model_dtype,
         )
         
         # Load LoRA adapter
@@ -106,9 +169,9 @@ def load_model(model_path: str, base_model_path: str = None, device: str = "cuda
         logger.info("Loading LoRA adapter...")
         model = PeftModel.from_pretrained(model, model_path)
         
-        # Convert all parameters to bfloat16 (including actor heads from modules_to_save)
-        logger.info("Converting model to bfloat16...")
-        model = model.to(dtype=torch.bfloat16)
+        # Convert all parameters to target dtype (including actor heads from modules_to_save)
+        logger.info(f"Converting model to {model_dtype}...")
+        model = model.to(dtype=model_dtype)
         
         # Move entire model to target device
         logger.info(f"Moving model to {device}...")
@@ -120,9 +183,10 @@ def load_model(model_path: str, base_model_path: str = None, device: str = "cuda
         processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
         model = ThinkVLNActor.from_pretrained(
             model_path,
-            device_map=device,
-            torch_dtype=torch.bfloat16,
+            device_map="cpu",
+            torch_dtype=model_dtype,
         )
+        model = model.to(device)
     
     model.eval()
     logger.info("Model loaded successfully")
@@ -168,6 +232,7 @@ def create_eval_dataset(data_config: Dict[str, Any], processor, sample_ratio: fl
         action_data_path=action_data_path,
         cot_data_path=cot_data_path,
         image_root=image_root,
+        skip_missing_images=True,
     )
     
     logger.info(f"Full dataset created with {len(full_dataset)} samples")
@@ -198,17 +263,28 @@ def create_eval_dataset(data_config: Dict[str, Any], processor, sample_ratio: fl
     return dataset, collator
 
 
-def create_dataloader(dataset, collator, batch_size: int = 16, num_workers: int = 0):
+def create_dataloader(
+    dataset,
+    collator,
+    batch_size: int = 16,
+    num_workers: int = 0,
+    world_size: int = 1,
+    rank: int = 0,
+):
     """Create evaluation dataloader with HomogeneousBatchSampler."""
     from thinkvln.dataset.dataset import HomogeneousBatchSampler
     
-    sampler = HomogeneousBatchSampler(
+    base_sampler = HomogeneousBatchSampler(
         dataset=dataset,
         batch_size=batch_size,
         drop_last=False,
         shuffle=False,
         seed=42,
     )
+
+    sampler = base_sampler
+    if world_size > 1:
+        sampler = ShardedBatchSampler(base_sampler, num_replicas=world_size, rank=rank)
     
     dataloader = DataLoader(
         dataset,
@@ -227,6 +303,8 @@ def evaluate_model(
     device: str = "cuda",
     progress_metric: str = "l1",
     action_metric: str = "accuracy",
+    rank: int = 0,
+    world_size: int = 1,
 ) -> Dict[str, float]:
     """
     Evaluate model on dataset.
@@ -242,114 +320,128 @@ def evaluate_model(
         Dictionary of evaluation metrics
     """
     model.eval()
-    
-    # Initialize metric accumulators
-    all_losses = []
-    action_metrics = {
-        "preds": [],
-        "labels": [],
-        "progress_preds": [],
-        "progress_labels": []
-    }
-    cot_metrics = {"losses": []}
-    
+    is_distributed = world_size > 1 and torch.distributed.is_initialized()
+    metric_device = torch.device(device if str(device).startswith("cuda") else "cpu")
+
+    # Scalar accumulators (better for distributed all_reduce than gathering full predictions)
+    loss_sum = 0.0
+    loss_count = 0
+    action_correct = 0
+    action_total = 0
+    action_first_correct = 0
+    action_first_total = 0
+    progress_sum = 0.0
+    progress_count = 0
+    cot_loss_sum = 0.0
+    cot_loss_count = 0
+
     logger.info("Running evaluation...")
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Evaluating"):
-            # Move to device
-            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                     for k, v in batch.items()}
-            
-            # Forward pass
+        iterator = dataloader if rank != 0 else tqdm(dataloader, desc="Evaluating")
+        for batch in iterator:
+            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             outputs = model(**inputs)
             loss = outputs.get("loss")
-            
+
             if loss is not None:
-                all_losses.append(loss.item())
-            
-            # Collect predictions based on sample type
-            if inputs.get("action_labels") is not None:
-                # Action mode
+                loss_sum += float(loss.item())
+                loss_count += 1
+
+            action_labels = inputs.get("action_labels")
+            if action_labels is not None:
                 action_logits = outputs.get("action_logits")
                 progress_preds = outputs.get("progress_preds")
-                action_labels = inputs.get("action_labels")
                 progress_labels = inputs.get("progress_labels")
-                
-                if action_logits is not None:
+
+                if action_logits is not None and action_metric == "accuracy":
                     action_preds = torch.argmax(action_logits, dim=-1)
-                    action_metrics["preds"].append(action_preds.cpu())
-                    action_metrics["labels"].append(action_labels.cpu())
-                
+                    valid_mask = action_labels != -100
+                    action_correct += int(((action_preds == action_labels) & valid_mask).sum().item())
+                    action_total += int(valid_mask.sum().item())
+
+                    if action_labels.shape[1] > 0:
+                        first_labels = action_labels[:, 0]
+                        first_preds = action_preds[:, 0]
+                        first_valid = first_labels != -100
+                        action_first_correct += int(((first_preds == first_labels) & first_valid).sum().item())
+                        action_first_total += int(first_valid.sum().item())
+
                 if progress_preds is not None and progress_labels is not None:
-                    action_metrics["progress_preds"].append(progress_preds.cpu())
-                    action_metrics["progress_labels"].append(progress_labels.cpu())
+                    valid_mask = torch.isfinite(progress_labels) & (progress_labels != -100)
+                    if valid_mask.any():
+                        diff = progress_preds - progress_labels
+                        if progress_metric == "l1":
+                            progress_sum += float(diff.abs()[valid_mask].sum().item())
+                        elif progress_metric == "mse":
+                            progress_sum += float((diff[valid_mask] ** 2).sum().item())
+                        elif progress_metric == "huber":
+                            delta = 1.0
+                            abs_diff = diff.abs()[valid_mask]
+                            huber = torch.where(
+                                abs_diff <= delta,
+                                0.5 * abs_diff ** 2,
+                                delta * (abs_diff - 0.5 * delta),
+                            )
+                            progress_sum += float(huber.sum().item())
+                        progress_count += int(valid_mask.sum().item())
             else:
-                # CoT mode
                 cot_loss = outputs.get("lm_loss")
                 if cot_loss is not None:
-                    cot_metrics["losses"].append(cot_loss.item())
-    
-    # Compute metrics
-    metrics = {}
-    
-    # Overall loss
-    if all_losses:
-        metrics["eval_loss"] = np.mean(all_losses)
-    
-    # Action metrics
-    if action_metrics["preds"]:
-        action_preds = torch.cat(action_metrics["preds"], dim=0).numpy()   # [num_samples, 4]
-        action_labels = torch.cat(action_metrics["labels"], dim=0).numpy() # [num_samples, 4]
-        
-        if action_metric == "accuracy":
-            # Token-level accuracy across all 4 predicted steps
-            valid_mask = action_labels != -100
-            if valid_mask.sum() > 0:
-                correct = (action_preds == action_labels) & valid_mask
-                accuracy = correct.sum() / valid_mask.sum()
-                metrics["eval_action_accuracy"] = float(accuracy)
+                    cot_loss_sum += float(cot_loss.item())
+                    cot_loss_count += 1
 
-            # First-step accuracy: only check the first of the 4 actions
-            if action_labels.shape[1] > 0:
-                first_preds = action_preds[:, 0]
-                first_labels = action_labels[:, 0]
-                first_valid = first_labels != -100
-                if first_valid.sum() > 0:
-                    first_correct = (first_preds == first_labels) & first_valid
-                    first_acc = first_correct.sum() / first_valid.sum()
-                    metrics["eval_action_first_step_accuracy"] = float(first_acc)
-    
-    # Progress metrics
-    if action_metrics["progress_preds"]:
-        progress_preds = torch.cat(action_metrics["progress_preds"], dim=0).float().numpy()
-        progress_labels = torch.cat(action_metrics["progress_labels"], dim=0).float().numpy()
-        
-        valid_mask = ~np.isnan(progress_labels) & ~np.isinf(progress_labels) & (progress_labels != -100)
-        if valid_mask.sum() > 0:
-            valid_preds = progress_preds[valid_mask]
-            valid_labels = progress_labels[valid_mask]
-            
-            if progress_metric == "l1":
-                progress_error = np.abs(valid_preds - valid_labels).mean()
-                metrics["eval_progress_l1"] = float(progress_error)
-            elif progress_metric == "mse":
-                progress_error = ((valid_preds - valid_labels) ** 2).mean()
-                metrics["eval_progress_mse"] = float(progress_error)
-            elif progress_metric == "huber":
-                delta = 1.0
-                abs_error = np.abs(valid_preds - valid_labels)
-                huber = np.where(
-                    abs_error <= delta,
-                    0.5 * abs_error ** 2,
-                    delta * (abs_error - 0.5 * delta)
-                )
-                metrics["eval_progress_huber"] = float(huber.mean())
-    
-    # CoT metrics
-    if cot_metrics["losses"]:
-        metrics["eval_lm_loss"] = np.mean(cot_metrics["losses"])
-        metrics["eval_perplexity"] = np.exp(np.mean(cot_metrics["losses"]))
-    
+    stats = torch.tensor(
+        [
+            loss_sum,
+            float(loss_count),
+            float(action_correct),
+            float(action_total),
+            float(action_first_correct),
+            float(action_first_total),
+            progress_sum,
+            float(progress_count),
+            cot_loss_sum,
+            float(cot_loss_count),
+        ],
+        device=metric_device,
+        dtype=torch.float64,
+    )
+
+    if is_distributed:
+        torch.distributed.all_reduce(stats, op=torch.distributed.ReduceOp.SUM)
+
+    (
+        loss_sum,
+        loss_count,
+        action_correct,
+        action_total,
+        action_first_correct,
+        action_first_total,
+        progress_sum,
+        progress_count,
+        cot_loss_sum,
+        cot_loss_count,
+    ) = stats.tolist()
+
+    metrics = {}
+    if loss_count > 0:
+        metrics["eval_loss"] = float(loss_sum / loss_count)
+    if action_total > 0:
+        metrics["eval_action_accuracy"] = float(action_correct / action_total)
+    if action_first_total > 0:
+        metrics["eval_action_first_step_accuracy"] = float(action_first_correct / action_first_total)
+    if progress_count > 0:
+        metric_key = {
+            "l1": "eval_progress_l1",
+            "mse": "eval_progress_mse",
+            "huber": "eval_progress_huber",
+        }[progress_metric]
+        metrics[metric_key] = float(progress_sum / progress_count)
+    if cot_loss_count > 0:
+        mean_cot_loss = float(cot_loss_sum / cot_loss_count)
+        metrics["eval_lm_loss"] = mean_cot_loss
+        metrics["eval_perplexity"] = float(np.exp(mean_cot_loss))
+
     return metrics
 
 
@@ -401,6 +493,12 @@ def main():
         "--output_dir",
         type=str,
         help="Directory to save evaluation results (overrides config)"
+    )
+    parser.add_argument(
+        "--local_rank",
+        type=int,
+        default=-1,
+        help=argparse.SUPPRESS,
     )
     
     args = parser.parse_args()
@@ -455,18 +553,30 @@ def main():
     if not model_path:
         raise ValueError("model_path is required")
     
-    logger.info("=" * 80)
-    logger.info("ThinkVLN Model Evaluation")
-    logger.info("=" * 80)
-    logger.info(f"Model path: {model_path}")
-    if base_model_path:
-        logger.info(f"Base model path: {base_model_path}")
-    logger.info(f"Batch size: {batch_size}")
-    logger.info(f"Device: {device}")
-    logger.info(f"Progress metric: {progress_metric}")
-    logger.info(f"Action metric: {action_metric}")
-    logger.info(f"Sample ratio: {sample_ratio}")
-    logger.info("=" * 80)
+    dist = init_distributed(device)
+    device = dist["device"]
+    rank = dist["rank"]
+    world_size = dist["world_size"]
+    is_main = dist["is_main_process"]
+
+    if not is_main:
+        logging.getLogger().setLevel(logging.WARNING)
+        logger.setLevel(logging.WARNING)
+
+    if is_main:
+        logger.info("=" * 80)
+        logger.info("ThinkVLN Model Evaluation")
+        logger.info("=" * 80)
+        logger.info(f"Model path: {model_path}")
+        if base_model_path:
+            logger.info(f"Base model path: {base_model_path}")
+        logger.info(f"Batch size: {batch_size}")
+        logger.info(f"Device: {device}")
+        logger.info(f"Distributed: {world_size} processes")
+        logger.info(f"Progress metric: {progress_metric}")
+        logger.info(f"Action metric: {action_metric}")
+        logger.info(f"Sample ratio: {sample_ratio}")
+        logger.info("=" * 80)
     
     # Load model and processor
     model, processor = load_model(model_path, base_model_path, device)
@@ -480,7 +590,9 @@ def main():
         dataset,
         collator,
         batch_size=batch_size,
-        num_workers=num_workers
+        num_workers=num_workers,
+        world_size=world_size,
+        rank=rank,
     )
     
     # Run evaluation
@@ -490,24 +602,31 @@ def main():
         device=device,
         progress_metric=progress_metric,
         action_metric=action_metric,
+        rank=rank,
+        world_size=world_size,
     )
-    
-    # Print results
-    logger.info("=" * 80)
-    logger.info("Evaluation Results:")
-    logger.info("=" * 80)
-    for key, value in sorted(metrics.items()):
-        logger.info(f"  {key}: {value:.4f}")
-    logger.info("=" * 80)
-    
-    # Save results
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    
-    results_file = output_path / "eval_results.json"
-    with open(results_file, 'w') as f:
-        json.dump(metrics, f, indent=2)
-    logger.info(f"Results saved to {results_file}")
+
+    if is_main:
+        # Print results
+        logger.info("=" * 80)
+        logger.info("Evaluation Results:")
+        logger.info("=" * 80)
+        for key, value in sorted(metrics.items()):
+            logger.info(f"  {key}: {value:.4f}")
+        logger.info("=" * 80)
+
+        # Save results
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        results_file = output_path / "eval_results.json"
+        with open(results_file, 'w') as f:
+            json.dump(metrics, f, indent=2)
+        logger.info(f"Results saved to {results_file}")
+
+    if dist["distributed"] and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

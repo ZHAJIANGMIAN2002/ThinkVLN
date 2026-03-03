@@ -28,7 +28,7 @@ model:
   use_huber_loss_for_progress: true  # Use Huber (SmoothL1) instead of MSE for progress, more robust to outliers
 
   # LoRA configuration for parameter-efficient fine-tuning
-  use_lora: true               # Enable LoRA adapters
+  use_lora: false               # Enable LoRA adapters
   lora_r: 32                    # LoRA rank (4, 8, 16, 32)
   lora_alpha: 64               # LoRA scaling factor (usually 2*r)
   lora_dropout: 0.05           # Dropout for LoRA layers
@@ -51,7 +51,7 @@ model:
 # ============================================================================
 data:
   # Root directory for images
-  image_root: "/mnt/nvme/swx/dataset/R2R"
+  image_root: "data/trajectory_data/R2R_back/r2r"
 
   # Path to action prediction data (JSONL, relative to data_root)
   action_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/R2R_back/summary_full.jsonl"
@@ -61,7 +61,7 @@ data:
   
   # Sample ratio: proportion of full dataset to use (1.0 = all, 0.1 = 10%)
   # Val split is applied after subsampling
-  sample_ratio: 0.5
+  sample_ratio: 1
   # Validation split ratio (applied to subsampled data)
   # 0.1 means 10% for validation. Set to 0 to disable
   val_split_ratio: 0.05
@@ -72,7 +72,7 @@ data:
 # ============================================================================
 training:
   # Output directory for checkpoints and logs
-  output_dir: "outputs/actor/lora/run-2-4-1-no-cot"
+  output_dir: "outputs/actor/full/run-3-2-seperate-2"
   
   # Resume from checkpoint (optional)
   # Set to checkpoint directory path to resume training
@@ -85,15 +85,15 @@ training:
   max_steps: -1  # -1 means use num_train_epochs instead
   
   # Batch size and gradient accumulation
-  per_device_train_batch_size: 16      # Batch size per GPU (increased with LoRA)
-  gradient_accumulation_steps: 4      # Accumulate gradients over N steps
+  per_device_train_batch_size: 8      # Batch size per GPU (increased with LoRA)
+  gradient_accumulation_steps: 1      # 8卡分片后先降到1，避免每个epoch只有很少更新步
   # Effective batch size = per_device_batch_size × gradient_accumulation_steps × num_gpus
   # Example: 2 × 4 × 8 = 64 (for 8 GPUs)
   
   # Optimizer settings
-  learning_rate: 2.0e-5
+  learning_rate: 1.0e-5
   weight_decay: 0.01
-  warmup_steps: 500
+  warmup_steps: 70
   max_grad_norm: 1.0
   
   # Learning rate scheduler
@@ -114,7 +114,7 @@ training:
   
   # Evaluation (if eval dataset is provided)
   eval_strategy: "steps"  # "no", "steps", or "epoch"
-  eval_steps: 500
+  eval_steps: 1000
   per_device_eval_batch_size: 16  # Batch size per GPU for evaluation
   eval_accumulation_steps: 1    # Number of batches to accumulate before moving to CPU
   
@@ -123,14 +123,14 @@ training:
   deepspeed: "config/zero2.json"
   
   # Data loading
-  dataloader_num_workers: 0  # Set to 0 to avoid multiprocessing issues with large dataset
+  dataloader_num_workers: 4
   dataloader_pin_memory: true
   
   # Reproducibility
   seed: 42
   
   # Distributed training settings
-  ddp_find_unused_parameters: true   # Required for HomogeneousBatchSampler (action vs CoT batches use different params)
+  ddp_find_unused_parameters: false   # 当前 cot_data_path=null（action-only）可关掉以减少DDP开销
   ddp_backend: "nccl"                # Use "nccl" for NVIDIA GPUs, "gloo" for CPU
 
   # Custom evaluation metrics
