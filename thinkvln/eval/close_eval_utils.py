@@ -1,9 +1,9 @@
+import hashlib
 import json
 import math
 import os
 import re
-import hashlib
-from typing import Any, Dict, List, TextIO, Tuple
+from typing import Any, Dict, List, Sequence, TextIO, Tuple
 
 import numpy as np
 
@@ -114,19 +114,6 @@ def compute_step_budget(gt_subtask_steps: int, factor: float) -> int:
     return max(1, int(math.ceil(max(gt_subtask_steps, 0) * factor)))
 
 
-def oracle_subtask_at_step(step_idx: int, spans: List[Tuple[int, int, int]]) -> int:
-    if not spans:
-        return 1
-
-    if step_idx <= spans[0][1]:
-        return spans[0][0]
-
-    for subtask_idx, start, end in spans:
-        if start <= step_idx <= end:
-            return subtask_idx
-    return spans[-1][0]
-
-
 def summarize_subtask_aggregation(stats: Dict[str, float]) -> Dict[str, float]:
     total_subtasks = float(stats.get("subtasks_total", 0.0))
     successful_subtasks = float(stats.get("subtasks_success", 0.0))
@@ -139,16 +126,6 @@ def summarize_subtask_aggregation(stats: Dict[str, float]) -> Dict[str, float]:
         "subtask_success_rate": successful_subtasks / total_subtasks if total_subtasks > 0 else 0.0,
         "steps_to_subgoal": success_steps_sum / success_steps_count if success_steps_count > 0 else 0.0,
         "progress_mae": progress_error_sum / progress_count if progress_count > 0 else 0.0,
-    }
-
-
-def summarize_oracle_aggregation(stats: Dict[str, float]) -> Dict[str, float]:
-    episode_count = float(stats.get("episodes_evaluated", 0.0))
-    sr_sum = float(stats.get("sr_sum", 0.0))
-    spl_sum = float(stats.get("spl_sum", 0.0))
-    return {
-        "sr": sr_sum / episode_count if episode_count > 0 else 0.0,
-        "spl": spl_sum / episode_count if episode_count > 0 else 0.0,
     }
 
 
@@ -189,6 +166,15 @@ def should_sample_episode(scene_id: str, episode_id: Any, sample_rate: float) ->
     return value < rate
 
 
+def shard_items_round_robin(items: Sequence[Any], rank: int, world_size: int) -> List[Any]:
+    data = list(items)
+    if world_size <= 1:
+        return data
+    if rank < 0 or rank >= world_size:
+        raise ValueError(f"rank must be in [0, {world_size}), got rank={rank}")
+    return data[rank::world_size]
+
+
 def write_jsonl_record(handle: TextIO, payload: Dict[str, Any], sync_to_disk: bool = True) -> None:
     handle.write(json.dumps(payload) + "\n")
     handle.flush()
@@ -205,10 +191,9 @@ __all__ = [
     "build_subtask_spans",
     "timeline_progress",
     "compute_step_budget",
-    "oracle_subtask_at_step",
     "summarize_subtask_aggregation",
-    "summarize_oracle_aggregation",
     "normalize_action",
     "should_sample_episode",
+    "shard_items_round_robin",
     "write_jsonl_record",
 ]

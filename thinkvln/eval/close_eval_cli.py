@@ -4,7 +4,6 @@ import os
 import logging
 from typing import Any, Dict, Optional
 
-import torch
 import torch.distributed as dist
 
 from thinkvln.eval.close_eval_dist import all_reduce_scalar_dict, init_dist_mode
@@ -12,7 +11,6 @@ from thinkvln.eval.close_eval_models import build_nav_model
 from thinkvln.eval.close_eval_runner import VLNEvaluator
 from thinkvln.eval.close_eval_utils import (
     load_summary_full,
-    summarize_oracle_aggregation,
     summarize_subtask_aggregation,
 )
 from thinkvln.models.navigation_model import NavigationModel
@@ -45,15 +43,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ladder_mode",
         type=str,
-        default="legacy",
-        choices=["legacy", "subtask", "oracle_switch", "both"],
-        help="Closed-loop ladder evaluation mode",
+        default="subtask",
+        choices=["subtask"],
+        help="Closed-loop evaluation mode (subtask pipeline only).",
     )
     parser.add_argument(
         "--summary_full_path",
         type=str,
         default=None,
-        help="Path to summary_full.jsonl (required for ladder modes)",
+        help="Path to summary_full.jsonl (required).",
     )
     parser.add_argument(
         "--base_model_path",
@@ -84,6 +82,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output_path", type=str, default="./results/env_eval")
     parser.add_argument("--save_video", action="store_true", default=False)
     parser.add_argument("--model_max_length", type=int, default=4096)
+    parser.add_argument(
+        "--memory_num_history_images",
+        type=int,
+        default=6,
+        help="Max history images (excluding current frame) for ThinkVLNActor memory prompt",
+    )
+    parser.add_argument(
+        "--done_threshold",
+        type=float,
+        default=0.85,
+        help="Done label threshold used by ThinkVLNActor wrapper fallback",
+    )
 
     parser.add_argument("--num_frames", type=int, default=32)
     parser.add_argument("--num_future_steps", type=int, default=4)
@@ -94,6 +104,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpu", default=0, type=int)
     parser.add_argument("--port", default="1111")
     parser.add_argument("--dist_url", default="env://")
+    parser.add_argument(
+        "--dist_timeout_minutes",
+        type=int,
+        default=120,
+        help="Distributed process group timeout in minutes (for long-running eval stragglers).",
+    )
+    parser.add_argument(
+        "--scalar_dist_timeout_minutes",
+        type=int,
+        default=None,
+        help="Timeout in minutes for scalar metric all-reduce gloo group. Defaults to --dist_timeout_minutes.",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--log_level",
@@ -125,21 +147,21 @@ def eval():
         os.environ.get("GLOG_minloglevel"),
     )
 
-    rank, world_size, gpu = init_dist_mode()
+    rank, world_size, gpu = init_dist_mode(
+        timeout_minutes=args.dist_timeout_minutes,
+        scalar_timeout_minutes=args.scalar_dist_timeout_minutes,
+    )
     device = f"cuda:{gpu}" if world_size > 1 else args.device
     args.device = device
     logger.info("Distributed initialized: rank=%d world_size=%d gpu=%d device=%s", rank, world_size, gpu, device)
 
-    if args.ladder_mode != "legacy":
-        if args.model_type != "thinkvln_actor":
-            raise ValueError("Ladder modes currently support model_type=thinkvln_actor only.")
-        if not args.summary_full_path:
-            raise ValueError("--summary_full_path is required when ladder_mode is not legacy.")
-        logger.info("Loading summary_full from %s", args.summary_full_path)
-        summary_full = load_summary_full(args.summary_full_path)
-        logger.info("summary_full loaded: %d episode entries", len(summary_full))
-    else:
-        summary_full = None
+    if args.model_type != "thinkvln_actor":
+        raise ValueError("Subtask closed-loop evaluation currently supports model_type=thinkvln_actor only.")
+    if not args.summary_full_path:
+        raise ValueError("--summary_full_path is required.")
+    logger.info("Loading summary_full from %s", args.summary_full_path)
+    summary_full = load_summary_full(args.summary_full_path)
+    logger.info("summary_full loaded: %d episode entries", len(summary_full))
 
     logger.info("Building navigation model...")
     nav_model = build_nav_model(args, str(device), rank, world_size)
@@ -164,8 +186,7 @@ def evaluate(
         raise ValueError(f"--sample_rate must be in (0, 1], got {sample_rate}")
     args.sample_rate = sample_rate
     logger.info(
-        "Start evaluate(): ladder_mode=%s split=%s sample_rate=%.4f",
-        args.ladder_mode,
+        "Start evaluate(): split=%s sample_rate=%.4f",
         args.eval_split,
         sample_rate,
     )
@@ -179,90 +200,27 @@ def evaluate(
         args=args,
     )
 
-    if args.ladder_mode == "legacy":
-        logger.info("Running legacy closed-loop evaluation...")
-        sucs, spls, oss, ones, ep_num = evaluator.eval_action(rank)
-
-        if world_size > 1:
-            ep_num_all = [torch.zeros_like(ep_num) for _ in range(world_size)]
-            dist.all_gather(ep_num_all, ep_num)
-            ep_counts = [int(x.item()) for x in ep_num_all]
-
-            sucs_all = [torch.zeros(ep_counts[i], dtype=sucs.dtype, device=sucs.device) for i in range(world_size)]
-            spls_all = [torch.zeros(ep_counts[i], dtype=spls.dtype, device=spls.device) for i in range(world_size)]
-            oss_all = [torch.zeros(ep_counts[i], dtype=oss.dtype, device=oss.device) for i in range(world_size)]
-            ones_all = [torch.zeros(ep_counts[i], dtype=ones.dtype, device=ones.device) for i in range(world_size)]
-
-            dist.barrier()
-            dist.all_gather(sucs_all, sucs)
-            dist.all_gather(spls_all, spls)
-            dist.all_gather(oss_all, oss)
-            dist.all_gather(ones_all, ones)
-            dist.barrier()
-
-            sucs_all = torch.cat(sucs_all, dim=0)
-            spls_all = torch.cat(spls_all, dim=0)
-            oss_all = torch.cat(oss_all, dim=0)
-            ones_all = torch.cat(ones_all, dim=0)
-        else:
-            sucs_all = sucs
-            spls_all = spls
-            oss_all = oss
-            ones_all = ones
-
-        if rank == 0:
-            result_all = {
-                "sucs_all": (sum(sucs_all) / len(sucs_all)).item() if len(sucs_all) > 0 else 0.0,
-                "spls_all": (sum(spls_all) / len(spls_all)).item() if len(spls_all) > 0 else 0.0,
-                "oss_all": (sum(oss_all) / len(oss_all)).item() if len(oss_all) > 0 else 0.0,
-                "ones_all": (sum(ones_all) / len(ones_all)).item() if len(ones_all) > 0 else 0.0,
-                "length": len(sucs_all),
-            }
-            with open(os.path.join(args.output_path, "result.json"), "a", encoding="utf-8") as f:
-                f.write(json.dumps(result_all) + "\n")
-            logger.info("Legacy aggregate written: %s", result_all)
-
-        if world_size > 1:
-            dist.destroy_process_group()
-        return
-
     if summary_full is None:
-        raise ValueError("summary_full must be provided for ladder modes.")
+        raise ValueError("summary_full must be provided.")
 
     ladder_summary: Dict[str, Dict[str, Any]] = {}
 
-    if args.ladder_mode in ("subtask", "both"):
-        logger.info("Running subtask closed-loop evaluation...")
-        local_subtask_stats = evaluator.eval_subtask_closed_loop(rank, summary_full)
-        global_subtask_stats = all_reduce_scalar_dict(local_subtask_stats, evaluator.device)
-        if rank == 0:
-            subtask_metrics = summarize_subtask_aggregation(global_subtask_stats)
-            ladder_summary["subtask_closed_loop"] = {
-                **subtask_metrics,
-                "total_subtasks": int(global_subtask_stats.get("subtasks_total", 0.0)),
-                "successful_subtasks": int(global_subtask_stats.get("subtasks_success", 0.0)),
-                "progress_samples": int(global_subtask_stats.get("progress_count", 0.0)),
-                "episodes_total": int(global_subtask_stats.get("episodes_total", 0.0)),
-                "episodes_evaluated": int(global_subtask_stats.get("episodes_evaluated", 0.0)),
-                "episodes_missing_meta": int(global_subtask_stats.get("episodes_missing_meta", 0.0)),
-                "episodes_malformed": int(global_subtask_stats.get("episodes_malformed", 0.0)),
-            }
-            logger.info("Subtask aggregate: %s", ladder_summary["subtask_closed_loop"])
-
-    if args.ladder_mode in ("oracle_switch", "both"):
-        logger.info("Running oracle-switch closed-loop evaluation...")
-        local_oracle_stats = evaluator.eval_oracle_switch_closed_loop(rank, summary_full)
-        global_oracle_stats = all_reduce_scalar_dict(local_oracle_stats, evaluator.device)
-        if rank == 0:
-            oracle_metrics = summarize_oracle_aggregation(global_oracle_stats)
-            ladder_summary["oracle_switch_closed_loop"] = {
-                **oracle_metrics,
-                "episodes_total": int(global_oracle_stats.get("episodes_total", 0.0)),
-                "episodes_evaluated": int(global_oracle_stats.get("episodes_evaluated", 0.0)),
-                "episodes_missing_meta": int(global_oracle_stats.get("episodes_missing_meta", 0.0)),
-                "episodes_malformed": int(global_oracle_stats.get("episodes_malformed", 0.0)),
-            }
-            logger.info("Oracle-switch aggregate: %s", ladder_summary["oracle_switch_closed_loop"])
+    logger.info("Running subtask closed-loop evaluation...")
+    local_subtask_stats = evaluator.eval_subtask_closed_loop(rank, summary_full)
+    global_subtask_stats = all_reduce_scalar_dict(local_subtask_stats, evaluator.device)
+    if rank == 0:
+        subtask_metrics = summarize_subtask_aggregation(global_subtask_stats)
+        ladder_summary["subtask_closed_loop"] = {
+            **subtask_metrics,
+            "total_subtasks": int(global_subtask_stats.get("subtasks_total", 0.0)),
+            "successful_subtasks": int(global_subtask_stats.get("subtasks_success", 0.0)),
+            "progress_samples": int(global_subtask_stats.get("progress_count", 0.0)),
+            "episodes_total": int(global_subtask_stats.get("episodes_total", 0.0)),
+            "episodes_evaluated": int(global_subtask_stats.get("episodes_evaluated", 0.0)),
+            "episodes_missing_meta": int(global_subtask_stats.get("episodes_missing_meta", 0.0)),
+            "episodes_malformed": int(global_subtask_stats.get("episodes_malformed", 0.0)),
+        }
+        logger.info("Subtask aggregate: %s", ladder_summary["subtask_closed_loop"])
 
     if rank == 0:
         ladder_summary_path = os.path.join(args.output_path, "ladder_summary.json")

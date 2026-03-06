@@ -251,13 +251,17 @@ def create_eval_dataset(data_config: Dict[str, Any], processor, sample_ratio: fl
     # Get query token IDs from model config (or use defaults)
     action_query_token_id = model_cfg.get('action_query_token_id', 151700)
     progress_query_token_id = model_cfg.get('progress_query_token_id', 151701)
-    
+    memory_num_history_images = data_cfg.get('memory_num_history_images', 8)
+    done_threshold = data_cfg.get('done_threshold', 0.85)
+
     collator = ThinkVLNDataCollator(
         processor=processor,
         num_query_tokens=num_query_tokens,
         action_query_token_id=action_query_token_id,
         progress_query_token_id=progress_query_token_id,
         image_root=image_root,
+        memory_num_history_images=memory_num_history_images,
+        done_threshold=done_threshold,
     )
     
     return dataset, collator
@@ -303,6 +307,7 @@ def evaluate_model(
     device: str = "cuda",
     progress_metric: str = "l1",
     action_metric: str = "accuracy",
+    done_pred_threshold: float = 0.5,
     rank: int = 0,
     world_size: int = 1,
 ) -> Dict[str, float]:
@@ -332,6 +337,8 @@ def evaluate_model(
     action_first_total = 0
     progress_sum = 0.0
     progress_count = 0
+    done_correct = 0
+    done_total = 0
     cot_loss_sum = 0.0
     cot_loss_count = 0
 
@@ -351,7 +358,9 @@ def evaluate_model(
             if action_labels is not None:
                 action_logits = outputs.get("action_logits")
                 progress_preds = outputs.get("progress_preds")
+                done_preds = outputs.get("done_preds")
                 progress_labels = inputs.get("progress_labels")
+                done_labels = inputs.get("done_labels")
 
                 if action_logits is not None and action_metric == "accuracy":
                     action_preds = torch.argmax(action_logits, dim=-1)
@@ -367,6 +376,8 @@ def evaluate_model(
                         action_first_total += int(first_valid.sum().item())
 
                 if progress_preds is not None and progress_labels is not None:
+                    if progress_preds.ndim > 1:
+                        progress_preds = progress_preds[:, 0]
                     valid_mask = torch.isfinite(progress_labels) & (progress_labels != -100)
                     if valid_mask.any():
                         diff = progress_preds - progress_labels
@@ -384,6 +395,13 @@ def evaluate_model(
                             )
                             progress_sum += float(huber.sum().item())
                         progress_count += int(valid_mask.sum().item())
+
+                if done_preds is not None and done_labels is not None:
+                    valid_mask = torch.isfinite(done_labels) & (done_labels != -100)
+                    if valid_mask.any():
+                        pred_binary = (done_preds[valid_mask] > done_pred_threshold).to(done_labels.dtype)
+                        done_correct += int((pred_binary == done_labels[valid_mask]).sum().item())
+                        done_total += int(valid_mask.sum().item())
             else:
                 cot_loss = outputs.get("lm_loss")
                 if cot_loss is not None:
@@ -400,6 +418,8 @@ def evaluate_model(
             float(action_first_total),
             progress_sum,
             float(progress_count),
+            float(done_correct),
+            float(done_total),
             cot_loss_sum,
             float(cot_loss_count),
         ],
@@ -419,6 +439,8 @@ def evaluate_model(
         action_first_total,
         progress_sum,
         progress_count,
+        done_correct,
+        done_total,
         cot_loss_sum,
         cot_loss_count,
     ) = stats.tolist()
@@ -437,6 +459,8 @@ def evaluate_model(
             "huber": "eval_progress_huber",
         }[progress_metric]
         metrics[metric_key] = float(progress_sum / progress_count)
+    if done_total > 0:
+        metrics["eval_done_accuracy"] = float(done_correct / done_total)
     if cot_loss_count > 0:
         mean_cot_loss = float(cot_loss_sum / cot_loss_count)
         metrics["eval_lm_loss"] = mean_cot_loss
@@ -490,6 +514,11 @@ def main():
         help="Metric for action evaluation (overrides config)"
     )
     parser.add_argument(
+        "--done_pred_threshold",
+        type=float,
+        help="Threshold for binarizing done prediction probability (overrides config)"
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         help="Directory to save evaluation results (overrides config)"
@@ -523,13 +552,18 @@ def main():
         num_workers = args.num_workers if args.num_workers is not None else eval_cfg.get('num_workers', 0)
         progress_metric = args.progress_metric or metrics_cfg.get('progress_metric', 'l1')
         action_metric = args.action_metric or metrics_cfg.get('action_metric', 'accuracy')
+        done_pred_threshold = (
+            args.done_pred_threshold
+            if args.done_pred_threshold is not None
+            else metrics_cfg.get('done_pred_threshold', 0.5)
+        )
         output_dir = args.output_dir or eval_cfg.get('output_dir', 'eval_results')
         sample_ratio = data_cfg.get('sample_ratio', 1.0)
         
         # Build data configuration
         data_config = {
             'data': data_cfg,
-            'model': {'num_query_tokens': data_cfg.get('num_query_tokens', 4)}
+            'model': model_cfg,
         }
     else:
         # Fallback to command-line arguments only (backward compatibility)
@@ -543,6 +577,7 @@ def main():
         num_workers = args.num_workers or 0
         progress_metric = args.progress_metric or "l1"
         action_metric = args.action_metric or "accuracy"
+        done_pred_threshold = args.done_pred_threshold if args.done_pred_threshold is not None else 0.5
         output_dir = args.output_dir or "eval_results"
         sample_ratio = 1.0
         
@@ -552,6 +587,8 @@ def main():
     
     if not model_path:
         raise ValueError("model_path is required")
+    if not 0.0 <= done_pred_threshold <= 1.0:
+        raise ValueError(f"done_pred_threshold must be in [0, 1], got {done_pred_threshold}")
     
     dist = init_distributed(device)
     device = dist["device"]
@@ -575,6 +612,7 @@ def main():
         logger.info(f"Distributed: {world_size} processes")
         logger.info(f"Progress metric: {progress_metric}")
         logger.info(f"Action metric: {action_metric}")
+        logger.info(f"Done pred threshold: {done_pred_threshold}")
         logger.info(f"Sample ratio: {sample_ratio}")
         logger.info("=" * 80)
     
@@ -602,6 +640,7 @@ def main():
         device=device,
         progress_metric=progress_metric,
         action_metric=action_metric,
+        done_pred_threshold=done_pred_threshold,
         rank=rank,
         world_size=world_size,
     )

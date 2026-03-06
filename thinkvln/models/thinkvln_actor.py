@@ -132,6 +132,21 @@ class ProgressRegressionHeadV2(nn.Module):
         return progress
 
 
+class DoneClassificationHead(nn.Module):
+    """Binary done head from projected progress feature (logits output)."""
+
+    def __init__(self, input_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(input_dim, 1),
+        )
+
+    def forward(self, x):
+        # x: [batch, input_dim]
+        return self.net(x).squeeze(-1)
+
+
 class ThinkVLNActor(ThinkVLNForConditionalGeneration):
     """ThinkVLN Actor extending ThinkVLN with action/progress prediction heads"""
     
@@ -164,12 +179,16 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
             hidden_dim=proj_size,
             num_blocks=2
         )
+        self.done_head = DoneClassificationHead(
+            input_dim=proj_size,
+            dropout=getattr(self.actor_config, "progress_head_dropout", 0.1),
+        )
     
     
     def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
                 inputs_embeds=None, labels=None, pixel_values=None, pixel_values_videos=None,
                 image_grid_thw=None, video_grid_thw=None, cache_position=None, logits_to_keep=0,
-                action_labels=None, progress_labels=None, return_dict=None, **kwargs):
+                action_labels=None, progress_labels=None, done_labels=None, return_dict=None, **kwargs):
         """
         Forward pass with Aux-Think hybrid training support.
         
@@ -248,7 +267,10 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
             
             # Apply respective heads
             action_logits = self.action_head(action_projected)  # [batch, K, num_classes]
-            progress_values = self.progress_head(progress_projected)  # [batch, K]
+            progress_values_all = self.progress_head(progress_projected)  # [batch, K]
+            progress_values = progress_values_all[:, 0]  # scalar current-step progress [batch]
+            done_logits = self.done_head(progress_projected[:, 0, :])  # [batch]
+            done_probs = torch.sigmoid(done_logits)
             
             # Compute action and progress losses
             action_loss = nn.CrossEntropyLoss()(
@@ -256,8 +278,10 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
                 action_labels.view(-1)
             ) if action_labels is not None else None
             
-            # Compute progress loss with masking for -100 (CoT sample padding)
+            # Compute scalar progress loss with masking for -100
             if progress_labels is not None:
+                if progress_labels.ndim == 2:
+                    progress_labels = progress_labels[:, 0]
                 valid_mask = progress_labels != -100.0
                 if valid_mask.any():
                     if getattr(self.actor_config, 'use_huber_loss_for_progress', False):
@@ -273,12 +297,28 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
             else:
                 progress_loss = None
 
-            # Combine action and progress losses (dtype for mixed precision)
+            # Compute done loss
+            if done_labels is not None:
+                if done_labels.ndim == 2:
+                    done_labels = done_labels[:, 0]
+                valid_done_mask = done_labels != -100.0
+                if valid_done_mask.any():
+                    done_loss = nn.BCEWithLogitsLoss()(
+                        done_logits[valid_done_mask], done_labels[valid_done_mask]
+                    )
+                else:
+                    done_loss = None
+            else:
+                done_loss = None
+
+            # Combine losses (dtype for mixed precision)
             total_loss = torch.tensor(0.0, device=hidden_states.device, dtype=hidden_states.dtype)
             if action_loss is not None:
                 total_loss += self.actor_config.action_loss_weight * action_loss
             if progress_loss is not None:
                 total_loss += self.actor_config.progress_loss_weight * progress_loss
+            if done_loss is not None:
+                total_loss += self.actor_config.done_loss_weight * done_loss
         else:
             # COT MODE: Only compute LM loss for chain-of-thought generation
             slice_idx = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
@@ -298,6 +338,9 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
             progress_values = None
             action_loss = None
             progress_loss = None
+            done_logits = None
+            done_probs = None
+            done_loss = None
             
             # Total loss is just LM loss (dtype for mixed precision)
             total_loss = lm_loss if lm_loss is not None else torch.tensor(0.0, device=hidden_states.device, dtype=hidden_states.dtype)
@@ -311,9 +354,12 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
             "lm_loss": lm_loss,
             "action_loss": action_loss,
             "progress_loss": progress_loss,
+            "done_loss": done_loss,
             "logits": lm_logits,
             "action_logits": action_logits,
             "progress_preds": progress_values,  # Use 'progress_preds' for consistency with evaluation code
+            "done_logits": done_logits,
+            "done_preds": done_probs,
             "past_key_values": outputs.past_key_values,
             "hidden_states": outputs.hidden_states,
             "attentions": outputs.attentions
@@ -324,43 +370,48 @@ class ThinkVLNActor(ThinkVLNForConditionalGeneration):
     
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, actor_config=None, *args, **kwargs):
-        """Load pretrained Qwen3VL and add actor components"""
+        """Load ThinkVLNActor from either base Qwen3VL or full ThinkVLN checkpoints."""
         from transformers import Qwen3VLForConditionalGeneration
-        
-        # Load base Qwen3VL config and convert to ThinkVLNConfig
-        base_config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
         actor_config = actor_config or ThinkVLNActorConfig()
-        
-        # Create ThinkVLN config from Qwen3VL config
+
+        explicit_config = kwargs.pop("config", None)
+        if explicit_config is not None:
+            base_config = explicit_config
+        else:
+            try:
+                base_config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+            except ValueError as exc:
+                if "model type `thinkvln`" not in str(exc):
+                    raise
+                base_config = ThinkVLNConfig.from_pretrained(pretrained_model_name_or_path)
+
+        if getattr(base_config, "model_type", None) == ThinkVLNConfig.model_type:
+            thinkvln_config = (
+                base_config
+                if isinstance(base_config, ThinkVLNConfig)
+                else ThinkVLNConfig(**base_config.to_dict())
+            )
+            actor_config.num_query_tokens = int(
+                getattr(thinkvln_config, "num_query_tokens", actor_config.num_query_tokens)
+            )
+            return super().from_pretrained(
+                pretrained_model_name_or_path,
+                *args,
+                config=thinkvln_config,
+                actor_config=actor_config,
+                **kwargs,
+            )
+
         thinkvln_config = ThinkVLNConfig(
             **base_config.to_dict(),
             num_query_tokens=actor_config.num_query_tokens
         )
-        
-        # Create ThinkVLN model with new config
+
         model = cls(thinkvln_config, actor_config)
-        
-        # Load pretrained Qwen3VL weights
+
         base_model = Qwen3VLForConditionalGeneration.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
-        
-        # Copy weights from base model (skip query_embeddings as they're new)
+
         model.model.visual.load_state_dict(base_model.model.visual.state_dict())
         model.model.language_model.load_state_dict(base_model.model.language_model.state_dict())
         model.lm_head.load_state_dict(base_model.lm_head.state_dict())
-        
-        # OLD: Initialize query_embeddings with "Action" token embedding (commented out for zero initialization)
-        # with torch.no_grad():
-        #     try:
-        #         from transformers import AutoTokenizer
-        #         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
-        #         action_token_id = tokenizer.encode("Action", add_special_tokens=False)[0]
-        #     except:
-        #         action_token_id = 4227  # Fallback default for Qwen3VL
-        #     
-        #     embedding_layer = model.model.get_input_embeddings()
-        #     action_embedding = embedding_layer.weight[action_token_id]
-        #     model.query_embeddings.data.copy_(action_embedding.unsqueeze(0).repeat(actor_config.num_query_tokens, 1))
-        
-        # NEW: Query embeddings are zero-initialized buffers, no need to initialize from token embeddings
-        
         return model

@@ -1,15 +1,23 @@
-"""ThinkVLN Dataset and Collator for mixed action and CoT training"""
+"""ThinkVLN Dataset and Collator for mixed action and CoT training."""
 
 import logging
+import json
+import os
+import random
+from typing import Any, Dict, Iterator, List, Optional
+
 import torch
 from torch.utils.data import Dataset, Sampler
-from typing import List, Dict, Any, Optional, Iterator
-import os
-import json
-import random
 
 from ..tools.dataset_utils import (
-    load_image, crop_cot_answer, extract_action_chunk, parse_frame_key
+    compute_current_step_progress,
+    compute_done_label,
+    compute_previous_step_progress,
+    crop_cot_answer,
+    extract_action_chunk,
+    load_image,
+    parse_frame_key,
+    select_memory_frame_indices,
 )
 
 
@@ -45,12 +53,14 @@ class ThinkVLNDataset(Dataset):
         image_root: Optional[str] = None,
         skip_missing_images: bool = False,
         seed: int = 42,
+        enable_cot: bool = False,
     ):
         self.action_data_path = action_data_path
         self.cot_data_path = cot_data_path
         self.image_root = image_root
         self.skip_missing_images = skip_missing_images
         self.seed = seed
+        self.enable_cot = bool(enable_cot)
         
         self.action_samples = []
         self.cot_samples = []
@@ -59,7 +69,10 @@ class ThinkVLNDataset(Dataset):
         self.missing_cot_images = 0
         
         self._load_action_data()
-        self._load_cot_data()
+        if self.enable_cot:
+            self._load_cot_data()
+        elif self.cot_data_path:
+            logger.info("ThinkVLNDataset: cot_data_path is provided but CoT is disabled; ignoring CoT samples.")
         self._mix_samples()
         
         if self.skip_missing_images and (self.missing_action_images or self.missing_cot_images):
@@ -262,6 +275,8 @@ class ThinkVLNDataCollator:
         action_query_token_id: int = 151700,
         progress_query_token_id: int = 151701,
         image_root: Optional[str] = None,
+        memory_num_history_images: int = 8,
+        done_threshold: float = 0.85,
     ):
         self.processor = processor
         self.num_query_tokens = num_query_tokens
@@ -274,8 +289,16 @@ class ThinkVLNDataCollator:
         self.progress_query_token_id = progress_query_token_id
         
         self.image_root = image_root
+        self.memory_num_history_images = int(memory_num_history_images)
+        self.done_threshold = float(done_threshold)
         
-        self.action_prompt = "Based on the current observation and subtask '{subgoal}', predict the next 4 actions and the progress of the subtask."
+        self.action_prompt = (
+            "Instruction: {instruction}\n"
+            "Current subgoal: {subgoal}\n"
+            "Previous progress: {prev_progress:.3f}\n"
+            "{memory_hint}"
+            "Predict the next 4 actions and the current-step subgoal progress."
+        )
         self.cot_prompt = "Based on the current observation and subgoal '{subgoal}', think step by step to determine the action."
         self._missing_image_count = 0
     
@@ -304,29 +327,40 @@ class ThinkVLNDataCollator:
         return self._collate(processed)
     
     def _process_action(self, sample: Dict[str, Any]) -> Dict[str, Any]:
-        """Process action sample with query tokens."""
-        dir_episode_key = _episode_key_to_dir_key(sample['episode_key'])
-        
-        # Load image
-        image_path = os.path.join(
-            self.image_root, 
-            dir_episode_key, 
-            f"{sample['frame_idx']:06d}_rgb.jpg"
+        """Process action sample with query tokens, memory context and scalar progress/done labels."""
+        dir_episode_key = _episode_key_to_dir_key(sample["episode_key"])
+        frame_idx = int(sample["frame_idx"])
+        subtask_sequence = sample["subtask_sequence"]
+
+        history_indices = select_memory_frame_indices(
+            frame_idx=frame_idx,
+            subtask_sequence=subtask_sequence,
+            memory_num_history_images=self.memory_num_history_images,
         )
-        image = load_image(image_path)
-        
-        # Create prompt and process
-        prompt = self.action_prompt.format(subgoal=sample['current_plan_step'])
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": prompt}
-            ]
-        }]
-        
+        selected_indices = history_indices + [frame_idx]
+        images = []
+        for idx in selected_indices:
+            image_path = os.path.join(self.image_root, dir_episode_key, f"{idx:06d}_rgb.jpg")
+            images.append(load_image(image_path))
+
+        prev_progress = compute_previous_step_progress(frame_idx, subtask_sequence)
+        memory_hint = (
+            "Historical observations are provided.\n"
+            if len(history_indices) > 0
+            else ""
+        )
+        prompt = self.action_prompt.format(
+            instruction=sample["instruction"],
+            subgoal=sample["current_plan_step"],
+            prev_progress=prev_progress,
+            memory_hint=memory_hint,
+        )
+
+        content = [{"type": "image", "image": image} for image in images]
+        content.append({"type": "text", "text": prompt})
+        messages = [{"role": "user", "content": content}]
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.processor(text=[text], images=[image], return_tensors="pt", padding=False)
+        inputs = self.processor(text=[text], images=images, return_tensors="pt", padding=False)
         
         # OLD: Single query type (commented out)
         # input_ids = inputs['input_ids'][0]
@@ -351,22 +385,25 @@ class ThinkVLNDataCollator:
         attention_mask = torch.cat([attention_mask, torch.ones(2 * self.num_query_tokens, dtype=torch.long)])
         
         # Extract labels
-        actions, progress = extract_action_chunk(
-            sample['frame_idx'], 
-            sample['actions'], 
-            sample['subtask_sequence'], 
+        actions, _ = extract_action_chunk(
+            frame_idx,
+            sample["actions"],
+            subtask_sequence,
             self.num_query_tokens
         )
+        current_progress = compute_current_step_progress(frame_idx, subtask_sequence)
+        done_label = compute_done_label(current_progress, self.done_threshold)
         
         return {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
-            'pixel_values': inputs['pixel_values'] if 'pixel_values' in inputs else None,
-            'image_grid_thw': inputs['image_grid_thw'] if 'image_grid_thw' in inputs else None,
-            'action_labels': torch.tensor(actions, dtype=torch.long),
-            'progress_labels': torch.tensor(progress, dtype=torch.float32),
-            'labels': None,
-            'data_type': 'action'
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "pixel_values": inputs["pixel_values"] if "pixel_values" in inputs else None,
+            "image_grid_thw": inputs["image_grid_thw"] if "image_grid_thw" in inputs else None,
+            "action_labels": torch.tensor(actions, dtype=torch.long),
+            "progress_labels": torch.tensor(current_progress, dtype=torch.float32),
+            "done_labels": torch.tensor(done_label, dtype=torch.float32),
+            "labels": None,
+            "data_type": "action",
         }
     
     def _process_cot(self, sample: Dict[str, Any]) -> Dict[str, Any]:
@@ -419,6 +456,7 @@ class ThinkVLNDataCollator:
             'image_grid_thw': inputs['image_grid_thw'] if 'image_grid_thw' in inputs else None,
             'action_labels': None,
             'progress_labels': None,
+            'done_labels': None,
             'labels': labels,
             'data_type': 'cot'
         }
@@ -451,12 +489,14 @@ class ThinkVLNDataCollator:
         # Type-specific initialization
         if batch_type == 'action':
             action_labels = torch.zeros((batch_size, self.num_query_tokens), dtype=torch.long)
-            progress_labels = torch.zeros((batch_size, self.num_query_tokens), dtype=torch.float32)
+            progress_labels = torch.zeros((batch_size,), dtype=torch.float32)
+            done_labels = torch.zeros((batch_size,), dtype=torch.float32)
             labels = None
         else:  # CoT
             labels = torch.full((batch_size, max_len), -100, dtype=torch.long)
             action_labels = None
             progress_labels = None
+            done_labels = None
         
         # Fill batch
         for i, s in enumerate(samples):
@@ -467,6 +507,7 @@ class ThinkVLNDataCollator:
             if batch_type == 'action':
                 action_labels[i] = s['action_labels']
                 progress_labels[i] = s['progress_labels']
+                done_labels[i] = s['done_labels']
             else:  # CoT
                 labels[i, :seq_len] = s['labels']
             
@@ -490,5 +531,6 @@ class ThinkVLNDataCollator:
             'image_grid_thw': batch_image_grid_thw,
             'action_labels': action_labels,
             'progress_labels': progress_labels,
+            'done_labels': done_labels,
             'labels': labels,
         }

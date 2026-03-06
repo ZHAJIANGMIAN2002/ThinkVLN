@@ -1,5 +1,4 @@
 import argparse
-import json
 import os
 import logging
 import time
@@ -15,7 +14,6 @@ import habitat
 import numpy as np
 import torch
 from habitat import Env
-from habitat.config.default import get_agent_config
 from habitat.config.default_structured_configs import (
     CollisionsMeasurementConfig,
     FogOfWarConfig,
@@ -24,25 +22,23 @@ from habitat.config.default_structured_configs import (
 from habitat.utils.visualizations import maps
 from habitat_baselines.config.default import get_config as get_habitat_config
 from PIL import Image
-from tqdm import tqdm
 
 from thinkvln.habitat_extensions import measures  # noqa: F401
 from thinkvln.models.navigation_model import (
     NavigationModel,
-    StreamVLNNavigationModel,
     ThinkVLNActorNavigationModel,
-    ThinkVLNNavigationModel,
 )
 
 from thinkvln.eval.close_eval_dist import get_rank
 from thinkvln.eval.close_eval_utils import (
+    _normalize_subtask_idx,
     build_episode_key,
     build_subtask_spans,
     compute_step_budget,
     extract_scene_id,
     normalize_action,
-    oracle_subtask_at_step,
     parse_plan_steps,
+    shard_items_round_robin,
     should_sample_episode,
     timeline_progress,
     write_jsonl_record,
@@ -53,6 +49,8 @@ logger = logging.getLogger(__name__)
 
 
 class VLNEvaluator:
+    """Closed-loop evaluator for the memory-model subtask pipeline."""
+
     def __init__(
         self,
         config_path: str,
@@ -60,11 +58,10 @@ class VLNEvaluator:
         env_num: int = 8,
         output_path: Optional[str] = None,
         nav_model: Optional[NavigationModel] = None,
-        model: Any = None,
-        processor: Any = None,
         epoch: int = 0,
         args: Optional[argparse.Namespace] = None,
     ):
+        """Initialize evaluator configuration and runtime state."""
         self.args = args
         requested_device = getattr(args, "device", "cuda") if args else "cuda"
         self.device = torch.device(requested_device)
@@ -75,9 +72,6 @@ class VLNEvaluator:
         self.config_path = config_path
         self.sample_rate = float(getattr(args, "sample_rate", 1.0)) if args else 1.0
         self.config = get_habitat_config(config_path)
-        self.agent_config = get_agent_config(self.config.habitat.simulator)
-        self.sim_sensors_config = self.config.habitat.simulator.agents.main_agent.sim_sensors
-        self.model_type = getattr(args, "model_type", "thinkvln") if args else "thinkvln"
 
         with habitat.config.read_write(self.config):
             self.config.habitat.dataset.split = self.split
@@ -102,19 +96,10 @@ class VLNEvaluator:
                 }
             )
 
-        if nav_model is not None:
-            self.nav_model = nav_model
-        elif model is not None and processor is not None:
-            self.nav_model = ThinkVLNNavigationModel(
-                model=model,
-                processor=processor,
-                device=str(self.device),
-                max_new_tokens=getattr(args, "model_max_length", 4096) if args else 1024,
-            )
-        else:
-            self.nav_model = None
+        self.nav_model = nav_model
 
     def config_env(self) -> Env:
+        """Build one Habitat environment for current split and measurement settings."""
         start = time.time()
         logger.info(
             "[rank=%d] Creating Habitat Env (config=%s split=%s)",
@@ -132,6 +117,7 @@ class VLNEvaluator:
         return env
 
     def prepare_image_with_map(self, rgb: np.ndarray, info: Dict[str, Any]) -> Image.Image:
+        """Create model input image by concatenating RGB view and top-down map."""
         rgb_image = rgb.astype(np.uint8)
         if info.get("top_down_map") is not None:
             top_down_map = info["top_down_map"]
@@ -145,32 +131,45 @@ class VLNEvaluator:
 
     @staticmethod
     def _episode_instruction(config_path: str, episode: Any) -> str:
+        """Return episode instruction string (ObjectNav uses object category)."""
         if "objectnav" in config_path:
             return episode.object_category
         return episode.instruction.instruction_text
 
     @staticmethod
     def _build_scene_episode_dict(env: Env) -> Dict[str, List[Any]]:
+        """Group episodes by scene id."""
         scene_episode_dict: Dict[str, List[Any]] = {}
         for episode in env.episodes:
             scene_episode_dict.setdefault(episode.scene_id, []).append(episode)
         return scene_episode_dict
 
     def _iter_assigned_episodes(self, env: Env, idx: int):
+        """Yield sampled episodes assigned to this rank via round-robin sharding."""
         scene_episode_dict = self._build_scene_episode_dict(env)
+        sampled_episodes: List[Tuple[str, Any]] = []
         for scene in sorted(scene_episode_dict.keys()):
             episodes = scene_episode_dict[scene]
             scene_id = extract_scene_id(scene)
-            for episode in episodes[idx::self.env_num]:
+            for episode in episodes:
                 if should_sample_episode(scene_id, episode.episode_id, self.sample_rate):
-                    yield scene_id, episode
+                    sampled_episodes.append((scene_id, episode))
+
+        for scene_id, episode in shard_items_round_robin(
+            sampled_episodes,
+            rank=idx,
+            world_size=self.env_num,
+        ):
+            yield scene_id, episode
 
     @staticmethod
     def _current_position(env: Env) -> np.ndarray:
+        """Read current agent position from simulator state."""
         return np.array(env.sim.get_agent_state().position, dtype=np.float32)
 
     @staticmethod
     def _safe_geodesic_distance(env: Env, current_pos: np.ndarray, goal_pos: np.ndarray) -> float:
+        """Compute robust geodesic distance with Euclidean fallback on failure."""
         try:
             distance = env.sim.geodesic_distance(current_pos.tolist(), goal_pos.tolist())
             if distance is None:
@@ -183,6 +182,7 @@ class VLNEvaluator:
             return float(np.linalg.norm(current_pos - goal_pos))
 
     def _replay_gt_positions(self, env: Env, episode: Any, actions: List[Any]) -> List[np.ndarray]:
+        """Replay full GT action sequence and collect per-step positions."""
         env.current_episode = episode
         env.reset()
         positions = [self._current_position(env)]
@@ -200,6 +200,7 @@ class VLNEvaluator:
         actions: List[Any],
         target_frame: int,
     ):
+        """Replay to a target frame and return resulting observations."""
         env.current_episode = episode
         observations = env.reset()
         replay_steps = min(max(int(target_frame), 0), len(actions))
@@ -209,140 +210,56 @@ class VLNEvaluator:
             observations = env.step(normalize_action(actions[step_idx]))
         return observations
 
-    def eval_action(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        env = self.config_env()
-        scene_episode_dict = self._build_scene_episode_dict(env)
+    @staticmethod
+    def _subtask_idx_at_frame(subtask_sequence: List[Any], frame_idx: int) -> int:
+        if not subtask_sequence:
+            return 1
+        idx = max(0, min(int(frame_idx), len(subtask_sequence) - 1))
+        return _normalize_subtask_idx(subtask_sequence[idx])
 
-        sucs, spls, oss, ones = [], [], [], []
-        done_res = []
+    def _replay_to_frame_with_memory(
+        self,
+        env: Env,
+        episode: Any,
+        actions: List[Any],
+        subtask_sequence: List[Any],
+        target_frame: int,
+        episode_key: str,
+    ):
+        """Replay to target frame and prime model memory with frames [0, target_frame)."""
+        if not isinstance(self.nav_model, ThinkVLNActorNavigationModel):
+            return self._replay_to_frame(env, episode, actions, target_frame)
 
-        result_file = os.path.join(self.output_path, "result.json")
-        if os.path.exists(result_file):
-            with open(result_file, "r", encoding="utf-8") as f:
-                for line in f.readlines():
-                    try:
-                        res = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not all(k in res for k in ["scene_id", "episode_id", "episode_instruction"]):
-                        continue
-                    done_res.append([res["scene_id"], res["episode_id"], res["episode_instruction"]])
-                    if get_rank() == 0:
-                        sucs.append(res.get("success", 0.0))
-                        spls.append(res.get("spl", 0.0))
-                        oss.append(res.get("os", 0.0))
-                        ones.append(res.get("ne", 0.0))
-
-        for scene in sorted(scene_episode_dict.keys()):
-            episodes = scene_episode_dict[scene]
-            scene_id = extract_scene_id(scene)
-            print(f"scene_id = {scene_id}")
-
-            assigned_episodes = [
-                episode
-                for episode in episodes[idx::self.env_num]
-                if should_sample_episode(scene_id, episode.episode_id, self.sample_rate)
-            ]
-            process_bar = tqdm(range(len(assigned_episodes)), desc=f"scene {scene_id}")
-            for episode in assigned_episodes:
-                episode_instruction = self._episode_instruction(self.config_path, episode)
-                episode_id = episode.episode_id
-
-                if [scene_id, episode_id, episode_instruction] in done_res:
-                    process_bar.update(1)
-                    continue
-
-                env.current_episode = episode
-                observations = env.reset()
-
-                os.makedirs(os.path.join(self.output_path, f"check_sim_{self.epoch}"), exist_ok=True)
-                Image.fromarray(observations["rgb"]).save(
-                    os.path.join(self.output_path, f"check_sim_{self.epoch}", f"rgb_{idx}.jpg")
-                )
-
-                step_id = 0
-                prev_subtask = None
-
-                if self.model_type == "streamvln" and isinstance(self.nav_model, StreamVLNNavigationModel):
-                    self.nav_model.rgb_list = []
-                    self.nav_model.depth_list = []
-                    self.nav_model.pose_list = []
-                    self.nav_model.intrinsic_list = []
-                    self.nav_model.time_ids = []
-                    self.nav_model.action_seq = []
-                    self.nav_model.past_key_values = None
-                    self.nav_model.output_ids = None
-                    self.nav_model.step_count = 0
-                    initial_height = env.sim.get_agent_state().position[1]
-
-                while not env.episode_over:
-                    if self.nav_model is None:
-                        raise ValueError("Navigation model not initialized")
-
-                    self.nav_model.eval()
-                    rgb = observations["rgb"]
-                    info = env.get_metrics()
-
-                    if self.model_type == "streamvln" and isinstance(self.nav_model, StreamVLNNavigationModel):
-                        observation_input = {
-                            "rgb": rgb,
-                            "depth": observations.get("depth"),
-                            "gps": observations.get("gps", [0, 0]),
-                            "compass": observations.get("compass", [0]),
-                            "env": env,
-                            "sensor_config": self.sim_sensors_config,
-                            "initial_height": initial_height,
-                            "camera_height": self.sim_sensors_config.rgb_sensor.position[1],
-                            "min_depth": self.sim_sensors_config.depth_sensor.min_depth,
-                            "max_depth": self.sim_sensors_config.depth_sensor.max_depth,
-                        }
-                    else:
-                        observation_input = self.prepare_image_with_map(rgb, info)
-
-                    plan = "1. Navigate to the goal."
-                    if hasattr(episode, "reference_path"):
-                        plan = "1. Follow the reference path."
-
-                    action, prev_subtask = self.nav_model.predict_action(
-                        observation=observation_input,
-                        instruction=episode_instruction,
-                        plan=plan,
-                        prev_subtask=prev_subtask,
-                    )
-
-                    observations = env.step(action)
-                    step_id += 1
-
-                metrics = env.get_metrics()
-                sucs.append(metrics["success"])
-                spls.append(metrics["spl"])
-                oss.append(metrics["oracle_success"])
-                ones.append(metrics["distance_to_goal"])
-
-                result = {
-                    "scene_id": scene_id,
-                    "episode_id": episode_id,
-                    "success": metrics["success"],
-                    "spl": metrics["spl"],
-                    "os": metrics["oracle_success"],
-                    "ne": metrics["distance_to_goal"],
-                    "steps": step_id,
-                    "episode_instruction": episode_instruction,
-                }
-                with open(result_file, "a", encoding="utf-8") as f:
-                    write_jsonl_record(f, result)
-                process_bar.update(1)
-
-        env.close()
-        return (
-            torch.tensor(sucs, device=self.device),
-            torch.tensor(spls, device=self.device),
-            torch.tensor(oss, device=self.device),
-            torch.tensor(ones, device=self.device),
-            torch.tensor(len(sucs), device=self.device),
-        )
+        self.nav_model.reset_episode_state(episode_key=episode_key)
+        env.current_episode = episode
+        observations = env.reset()
+        replay_steps = min(max(int(target_frame), 0), len(actions))
+        for step_idx in range(replay_steps):
+            if env.episode_over:
+                break
+            info = env.get_metrics()
+            image = self.prepare_image_with_map(observations["rgb"], info)
+            self.nav_model.record_memory_observation(
+                observation=image,
+                subtask_id=self._subtask_idx_at_frame(subtask_sequence, step_idx),
+                episode_key=episode_key,
+            )
+            observations = env.step(normalize_action(actions[step_idx]))
+        return observations
 
     def eval_subtask_closed_loop(self, idx: int, summary_full: Dict[str, Dict[str, Any]]) -> Dict[str, float]:
+        """Evaluate subtask-by-subtask closed-loop success for ThinkVLNActor.
+
+        Workflow per episode:
+        1. Read episode metadata from `summary_full` (actions, subtask sequence, plan).
+        2. Build contiguous subtask spans and GT subgoal positions via GT action replay.
+        3. For each subtask, replay to its start frame and roll out policy actions online.
+        4. Mark success when geodesic distance to subgoal position is below threshold.
+        5. Accumulate scalar statistics and write detailed JSONL records.
+
+        Returns:
+            Scalar stats dict suitable for distributed `all_reduce`.
+        """
         if not isinstance(self.nav_model, ThinkVLNActorNavigationModel):
             raise ValueError("Subtask ladder mode currently supports ThinkVLNActorNavigationModel only.")
 
@@ -405,6 +322,7 @@ class VLNEvaluator:
                         raise ValueError("failed to precompute GT positions")
 
                     stats["episodes_evaluated"] += 1.0
+                    self.nav_model.reset_episode_state(episode_key=episode_key)
                     logger.info(
                         "[subtask][rank=%d] Episode parsed key=%s spans=%d plan_steps=%d actions=%d",
                         idx,
@@ -421,7 +339,14 @@ class VLNEvaluator:
                             float(self.args.subtask_step_budget_factor),
                         )
 
-                        observations = self._replay_to_frame(env, episode, actions, start_frame)
+                        observations = self._replay_to_frame_with_memory(
+                            env=env,
+                            episode=episode,
+                            actions=actions,
+                            subtask_sequence=subtask_sequence,
+                            target_frame=start_frame,
+                            episode_key=episode_key,
+                        )
                         goal_pos = gt_positions[min(end_frame, len(gt_positions) - 1)]
                         plan_idx = min(max(subtask_idx - 1, 0), len(plan_steps) - 1)
                         subgoal_text = plan_steps[plan_idx]
@@ -446,10 +371,12 @@ class VLNEvaluator:
                         while (not success) and (not env.episode_over) and rollout_steps < step_budget:
                             info = env.get_metrics()
                             image = self.prepare_image_with_map(observations["rgb"], info)
-                            action, pred_progress = self.nav_model.predict_action_with_progress(
+                            action, pred_progress, _ = self.nav_model.predict_action_with_progress_and_done(
                                 observation=image,
                                 instruction=episode_instruction,
                                 subgoal=subgoal_text,
+                                episode_key=episode_key,
+                                subtask_id=subtask_idx,
                             )
 
                             target_progress = timeline_progress(rollout_steps, gt_subtask_steps)
@@ -530,93 +457,5 @@ class VLNEvaluator:
             int(stats["subtasks_success"]),
         )
         return stats
-
-    def eval_oracle_switch_closed_loop(
-        self,
-        idx: int,
-        summary_full: Dict[str, Dict[str, Any]],
-    ) -> Dict[str, float]:
-        if not isinstance(self.nav_model, ThinkVLNActorNavigationModel):
-            raise ValueError("Oracle-switch ladder mode currently supports ThinkVLNActorNavigationModel only.")
-
-        env = self.config_env()
-        stats = {
-            "episodes_total": 0.0,
-            "episodes_evaluated": 0.0,
-            "episodes_missing_meta": 0.0,
-            "episodes_malformed": 0.0,
-            "sr_sum": 0.0,
-            "spl_sum": 0.0,
-        }
-
-        detail_path = os.path.join(self.output_path, f"oracle_switch_rank{idx}.jsonl")
-        with open(detail_path, "w", encoding="utf-8") as detail_file:
-            for scene_id, episode in self._iter_assigned_episodes(env, idx):
-                stats["episodes_total"] += 1.0
-                episode_key = build_episode_key(scene_id, episode.episode_id)
-                episode_instruction = self._episode_instruction(self.config_path, episode)
-
-                meta = summary_full.get(episode_key)
-                if meta is None:
-                    stats["episodes_missing_meta"] += 1.0
-                    print(f"[oracle] missing summary_full for episode_key={episode_key}")
-                    continue
-
-                try:
-                    subtask_sequence = meta.get("subtask_sequence")
-                    plan_steps = parse_plan_steps(meta.get("plan", []))
-                    if not isinstance(subtask_sequence, list):
-                        raise ValueError("subtask_sequence must be list")
-                    if not subtask_sequence or not plan_steps:
-                        raise ValueError("empty subtask_sequence/plan")
-
-                    spans = build_subtask_spans(subtask_sequence)
-                    if not spans:
-                        raise ValueError("subtask_sequence has no valid spans")
-
-                    env.current_episode = episode
-                    observations = env.reset()
-                    step_idx = 0
-
-                    while not env.episode_over:
-                        oracle_subtask = oracle_subtask_at_step(step_idx, spans)
-                        plan_idx = min(max(oracle_subtask - 1, 0), len(plan_steps) - 1)
-                        subgoal_text = plan_steps[plan_idx]
-
-                        info = env.get_metrics()
-                        image = self.prepare_image_with_map(observations["rgb"], info)
-                        action, _ = self.nav_model.predict_action_with_progress(
-                            observation=image,
-                            instruction=episode_instruction,
-                            subgoal=subgoal_text,
-                        )
-
-                        observations = env.step(action)
-                        step_idx += 1
-
-                    metrics = env.get_metrics()
-                    sr = float(metrics.get("success", 0.0))
-                    spl = float(metrics.get("spl", 0.0))
-                    stats["episodes_evaluated"] += 1.0
-                    stats["sr_sum"] += sr
-                    stats["spl_sum"] += spl
-
-                    detail = {
-                        "scene_id": scene_id,
-                        "episode_id": episode.episode_id,
-                        "episode_key": episode_key,
-                        "steps": step_idx,
-                        "success": sr,
-                        "spl": spl,
-                    }
-                    write_jsonl_record(detail_file, detail)
-                except Exception as exc:
-                    stats["episodes_malformed"] += 1.0
-                    print(f"[oracle] malformed episode {episode_key}: {exc}")
-                    continue
-
-        env.close()
-        return stats
-
 
 __all__ = ["VLNEvaluator"]

@@ -25,10 +25,11 @@ model:
   # Loss weights for multi-task learning
   action_loss_weight: 0.1     # Weight for action classification loss
   progress_loss_weight: 1.0    # Weight for progress regression loss
+  done_loss_weight: 1.0        # Weight for done (binary) classification loss
   use_huber_loss_for_progress: true  # Use Huber (SmoothL1) instead of MSE for progress, more robust to outliers
 
   # LoRA configuration for parameter-efficient fine-tuning
-  use_lora: false               # Enable LoRA adapters
+  use_lora: true               # Enable LoRA adapters
   lora_r: 32                    # LoRA rank (4, 8, 16, 32)
   lora_alpha: 64               # LoRA scaling factor (usually 2*r)
   lora_dropout: 0.05           # Dropout for LoRA layers
@@ -62,6 +63,8 @@ data:
   # Sample ratio: proportion of full dataset to use (1.0 = all, 0.1 = 10%)
   # Val split is applied after subsampling
   sample_ratio: 1
+  memory_num_history_images: 6
+  done_threshold: 0.85
   # Validation split ratio (applied to subsampled data)
   # 0.1 means 10% for validation. Set to 0 to disable
   val_split_ratio: 0.05
@@ -72,7 +75,7 @@ data:
 # ============================================================================
 training:
   # Output directory for checkpoints and logs
-  output_dir: "outputs/actor/full/run-3-2-seperate-2"
+  output_dir: "outputs/actor/lora/run-3-3"
   
   # Resume from checkpoint (optional)
   # Set to checkpoint directory path to resume training
@@ -85,13 +88,13 @@ training:
   max_steps: -1  # -1 means use num_train_epochs instead
   
   # Batch size and gradient accumulation
-  per_device_train_batch_size: 8      # Batch size per GPU (increased with LoRA)
+  per_device_train_batch_size: 16      # Batch size per GPU (increased with LoRA)
   gradient_accumulation_steps: 1      # 8卡分片后先降到1，避免每个epoch只有很少更新步
   # Effective batch size = per_device_batch_size × gradient_accumulation_steps × num_gpus
   # Example: 2 × 4 × 8 = 64 (for 8 GPUs)
   
   # Optimizer settings
-  learning_rate: 1.0e-5
+  learning_rate: 2.0e-5
   weight_decay: 0.01
   warmup_steps: 70
   max_grad_norm: 1.0

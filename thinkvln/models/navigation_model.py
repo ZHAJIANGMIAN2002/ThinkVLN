@@ -8,10 +8,12 @@ All navigation models should implement this interface to work with the evaluator
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, List
 from PIL import Image
 import torch
 import numpy as np
+
+from thinkvln.tools.dataset_utils import select_memory_frame_indices
 
 
 class NavigationModel(ABC):
@@ -229,7 +231,14 @@ class ThinkVLNNavigationModel(NavigationModel):
 class ThinkVLNActorNavigationModel(NavigationModel):
     """ThinkVLNActor wrapper for closed-loop action/progress inference."""
 
-    def __init__(self, model, processor, device: str = "cuda"):
+    def __init__(
+        self,
+        model,
+        processor,
+        device: str = "cuda",
+        memory_num_history_images: int = 8,
+        done_threshold: float = 0.85,
+    ):
         self.model = model
         self.processor = processor
         self.device = device
@@ -243,14 +252,61 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         self.num_query_tokens = int(getattr(model.config, "num_query_tokens", 4))
         self.action_query_token_id = int(getattr(model.config, "action_query_token_id", 151700))
         self.progress_query_token_id = int(getattr(model.config, "progress_query_token_id", 151701))
+        self.memory_num_history_images = int(memory_num_history_images)
+        self.done_threshold = float(done_threshold)
         self.prompt_template = (
             "Instruction: {instruction}\n"
             "Current subgoal: {subgoal}\n"
-            "Predict the next 4 actions and subgoal progress."
+            "Previous progress: {prev_progress:.3f}\n"
+            "{memory_hint}"
+            "Predict the next 4 actions and the current-step subgoal progress."
         )
+        self.reset_episode_state()
 
     def eval(self):
         self.model.eval()
+
+    def reset_episode_state(self, episode_key: Optional[str] = None):
+        self.episode_key = episode_key
+        self.memory_bank_images: List[Image.Image] = []
+        self.memory_bank_subtasks: List[int] = []
+        self.subtask_start_bank_indices: List[int] = []
+        self.current_subtask_id = 1
+        self.last_subtask_id = None
+        self.last_subgoal = None
+        self.prev_progress = 0.0
+
+    def _update_subtask_state(
+        self,
+        subgoal: str,
+        subtask_id: Optional[int] = None,
+    ) -> Tuple[int, bool]:
+        is_subtask_start = False
+        if subtask_id is not None:
+            resolved_subtask_id = max(1, int(subtask_id))
+            if self.last_subtask_id is None:
+                is_subtask_start = True
+            elif resolved_subtask_id != self.last_subtask_id:
+                is_subtask_start = True
+                self.prev_progress = 0.0
+            self.current_subtask_id = resolved_subtask_id
+            self.last_subtask_id = resolved_subtask_id
+            self.last_subgoal = subgoal
+            return resolved_subtask_id, is_subtask_start
+
+        if self.last_subgoal is None:
+            self.last_subgoal = subgoal
+            self.last_subtask_id = self.current_subtask_id
+            return self.current_subtask_id, True
+        if subgoal != self.last_subgoal:
+            self.current_subtask_id += 1
+            self.last_subgoal = subgoal
+            self.last_subtask_id = self.current_subtask_id
+            self.prev_progress = 0.0
+            is_subtask_start = True
+        else:
+            self.last_subtask_id = self.current_subtask_id
+        return self.current_subtask_id, is_subtask_start
 
     def _build_query_tokens(self) -> torch.Tensor:
         tokens = []
@@ -259,18 +315,17 @@ class ThinkVLNActorNavigationModel(NavigationModel):
             tokens.append(self.progress_query_token_id)
         return torch.tensor(tokens, dtype=torch.long, device=self.device).unsqueeze(0)
 
-    def _build_inputs(self, observation: Image.Image, prompt: str) -> dict:
+    def _build_inputs(self, images: List[Image.Image], prompt: str) -> dict:
+        content = [{"type": "image", "image": image} for image in images]
+        content.append({"type": "text", "text": prompt})
         messages = [{
             "role": "user",
-            "content": [
-                {"type": "image", "image": observation},
-                {"type": "text", "text": prompt},
-            ],
+            "content": content,
         }]
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.processor(
             text=[text],
-            images=[observation],
+            images=images,
             return_tensors="pt",
             padding=False,
         )
@@ -287,8 +342,13 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         model_inputs = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "action_labels": torch.zeros((1, self.num_query_tokens), dtype=torch.long, device=self.device),
-            "progress_labels": torch.zeros((1, self.num_query_tokens), dtype=torch.float32, device=self.device),
+            "action_labels": torch.zeros(
+                (1, self.num_query_tokens),
+                dtype=torch.long,
+                device=self.device,
+            ),
+            "progress_labels": torch.zeros((1,), dtype=torch.float32, device=self.device),
+            "done_labels": torch.zeros((1,), dtype=torch.float32, device=self.device),
         }
         if "pixel_values" in inputs and inputs["pixel_values"] is not None:
             model_inputs["pixel_values"] = inputs["pixel_values"].to(self.device)
@@ -296,29 +356,147 @@ class ThinkVLNActorNavigationModel(NavigationModel):
             model_inputs["image_grid_thw"] = inputs["image_grid_thw"].to(self.device)
         return model_inputs
 
-    def predict_action_with_progress(
+    @staticmethod
+    def _first_scalar(x: Optional[torch.Tensor], default: float = 0.0) -> float:
+        if x is None:
+            return float(default)
+        if x.ndim == 0:
+            return float(x.item())
+        if x.ndim == 1:
+            return float(x[0].item())
+        return float(x[0, 0].item())
+
+    @staticmethod
+    def _first_vector_logits(action_logits: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if action_logits is None:
+            return None
+        if action_logits.ndim == 2:
+            return action_logits[0]
+        if action_logits.ndim == 3:
+            return action_logits[0, 0]
+        return None
+
+    def _maybe_reset_for_episode(self, episode_key: Optional[str]):
+        if episode_key is not None and episode_key != self.episode_key:
+            self.reset_episode_state(episode_key=episode_key)
+
+    def _append_observation_to_memory_bank(self, observation: Image.Image, subtask_id: int, is_subtask_start: bool) -> None:
+        self.memory_bank_images.append(observation)
+        self.memory_bank_subtasks.append(subtask_id)
+        frame_idx = len(self.memory_bank_images) - 1
+        if is_subtask_start or frame_idx == 0:
+            self.subtask_start_bank_indices.append(frame_idx)
+
+    def record_memory_observation(
+        self,
+        observation: Image.Image,
+        subtask_id: int,
+        episode_key: Optional[str] = None,
+    ) -> None:
+        self._maybe_reset_for_episode(episode_key)
+        try:
+            resolved_subtask_id = int(subtask_id)
+        except (TypeError, ValueError):
+            resolved_subtask_id = 1
+        resolved_subtask_id = max(1, resolved_subtask_id)
+        is_subtask_start = self.last_subtask_id is None or resolved_subtask_id != self.last_subtask_id
+        self.current_subtask_id = resolved_subtask_id
+        self.last_subtask_id = resolved_subtask_id
+        self._append_observation_to_memory_bank(
+            observation=observation,
+            subtask_id=resolved_subtask_id,
+            is_subtask_start=is_subtask_start,
+        )
+
+    def _prepare_memory_images_from_bank(self) -> List[Image.Image]:
+        if not self.memory_bank_images:
+            return []
+        frame_idx = len(self.memory_bank_images) - 1
+        subtask_sequence = self.memory_bank_subtasks
+        history_indices = select_memory_frame_indices(
+            frame_idx=frame_idx,
+            subtask_sequence=subtask_sequence,
+            memory_num_history_images=self.memory_num_history_images,
+        )
+        selected_indices = history_indices + [frame_idx]
+        images = [
+            self.memory_bank_images[idx]
+            for idx in selected_indices
+            if 0 <= idx < len(self.memory_bank_images)
+        ]
+        return images
+
+    def predict_action_with_progress_and_done(
         self,
         observation: Image.Image,
         instruction: str,
         subgoal: str,
-    ) -> Tuple[int, float]:
-        prompt = self.prompt_template.format(instruction=instruction, subgoal=subgoal)
-        model_inputs = self._build_inputs(observation, prompt)
+        episode_key: Optional[str] = None,
+        subtask_id: Optional[int] = None,
+    ) -> Tuple[int, float, bool]:
+        self._maybe_reset_for_episode(episode_key)
+        resolved_subtask_id, is_subtask_start = self._update_subtask_state(subgoal, subtask_id=subtask_id)
+        self._append_observation_to_memory_bank(
+            observation=observation,
+            subtask_id=resolved_subtask_id,
+            is_subtask_start=is_subtask_start,
+        )
+        images = self._prepare_memory_images_from_bank()
+        memory_hint = (
+            "Historical observations are provided.\n"
+            if len(images) > 1
+            else ""
+        )
+        prompt = self.prompt_template.format(
+            instruction=instruction,
+            subgoal=subgoal,
+            prev_progress=self.prev_progress,
+            memory_hint=memory_hint,
+        )
+        model_inputs = self._build_inputs(images, prompt)
 
         with torch.no_grad():
             outputs = self.model(**model_inputs, return_dict=True)
 
         action_logits = outputs.get("action_logits")
+        first_step_logits = self._first_vector_logits(action_logits)
+        if first_step_logits is None:
+            action = self.actions2idx["stop"]
+        else:
+            action = int(torch.argmax(first_step_logits, dim=-1).item())
+
         progress_preds = outputs.get("progress_preds")
+        progress = max(0.0, min(1.0, self._first_scalar(progress_preds, default=0.0)))
 
-        if action_logits is None or action_logits.shape[1] == 0:
-            return self.actions2idx["stop"], 0.0
+        done_probs = outputs.get("done_preds")
+        if done_probs is not None:
+            done_prob = self._first_scalar(done_probs, default=0.0)
+        else:
+            done_logits = outputs.get("done_logits")
+            if done_logits is not None:
+                done_prob = self._first_scalar(torch.sigmoid(done_logits), default=0.0)
+            else:
+                done_prob = 1.0 if progress > self.done_threshold else 0.0
+        done = bool(done_prob > 0.5)
 
-        action = int(torch.argmax(action_logits[0, 0], dim=-1).item())
-        progress = 0.0
-        if progress_preds is not None and progress_preds.shape[1] > 0:
-            progress = float(progress_preds[0, 0].item())
-        progress = max(0.0, min(1.0, progress))
+        self.prev_progress = progress
+        return action, progress, done
+
+    def predict_action_with_progress(
+        self,
+        observation: Image.Image,
+        instruction: str,
+        subgoal: str,
+        episode_key: Optional[str] = None,
+        subtask_id: Optional[int] = None,
+    ) -> Tuple[int, float]:
+        action, progress, _ = self.predict_action_with_progress_and_done(
+            observation=observation,
+            instruction=instruction,
+            subgoal=subgoal,
+            episode_key=episode_key,
+            subtask_id=subtask_id,
+        )
         return action, progress
 
     def predict_action(
@@ -335,6 +513,8 @@ class ThinkVLNActorNavigationModel(NavigationModel):
                 observation=observation,
                 instruction=instruction,
                 subgoal=subgoal,
+                episode_key=kwargs.get("episode_key"),
+                subtask_id=kwargs.get("subtask_id"),
             )
             return action, None
         except Exception:

@@ -13,7 +13,6 @@ class CloseEvalCompatibilityTest(unittest.TestCase):
             "build_subtask_spans",
             "timeline_progress",
             "compute_step_budget",
-            "oracle_subtask_at_step",
             "summarize_subtask_aggregation",
             "load_summary_full",
             "load_thinkvln_actor_model",
@@ -47,18 +46,26 @@ class CloseEvalCompatibilityTest(unittest.TestCase):
             "--num_future_steps",
             "--num_history",
             "--device",
+            "--dist_timeout_minutes",
+            "--scalar_dist_timeout_minutes",
         ]:
             with self.subTest(flag=flag):
                 self.assertIn(flag, flags)
 
         args = parser.parse_args([])
         self.assertEqual(args.model_type, "thinkvln")
-        self.assertEqual(args.ladder_mode, "legacy")
+        self.assertEqual(args.ladder_mode, "subtask")
+        self.assertEqual(
+            parser._option_string_actions["--ladder_mode"].choices,
+            ["subtask"],
+        )
         self.assertEqual(args.habitat_config_path, "config/vln_r2r.yaml")
         self.assertEqual(args.eval_split, "val_unseen")
         self.assertEqual(args.output_path, "./results/env_eval")
         self.assertEqual(args.sample_rate, 1.0)
         self.assertEqual(args.model_max_length, 4096)
+        self.assertEqual(args.memory_num_history_images, 6)
+        self.assertEqual(args.done_threshold, 0.85)
 
 
 if __name__ == "__main__":

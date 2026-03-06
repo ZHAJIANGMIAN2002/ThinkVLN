@@ -99,6 +99,10 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         default=1.0,
         metadata={"help": "Weight for progress regression loss"}
     )
+    done_loss_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for binary done classification loss"}
+    )
     use_huber_loss_for_progress: bool = field(
         default=False,
         metadata={"help": "Use Huber (SmoothL1) instead of MSE for progress regression, more robust to outliers"}
@@ -166,6 +170,14 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         default=1.0,
         metadata={"help": "Ratio of full dataset to use for training (1.0 = all data, 0.1 = 10%). Val split applied after subsampling."}
     )
+    memory_num_history_images: int = field(
+        default=8,
+        metadata={"help": "Max number of history images before current frame for memory prompt"}
+    )
+    done_threshold: float = field(
+        default=0.85,
+        metadata={"help": "Done label threshold: done = (progress > threshold)"}
+    )
     
     # Custom evaluation metrics
     progress_metric: str = field(
@@ -202,8 +214,12 @@ class ThinkVLNTrainingArguments(TrainingArguments):
             raise ValueError(f"sample_ratio must be in (0, 1], got {self.sample_ratio}")
         
         # Validate loss weights
-        if self.action_loss_weight < 0 or self.progress_loss_weight < 0:
+        if self.action_loss_weight < 0 or self.progress_loss_weight < 0 or self.done_loss_weight < 0:
             raise ValueError("Loss weights must be non-negative")
+        if self.memory_num_history_images < 0:
+            raise ValueError("memory_num_history_images must be >= 0")
+        if not 0.0 <= self.done_threshold <= 1.0:
+            raise ValueError(f"done_threshold must be in [0, 1], got {self.done_threshold}")
 
 
 class ThinkVLNSFTTrainer(Trainer):
@@ -228,17 +244,92 @@ class ThinkVLNSFTTrainer(Trainer):
         self.loss_history = {
             "action_loss": [],
             "progress_loss": [],
+            "done_loss": [],
             "lm_loss": [],
         }
         
         # Store eval metric config
         self.progress_metric = self.args.progress_metric
         self.action_metric = self.args.action_metric
+        self._logged_first_train_batch = False
+        self._logged_first_eval_batch = False
+
+    def _log_dataloader_shard_info(self, dataloader, split: str, local_batch_size: int):
+        """Log per-rank dataloader shard info for distributed sanity checks."""
+        rank = int(getattr(self.accelerator, "process_index", 0))
+        world_size = int(getattr(self.accelerator, "num_processes", 1))
+
+        sampler = getattr(dataloader, "sampler", None)
+        batch_sampler = getattr(dataloader, "batch_sampler", None)
+
+        sampler_name = sampler.__class__.__name__ if sampler is not None else "None"
+        batch_sampler_name = batch_sampler.__class__.__name__ if batch_sampler is not None else "None"
+
+        shard_rank = None
+        shard_world_size = None
+        shard_sources = [
+            sampler,
+            batch_sampler,
+            getattr(batch_sampler, "sampler", None),
+            getattr(batch_sampler, "batch_sampler", None),
+            getattr(getattr(batch_sampler, "batch_sampler", None), "sampler", None),
+        ]
+        for source in shard_sources:
+            if source is None:
+                continue
+            if shard_rank is None:
+                shard_rank = getattr(source, "rank", None)
+                if shard_rank is None:
+                    shard_rank = getattr(source, "process_index", None)
+            if shard_world_size is None:
+                shard_world_size = getattr(source, "num_replicas", None)
+                if shard_world_size is None:
+                    shard_world_size = getattr(source, "num_processes", None)
+            if shard_rank is not None and shard_world_size is not None:
+                break
+
+        local_num_batches = len(dataloader) if hasattr(dataloader, "__len__") else -1
+        total_batch_size = getattr(dataloader, "total_batch_size", None)
+        total_dataset_length = getattr(dataloader, "total_dataset_length", None)
+
+        logger.info(
+            "[%s][rank %d/%d] dataloader shard ready | sampler=%s | batch_sampler=%s | local_batches=%s | local_batch_size=%s | total_batch_size=%s | total_dataset_length=%s | shard_rank=%s | shard_world_size=%s",
+            split,
+            rank,
+            world_size,
+            sampler_name,
+            batch_sampler_name,
+            local_num_batches,
+            local_batch_size,
+            total_batch_size,
+            total_dataset_length,
+            shard_rank,
+            shard_world_size,
+        )
+
+    @staticmethod
+    def _get_single_data_type(dataset) -> Optional[str]:
+        """Return the single data_type in dataset if homogeneous, else None."""
+        from torch.utils.data import Subset
+
+        if isinstance(dataset, Subset):
+            indices = dataset.indices
+            if not indices:
+                return None
+            base = dataset.dataset
+            data_types = {base[idx]["data_type"] for idx in indices}
+        else:
+            if len(dataset) == 0:
+                return None
+            data_types = {dataset[idx]["data_type"] for idx in range(len(dataset))}
+        return next(iter(data_types)) if len(data_types) == 1 else None
     
     def get_train_dataloader(self):
         """
-        Returns training dataloader with HomogeneousBatchSampler.
-        Ensures each batch contains only one type of sample (action or CoT).
+        Returns training dataloader.
+
+        - Homogeneous dataset (all action or all CoT): use standard DataLoader.
+        - Mixed dataset (action + CoT): use HomogeneousBatchSampler.
         """
         from torch.utils.data import DataLoader
         from thinkvln.dataset.dataset import HomogeneousBatchSampler
@@ -248,26 +339,44 @@ class ThinkVLNSFTTrainer(Trainer):
         
         train_dataset = self.train_dataset
         data_collator = self.data_collator
-        
-        # Create homogeneous batch sampler
-        train_sampler = HomogeneousBatchSampler(
-            dataset=train_dataset,
-            batch_size=self.args.per_device_train_batch_size,
-            drop_last=self.args.dataloader_drop_last,
-            shuffle=True,
-            seed=self.args.seed,
-        )
 
-        dataloader = DataLoader(
-            train_dataset,
-            batch_sampler=train_sampler,
-            collate_fn=data_collator,
-            num_workers=self.args.dataloader_num_workers,
-            pin_memory=self.args.dataloader_pin_memory,
-        )
+        single_type = self._get_single_data_type(train_dataset)
+        if single_type is not None:
+            logger.info("Train dataloader uses standard sampler (single data_type=%s).", single_type)
+            dataloader = DataLoader(
+                train_dataset,
+                batch_size=self.args.per_device_train_batch_size,
+                shuffle=True,
+                drop_last=self.args.dataloader_drop_last,
+                collate_fn=data_collator,
+                num_workers=self.args.dataloader_num_workers,
+                pin_memory=self.args.dataloader_pin_memory,
+            )
+        else:
+            logger.info("Train dataloader uses HomogeneousBatchSampler (mixed action/CoT).")
+            train_sampler = HomogeneousBatchSampler(
+                dataset=train_dataset,
+                batch_size=self.args.per_device_train_batch_size,
+                drop_last=self.args.dataloader_drop_last,
+                shuffle=True,
+                seed=self.args.seed,
+            )
+            dataloader = DataLoader(
+                train_dataset,
+                batch_sampler=train_sampler,
+                collate_fn=data_collator,
+                num_workers=self.args.dataloader_num_workers,
+                pin_memory=self.args.dataloader_pin_memory,
+            )
 
         # Important: let Accelerate shard this custom batch sampler across ranks.
-        return self.accelerator.prepare(dataloader)
+        dataloader = self.accelerator.prepare(dataloader)
+        self._log_dataloader_shard_info(
+            dataloader=dataloader,
+            split="train",
+            local_batch_size=self.args.per_device_train_batch_size,
+        )
+        return dataloader
     
     def compute_loss(
         self,
@@ -291,7 +400,8 @@ class ThinkVLNSFTTrainer(Trainer):
                 - pixel_values: Image tensor or None
                 - image_grid_thw: Image grid info or None
                 - action_labels: [batch_size, 4] or None (for action samples)
-                - progress_labels: [batch_size, 4] or None (for action samples)
+                - progress_labels: [batch_size] or None (for action samples)
+                - done_labels: [batch_size] or None (for action samples)
                 - labels: [batch_size, seq_len] or None (for CoT samples)
         
         Returns:
@@ -300,6 +410,22 @@ class ThinkVLNSFTTrainer(Trainer):
         """
         # Forward pass - model handles routing internally
         outputs = model(**inputs)
+
+        if not self._logged_first_train_batch:
+            rank = int(getattr(self.accelerator, "process_index", 0))
+            world_size = int(getattr(self.accelerator, "num_processes", 1))
+            mode = "action" if inputs.get("action_labels") is not None else "cot"
+            input_shape = tuple(inputs["input_ids"].shape) if "input_ids" in inputs else None
+            pixel_shape = tuple(inputs["pixel_values"].shape) if inputs.get("pixel_values") is not None else None
+            logger.info(
+                "[train][rank %d/%d] first local batch received | mode=%s | input_ids=%s | pixel_values=%s",
+                rank,
+                world_size,
+                mode,
+                input_shape,
+                pixel_shape,
+            )
+            self._logged_first_train_batch = True
         
         # Extract combined loss (already weighted by model)
         loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
@@ -330,6 +456,11 @@ class ThinkVLNSFTTrainer(Trainer):
                 progress_loss_value = outputs["progress_loss"].item()
                 metrics["train/progress_loss"] = progress_loss_value
                 self.loss_history["progress_loss"].append(progress_loss_value)
+
+            if "done_loss" in outputs and outputs["done_loss"] is not None:
+                done_loss_value = outputs["done_loss"].item()
+                metrics["train/done_loss"] = done_loss_value
+                self.loss_history["done_loss"].append(done_loss_value)
             
             if "lm_loss" in outputs and outputs["lm_loss"] is not None:
                 lm_loss_value = outputs["lm_loss"].item()
@@ -356,12 +487,35 @@ class ThinkVLNSFTTrainer(Trainer):
         
         # Initialize metric accumulators
         all_losses = []
-        action_metrics = {"preds": [], "labels": [], "progress_preds": [], "progress_labels": []}
+        action_metrics = {
+            "preds": [],
+            "labels": [],
+            "progress_preds": [],
+            "progress_labels": [],
+            "done_preds": [],
+            "done_labels": [],
+        }
         cot_metrics = {"losses": []}
         
         for step, inputs in enumerate(dataloader):
             # Move inputs to device
             inputs = self._prepare_inputs(inputs)
+
+            if step == 0 and not self._logged_first_eval_batch:
+                rank = int(getattr(self.accelerator, "process_index", 0))
+                world_size = int(getattr(self.accelerator, "num_processes", 1))
+                mode = "action" if inputs.get("action_labels") is not None else "cot"
+                input_shape = tuple(inputs["input_ids"].shape) if "input_ids" in inputs else None
+                pixel_shape = tuple(inputs["pixel_values"].shape) if inputs.get("pixel_values") is not None else None
+                logger.info(
+                    "[eval][rank %d/%d] first local batch received | mode=%s | input_ids=%s | pixel_values=%s",
+                    rank,
+                    world_size,
+                    mode,
+                    input_shape,
+                    pixel_shape,
+                )
+                self._logged_first_eval_batch = True
             
             with torch.no_grad():
                 outputs = model(**inputs)
@@ -374,9 +528,11 @@ class ThinkVLNSFTTrainer(Trainer):
                 if inputs.get("action_labels") is not None:
                     # Action mode
                     action_logits = outputs.get("action_logits")  # [batch, 4, num_classes]
-                    progress_preds = outputs.get("progress_preds")  # [batch, 4]
+                    progress_preds = outputs.get("progress_preds")  # [batch]
+                    done_preds = outputs.get("done_preds")  # [batch]
                     action_labels = inputs.get("action_labels")  # [batch, 4]
-                    progress_labels = inputs.get("progress_labels")  # [batch, 4]
+                    progress_labels = inputs.get("progress_labels")  # [batch]
+                    done_labels = inputs.get("done_labels")  # [batch]
                     
                     if action_logits is not None:
                         action_preds = torch.argmax(action_logits, dim=-1)  # [batch, 4]
@@ -386,6 +542,9 @@ class ThinkVLNSFTTrainer(Trainer):
                     if progress_preds is not None and progress_labels is not None:
                         action_metrics["progress_preds"].append(progress_preds.float().cpu())
                         action_metrics["progress_labels"].append(progress_labels.float().cpu())
+                    if done_preds is not None and done_labels is not None:
+                        action_metrics["done_preds"].append(done_preds.float().cpu())
+                        action_metrics["done_labels"].append(done_labels.float().cpu())
                 else:
                     # CoT mode
                     cot_loss = outputs.get("lm_loss")
@@ -437,6 +596,14 @@ class ThinkVLNSFTTrainer(Trainer):
                         delta * (abs_error - 0.5 * delta)
                     )
                     metrics[f"{metric_key_prefix}_progress_huber"] = huber.mean()
+
+        if action_metrics["done_preds"]:
+            done_preds = torch.cat(action_metrics["done_preds"], dim=0).float().numpy()
+            done_labels = torch.cat(action_metrics["done_labels"], dim=0).float().numpy()
+            valid_mask = ~np.isnan(done_labels) & ~np.isinf(done_labels) & (done_labels != -100)
+            if valid_mask.sum() > 0:
+                done_pred_binary = (done_preds[valid_mask] > 0.5).astype(np.float32)
+                metrics[f"{metric_key_prefix}_done_accuracy"] = (done_pred_binary == done_labels[valid_mask]).mean()
         
         # CoT metrics
         if cot_metrics["losses"]:
@@ -477,7 +644,10 @@ class ThinkVLNSFTTrainer(Trainer):
     
     def get_eval_dataloader(self, eval_dataset=None):
         """
-        Returns evaluation dataloader with HomogeneousBatchSampler.
+        Returns evaluation dataloader.
+
+        - Homogeneous dataset (all action or all CoT): use standard DataLoader.
+        - Mixed dataset (action + CoT): use HomogeneousBatchSampler.
         """
         from torch.utils.data import DataLoader
         from thinkvln.dataset.dataset import HomogeneousBatchSampler
@@ -487,8 +657,28 @@ class ThinkVLNSFTTrainer(Trainer):
         
         if eval_dataset is None:
             raise ValueError("Trainer: evaluation requires an eval_dataset.")
-        
-        # Create homogeneous batch sampler for eval
+
+        single_type = self._get_single_data_type(eval_dataset)
+        if single_type is not None:
+            logger.info("Eval dataloader uses standard sampler (single data_type=%s).", single_type)
+            dataloader = DataLoader(
+                eval_dataset,
+                batch_size=self.args.per_device_eval_batch_size,
+                shuffle=False,
+                drop_last=False,
+                collate_fn=self.data_collator,
+                num_workers=self.args.dataloader_num_workers,
+                pin_memory=self.args.dataloader_pin_memory,
+            )
+            dataloader = self.accelerator.prepare(dataloader)
+            self._log_dataloader_shard_info(
+                dataloader=dataloader,
+                split="eval",
+                local_batch_size=self.args.per_device_eval_batch_size,
+            )
+            return dataloader
+
+        logger.info("Eval dataloader uses HomogeneousBatchSampler (mixed action/CoT).")
         eval_sampler = HomogeneousBatchSampler(
             dataset=eval_dataset,
             batch_size=self.args.per_device_eval_batch_size,
@@ -497,13 +687,20 @@ class ThinkVLNSFTTrainer(Trainer):
             seed=self.args.seed,
         )
 
-        return DataLoader(
+        dataloader = DataLoader(
             eval_dataset,
             batch_sampler=eval_sampler,
             collate_fn=self.data_collator,
             num_workers=self.args.dataloader_num_workers,
             pin_memory=self.args.dataloader_pin_memory,
         )
+        dataloader = self.accelerator.prepare(dataloader)
+        self._log_dataloader_shard_info(
+            dataloader=dataloader,
+            split="eval",
+            local_batch_size=self.args.per_device_eval_batch_size,
+        )
+        return dataloader
     
     def _save_checkpoint(self, model, trial, metrics=None):
         """
@@ -567,6 +764,7 @@ def load_model(args: ThinkVLNTrainingArguments):
         num_action_classes=args.num_action_classes,
         action_loss_weight=args.action_loss_weight,
         progress_loss_weight=args.progress_loss_weight,
+        done_loss_weight=args.done_loss_weight,
         use_huber_loss_for_progress=getattr(args, 'use_huber_loss_for_progress', False),
     )
     
@@ -636,7 +834,7 @@ def load_model(args: ThinkVLNTrainingArguments):
             task_type="CAUSAL_LM",
             # Keep actor-specific modules fully trainable
             # Note: query embeddings are now buffers (non-learnable), not saved in modules_to_save
-            modules_to_save=["shared_projector", "action_head", "progress_head"],
+            modules_to_save=["shared_projector", "action_head", "progress_head", "done_head"],
         )
         
         model = get_peft_model(model, lora_config)
@@ -715,7 +913,7 @@ def verify_lora_save(output_dir: str, expected_modules: list = None):
     import json
     import time
     
-    expected_modules = expected_modules or ["query_embeddings", "shared_projector", "action_head", "progress_head"]
+    expected_modules = expected_modules or ["shared_projector", "action_head", "progress_head", "done_head"]
     adapter_file = os.path.join(output_dir, "adapter_model.safetensors")
     if not os.path.exists(adapter_file):
         adapter_file = os.path.join(output_dir, "adapter_model.bin")
@@ -838,6 +1036,8 @@ def create_datasets(args: ThinkVLNTrainingArguments, processor, model):
         action_query_token_id=action_query_token_id,
         progress_query_token_id=progress_query_token_id,
         image_root=args.image_root,
+        memory_num_history_images=args.memory_num_history_images,
+        done_threshold=args.done_threshold,
     )
     
     logger.info("Data collator created")
@@ -886,6 +1086,7 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
         flat_config['num_action_classes'] = model_cfg.get('num_action_classes', 4)
         flat_config['action_loss_weight'] = model_cfg.get('action_loss_weight', 1.0)
         flat_config['progress_loss_weight'] = model_cfg.get('progress_loss_weight', 1.0)
+        flat_config['done_loss_weight'] = model_cfg.get('done_loss_weight', 1.0)
         flat_config['use_huber_loss_for_progress'] = model_cfg.get('use_huber_loss_for_progress', False)
 
         # LoRA config
@@ -916,6 +1117,8 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
 
         flat_config['val_split_ratio'] = data_cfg.get('val_split_ratio', 0.1)
         flat_config['sample_ratio'] = data_cfg.get('sample_ratio', 1.0)
+        flat_config['memory_num_history_images'] = data_cfg.get('memory_num_history_images', 8)
+        flat_config['done_threshold'] = data_cfg.get('done_threshold', 0.85)
     
     # Training config
     if 'training' in config:
@@ -1016,6 +1219,11 @@ def main():
     logger.info(f"Mixed precision: {'bf16' if args.bf16 else 'fp16' if args.fp16 else 'fp32'}")
     logger.info(f"DeepSpeed: {args.deepspeed if args.deepspeed else 'Disabled'}")
     logger.info(f"Distributed: {args.world_size} GPUs")
+    logger.info(
+        "Memory config: history_images=%d done_threshold=%.2f",
+        args.memory_num_history_images,
+        args.done_threshold,
+    )
     logger.info(f"Logging: {args.report_to}")
     logger.info("=" * 80)
     
