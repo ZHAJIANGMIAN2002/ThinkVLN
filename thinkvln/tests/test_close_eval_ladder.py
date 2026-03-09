@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 
 from thinkvln.eval.close_eval_runner import VLNEvaluator
+from thinkvln.eval.close_eval_cli import build_parser
 from thinkvln.models.navigation_model import ThinkVLNActorNavigationModel
 
 _CLOSE_EVAL_PATH = Path(__file__).resolve().parents[1] / "eval" / "close_eval.py"
@@ -107,6 +108,84 @@ class CloseEvalLadderUtilsTest:
         assert summary["subtask_success_rate"] == 0.75
         assert summary["steps_to_subgoal"] == 4.0
         assert summary["progress_mae"] == 0.25
+
+
+class TestCloseEvalCliArgs:
+    def test_parser_includes_minimal_recovery_args(self):
+        parser = build_parser()
+        args = parser.parse_args([])
+        assert args.startup_scan_turns == 0
+        assert args.recovery_turn_steps == 2
+
+    @pytest.mark.parametrize(
+        "arg_name",
+        ["--startup_scan_turns", "--recovery_turn_steps"],
+    )
+    def test_parser_rejects_negative_recovery_args(self, arg_name):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args([arg_name, "-1"])
+
+
+class TestStuckRecoveryHelpers:
+    def test_collision_count_supports_count_and_is_collision_shapes(self):
+        count, delta, is_collision = VLNEvaluator._collision_info_to_count(
+            {"collisions": {"count": 3}},
+            prev_collision_count=2.0,
+        )
+        assert count == 3.0
+        assert delta == 1.0
+        assert is_collision is True
+
+        count2, delta2, is_collision2 = VLNEvaluator._collision_info_to_count(
+            {"collisions": {"is_collision": True}},
+            prev_collision_count=3.0,
+        )
+        assert count2 == 4.0
+        assert delta2 == 1.0
+        assert is_collision2 is True
+
+    def test_detect_stuck_uses_forward_collision_or_window_stationary(self):
+        recent_steps = [
+            {"step_displacement": 0.01, "distance_improve": 0.0},
+            {"step_displacement": 0.01, "distance_improve": 0.0},
+            {"step_displacement": 0.01, "distance_improve": 0.0},
+        ]
+        stuck_collision, reason_collision = VLNEvaluator._detect_stuck(
+            executed_action=1,
+            collision_delta=1.0,
+            recent_steps=recent_steps,
+        )
+        assert stuck_collision is True
+        assert reason_collision == "forward_collision"
+
+        stuck_window, reason_window = VLNEvaluator._detect_stuck(
+            executed_action=2,
+            collision_delta=0.0,
+            recent_steps=recent_steps,
+        )
+        assert stuck_window is True
+        assert reason_window == "stationary_no_progress"
+
+    def test_recovery_trigger_blocked_by_cooldown_and_zero_steps(self):
+        assert VLNEvaluator._can_trigger_recovery(
+            recovery_turn_steps=2,
+            cooldown_remaining=1,
+            startup_scan_phase=False,
+            recovery_active=False,
+        ) is False
+        assert VLNEvaluator._can_trigger_recovery(
+            recovery_turn_steps=0,
+            cooldown_remaining=0,
+            startup_scan_phase=False,
+            recovery_active=False,
+        ) is False
+        assert VLNEvaluator._can_trigger_recovery(
+            recovery_turn_steps=2,
+            cooldown_remaining=0,
+            startup_scan_phase=False,
+            recovery_active=False,
+        ) is True
 
 
 class TestActorWrapper:

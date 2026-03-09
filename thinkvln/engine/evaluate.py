@@ -161,7 +161,7 @@ def load_model(model_path: str, base_model_path: str = None, device: str = "cuda
             actual_base_model,
             actor_config=actor_config,
             device_map="cpu",  # Load on CPU first
-            torch_dtype=model_dtype,
+            dtype=model_dtype,
         )
         
         # Load LoRA adapter
@@ -184,7 +184,7 @@ def load_model(model_path: str, base_model_path: str = None, device: str = "cuda
         model = ThinkVLNActor.from_pretrained(
             model_path,
             device_map="cpu",
-            torch_dtype=model_dtype,
+            dtype=model_dtype,
         )
         model = model.to(device)
     

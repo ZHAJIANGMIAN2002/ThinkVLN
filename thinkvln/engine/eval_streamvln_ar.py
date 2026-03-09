@@ -85,7 +85,7 @@ def load_streamvln(model_path: str, device: str):
     config = transformers.AutoConfig.from_pretrained(model_path)
     model = StreamVLNForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         config=config,
         low_cpu_mem_usage=True,
     )

@@ -207,7 +207,7 @@ def load_model_and_tokenizer(args, device: torch.device) -> Tuple[Any, Any, torc
     model_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     config = transformers.AutoConfig.from_pretrained(args.model_path)
     model_kwargs = {
-        "torch_dtype": model_dtype,
+        "dtype": model_dtype,
         "config": config,
         "low_cpu_mem_usage": False,
     }

@@ -194,7 +194,7 @@ def load_model_and_tokenizer(args) -> Tuple[Any, Any]:
 
     config = transformers.AutoConfig.from_pretrained(args.model_path)
     model_kwargs = {
-        "torch_dtype": torch.bfloat16,
+        "dtype": torch.bfloat16,
         "config": config,
         "low_cpu_mem_usage": False,
     }

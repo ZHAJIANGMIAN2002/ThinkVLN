@@ -49,7 +49,7 @@ def load_thinkvln_actor_model(
             actual_base_model,
             actor_config=actor_cfg,
             device_map="cpu",
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
         )
 
         from peft import PeftModel
@@ -60,7 +60,7 @@ def load_thinkvln_actor_model(
         processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
         model = ThinkVLNActor.from_pretrained(
             model_path,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
         ).to(device)
 
     model.requires_grad_(False)
@@ -148,7 +148,7 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
         model = StreamVLNForCausalLM.from_pretrained(
             args.model_path,
             attn_implementation="flash_attention_2",
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             config=config,
             low_cpu_mem_usage=False,
         )

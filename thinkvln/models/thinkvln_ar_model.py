@@ -29,7 +29,7 @@ def load_ar_model(
     dtype = torch.bfloat16 if bf16 else torch.float32
 
     model_kwargs = {
-        "torch_dtype": dtype,
+        "dtype": dtype,
         "trust_remote_code": True,
         "low_cpu_mem_usage": True,
     }
@@ -43,4 +43,3 @@ def load_ar_model(
         **model_kwargs,
     )
     return model
-

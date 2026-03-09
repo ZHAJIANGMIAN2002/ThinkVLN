@@ -524,7 +524,7 @@ def eval():
     model = StreamVLNForCausalLM.from_pretrained(
                 args.model_path,
                 attn_implementation="flash_attention_2",
-                torch_dtype=torch.bfloat16,
+                dtype=torch.bfloat16,
                 config=config,
                 low_cpu_mem_usage=False,
                 )
