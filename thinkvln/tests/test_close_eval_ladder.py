@@ -234,13 +234,16 @@ class _ReplayEnv:
         self.current_episode = None
         self.episode_over = False
         self._frame_idx = 0
+        self.step_actions = []
 
     def reset(self):
         self.episode_over = False
         self._frame_idx = 0
+        self.step_actions = []
         return {"rgb": self.frames[0]}
 
-    def step(self, _action):
+    def step(self, action):
+        self.step_actions.append(action)
         if self._frame_idx < len(self.frames) - 1:
             self._frame_idx += 1
         return {"rgb": self.frames[self._frame_idx]}
@@ -292,3 +295,48 @@ class TestSubtaskReplayMemoryPriming:
         )
         assert nav_model.memory_bank_subtasks == [1]
         assert nav_model.subtask_start_bank_indices == [0]
+
+
+class TestReplayActionNormalization:
+    def test_strip_leading_negative_one_sentinel(self):
+        normalized, meta = VLNEvaluator._normalize_actions_for_replay([-1, 1, 2, 3], "scene_005_ep-1")
+        assert normalized == [1, 2, 3]
+        assert meta["leading_sentinel_stripped"] is True
+        assert meta["original_len"] == 4
+        assert meta["normalized_len"] == 3
+
+    def test_keep_actions_without_sentinel(self):
+        normalized, meta = VLNEvaluator._normalize_actions_for_replay([1, 2, 3], "scene_005_ep-2")
+        assert normalized == [1, 2, 3]
+        assert meta["leading_sentinel_stripped"] is False
+        assert meta["original_len"] == 3
+        assert meta["normalized_len"] == 3
+
+
+class TestActorDebugSnapshot:
+    def test_snapshot_contains_prompt_query_memory_and_progress(self):
+        model = _DummyActor(progress_value=0.55, done_prob=0.2)
+        processor = _DummyProcessor()
+        wrapper = ThinkVLNActorNavigationModel(model=model, processor=processor, device="cpu")
+        wrapper.predict_action_with_progress_and_done(
+            observation=Image.new("RGB", (8, 8), color=(12, 12, 12)),
+            instruction="go to kitchen",
+            subgoal="walk to doorway",
+            episode_key="scene_007",
+            subtask_id=1,
+        )
+
+        snapshot = wrapper.get_last_debug_snapshot()
+        assert snapshot is not None
+        assert "prompt" in snapshot
+        assert "query_token_ids" in snapshot
+        assert "selected_indices" in snapshot
+        assert "selected_subtask_ids" in snapshot
+        assert "prev_progress_input" in snapshot
+        assert "predicted_progress" in snapshot
+        assert "memory_bank_size" in snapshot
+        assert "memory_bank_subtasks" in snapshot
+        assert "selected_images" in snapshot
+        assert snapshot["query_token_ids"] == [151700, 151701, 151700, 151701, 151700, 151701, 151700, 151701]
+        assert snapshot["memory_bank_size"] >= 1
+        assert len(snapshot["selected_images"]) >= 1

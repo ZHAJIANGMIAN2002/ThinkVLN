@@ -29,6 +29,7 @@ from thinkvln.models.navigation_model import (
     ThinkVLNActorNavigationModel,
 )
 
+from thinkvln.eval.close_eval_debugger import EpisodeStepDebugger
 from thinkvln.eval.close_eval_dist import get_rank
 from thinkvln.eval.close_eval_utils import (
     _normalize_subtask_idx,
@@ -71,6 +72,9 @@ class VLNEvaluator:
         self.epoch = epoch
         self.config_path = config_path
         self.sample_rate = float(getattr(args, "sample_rate", 1.0)) if args else 1.0
+        self.target_episode_key = str(getattr(args, "target_episode_key", "") or "").strip()
+        self.enable_step_debug = bool(getattr(args, "enable_step_debug", False))
+        self.step_debug_format = str(getattr(args, "step_debug_format", "none"))
         self.config = get_habitat_config(config_path)
 
         with habitat.config.read_write(self.config):
@@ -148,12 +152,18 @@ class VLNEvaluator:
         """Yield sampled episodes assigned to this rank via round-robin sharding."""
         scene_episode_dict = self._build_scene_episode_dict(env)
         sampled_episodes: List[Tuple[str, Any]] = []
+        target_key = self.target_episode_key
         for scene in sorted(scene_episode_dict.keys()):
             episodes = scene_episode_dict[scene]
             scene_id = extract_scene_id(scene)
             for episode in episodes:
-                if should_sample_episode(scene_id, episode.episode_id, self.sample_rate):
-                    sampled_episodes.append((scene_id, episode))
+                episode_key = build_episode_key(scene_id, episode.episode_id)
+                if target_key:
+                    if episode_key != target_key:
+                        continue
+                elif not should_sample_episode(scene_id, episode.episode_id, self.sample_rate):
+                    continue
+                sampled_episodes.append((scene_id, episode))
 
         for scene_id, episode in shard_items_round_robin(
             sampled_episodes,
@@ -161,6 +171,39 @@ class VLNEvaluator:
             world_size=self.env_num,
         ):
             yield scene_id, episode
+
+    @staticmethod
+    def _normalize_actions_for_replay(actions: List[Any], episode_key: str) -> Tuple[List[int], Dict[str, Any]]:
+        if not isinstance(actions, list):
+            return [], {
+                "episode_key": episode_key,
+                "leading_sentinel_stripped": False,
+                "original_len": 0,
+                "normalized_len": 0,
+            }
+
+        leading = actions[0] if actions else None
+        should_strip = False
+        if isinstance(leading, (int, np.integer)):
+            should_strip = int(leading) == -1
+        elif isinstance(leading, str):
+            should_strip = leading.strip() == "-1"
+
+        normalized_raw = actions[1:] if should_strip else actions
+        normalized = [normalize_action(action) for action in normalized_raw]
+        if should_strip:
+            logger.debug(
+                "[subtask] replay sentinel stripped for episode_key=%s original_len=%d normalized_len=%d",
+                episode_key,
+                len(actions),
+                len(normalized),
+            )
+        return normalized, {
+            "episode_key": episode_key,
+            "leading_sentinel_stripped": bool(should_strip),
+            "original_len": int(len(actions)),
+            "normalized_len": int(len(normalized)),
+        }
 
     @staticmethod
     def _current_position(env: Env) -> np.ndarray:
@@ -304,6 +347,8 @@ class VLNEvaluator:
                     logger.warning("[subtask][rank=%d] missing summary_full for episode_key=%s", idx, episode_key)
                     continue
 
+                debugger: Optional[EpisodeStepDebugger] = None
+                debugger_finalized = False
                 try:
                     actions = meta.get("actions")
                     subtask_sequence = meta.get("subtask_sequence")
@@ -312,12 +357,15 @@ class VLNEvaluator:
                         raise ValueError("actions/subtask_sequence must be list")
                     if not actions or not subtask_sequence or not plan_steps:
                         raise ValueError("empty actions/subtask_sequence/plan")
+                    replay_actions, replay_meta = self._normalize_actions_for_replay(actions, episode_key)
+                    if not replay_actions:
+                        raise ValueError("empty replay actions after normalization")
 
                     spans = build_subtask_spans(subtask_sequence)
                     if not spans:
                         raise ValueError("subtask_sequence has no valid spans")
 
-                    gt_positions = self._replay_gt_positions(env, episode, actions)
+                    gt_positions = self._replay_gt_positions(env, episode, replay_actions)
                     if not gt_positions:
                         raise ValueError("failed to precompute GT positions")
 
@@ -329,7 +377,16 @@ class VLNEvaluator:
                         episode_key,
                         len(spans),
                         len(plan_steps),
-                        len(actions),
+                        len(replay_actions),
+                    )
+                    debug_episode = self.enable_step_debug and (
+                        not self.target_episode_key or self.target_episode_key == episode_key
+                    )
+                    debugger = EpisodeStepDebugger(
+                        output_path=self.output_path,
+                        episode_key=episode_key,
+                        enable_step_debug=debug_episode,
+                        step_debug_format=self.step_debug_format,
                     )
 
                     for subtask_idx, start_frame, end_frame in spans:
@@ -342,11 +399,12 @@ class VLNEvaluator:
                         observations = self._replay_to_frame_with_memory(
                             env=env,
                             episode=episode,
-                            actions=actions,
+                            actions=replay_actions,
                             subtask_sequence=subtask_sequence,
                             target_frame=start_frame,
                             episode_key=episode_key,
                         )
+                        replay_memory_count = len(self.nav_model.memory_bank_images)
                         goal_pos = gt_positions[min(end_frame, len(gt_positions) - 1)]
                         plan_idx = min(max(subtask_idx - 1, 0), len(plan_steps) - 1)
                         subgoal_text = plan_steps[plan_idx]
@@ -363,6 +421,7 @@ class VLNEvaluator:
                         )
 
                         rollout_steps = 0
+                        previous_pred_progress: Optional[float] = None
                         current_pos = self._current_position(env)
                         final_distance = self._safe_geodesic_distance(env, current_pos, goal_pos)
                         success = final_distance <= float(self.args.subgoal_success_distance)
@@ -378,10 +437,77 @@ class VLNEvaluator:
                                 episode_key=episode_key,
                                 subtask_id=subtask_idx,
                             )
+                            snapshot = self.nav_model.get_last_debug_snapshot()
 
                             target_progress = timeline_progress(rollout_steps, gt_subtask_steps)
                             stats["progress_abs_error_sum"] += abs(pred_progress - target_progress)
                             stats["progress_count"] += 1.0
+                            prev_progress_in = None
+                            if snapshot is not None:
+                                prev_progress_in = snapshot.get("prev_progress_input")
+
+                            if previous_pred_progress is None:
+                                expected_prev_progress = 0.0
+                            else:
+                                expected_prev_progress = float(previous_pred_progress)
+                            if prev_progress_in is None:
+                                progress_pass_through_delta = None
+                                progress_pass_through_ok = False
+                            else:
+                                progress_pass_through_delta = abs(float(prev_progress_in) - expected_prev_progress)
+                                progress_pass_through_ok = progress_pass_through_delta <= 1e-5
+                            previous_pred_progress = float(pred_progress)
+
+                            expected_memory_bank_size = replay_memory_count + rollout_steps + 1
+                            memory_bank_size = int(
+                                snapshot.get("memory_bank_size", len(self.nav_model.memory_bank_images))
+                                if snapshot is not None
+                                else len(self.nav_model.memory_bank_images)
+                            )
+                            memory_frame_count_ok = memory_bank_size == expected_memory_bank_size
+
+                            if snapshot is not None:
+                                memory_bank_subtasks = snapshot.get("memory_bank_subtasks", [])
+                            else:
+                                memory_bank_subtasks = list(self.nav_model.memory_bank_subtasks)
+                            if subtask_idx > 1:
+                                memory_includes_past_subtask = any(
+                                    int(bank_subtask) < int(subtask_idx)
+                                    for bank_subtask in memory_bank_subtasks
+                                )
+                            else:
+                                memory_includes_past_subtask = True
+
+                            if debugger is not None:
+                                debug_images = snapshot.get("selected_images", [image]) if snapshot is not None else [image]
+                                debug_row = {
+                                    "scene_id": scene_id,
+                                    "episode_id": episode.episode_id,
+                                    "episode_key": episode_key,
+                                    "subtask_idx": int(subtask_idx),
+                                    "rollout_step": int(rollout_steps),
+                                    "frame_start": int(start_frame),
+                                    "frame_end": int(end_frame),
+                                    "prompt": snapshot.get("prompt", "") if snapshot is not None else "",
+                                    "query_token_ids": snapshot.get("query_token_ids", []) if snapshot is not None else [],
+                                    "selected_indices": snapshot.get("selected_indices", []) if snapshot is not None else [],
+                                    "selected_subtask_ids": snapshot.get("selected_subtask_ids", []) if snapshot is not None else [],
+                                    "prev_progress_in": prev_progress_in,
+                                    "pred_progress": float(pred_progress),
+                                    "target_progress": float(target_progress),
+                                    "progress_pass_through_delta": progress_pass_through_delta,
+                                    "memory_bank_size": int(memory_bank_size),
+                                    "expected_memory_bank_size": int(expected_memory_bank_size),
+                                    "checks": {
+                                        "memory_frame_count_ok": bool(memory_frame_count_ok),
+                                        "memory_includes_past_subtask": bool(memory_includes_past_subtask),
+                                        "progress_pass_through_ok": bool(progress_pass_through_ok),
+                                    },
+                                    "replay_leading_sentinel_stripped": bool(
+                                        replay_meta["leading_sentinel_stripped"]
+                                    ),
+                                }
+                                debugger.record_step(debug_row, images=debug_images)
 
                             observations = env.step(action)
                             rollout_steps += 1
@@ -428,6 +554,11 @@ class VLNEvaluator:
                             "final_distance": float(final_distance),
                             "subgoal_text": subgoal_text,
                             "fail_reason": fail_reason,
+                            "replay_leading_sentinel_stripped": bool(
+                                replay_meta["leading_sentinel_stripped"]
+                            ),
+                            "replay_actions_original_len": int(replay_meta["original_len"]),
+                            "replay_actions_normalized_len": int(replay_meta["normalized_len"]),
                         }
                         write_jsonl_record(detail_file, detail)
                         logger.info(
@@ -440,11 +571,36 @@ class VLNEvaluator:
                             float(final_distance),
                             fail_reason,
                         )
+                    if debugger is not None:
+                        debug_summary = debugger.finalize()
+                        debugger_finalized = True
+                        logger.info(
+                            "[subtask][rank=%d] debug finalized episode=%s steps=%d",
+                            idx,
+                            episode_key,
+                            int(debug_summary.get("steps_total", 0)),
+                        )
                 except Exception as exc:
                     stats["episodes_malformed"] += 1.0
                     logger.exception("[subtask][rank=%d] malformed episode %s: %s", idx, episode_key, exc)
                     continue
+                finally:
+                    if debugger is not None and not debugger_finalized:
+                        debug_summary = debugger.finalize()
+                        logger.info(
+                            "[subtask][rank=%d] debug finalized (finally) episode=%s steps=%d",
+                            idx,
+                            episode_key,
+                            int(debug_summary.get("steps_total", 0)),
+                        )
 
+        if self.target_episode_key and int(stats["episodes_total"]) == 0:
+            logger.warning(
+                "[subtask][rank=%d] target_episode_key=%s not found in assigned split=%s",
+                idx,
+                self.target_episode_key,
+                self.split,
+            )
         env.close()
         logger.info(
             "[subtask][rank=%d] Finished. episodes_total=%d evaluated=%d missing_meta=%d malformed=%d subtasks=%d success=%d",

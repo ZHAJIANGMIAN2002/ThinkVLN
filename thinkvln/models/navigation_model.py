@@ -8,7 +8,7 @@ All navigation models should implement this interface to work with the evaluator
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, Any, List
+from typing import Optional, Tuple, Any, List, Dict
 from PIL import Image
 import torch
 import numpy as np
@@ -275,6 +275,7 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         self.last_subtask_id = None
         self.last_subgoal = None
         self.prev_progress = 0.0
+        self._last_debug_snapshot: Optional[Dict[str, Any]] = None
 
     def _update_subtask_state(
         self,
@@ -308,11 +309,15 @@ class ThinkVLNActorNavigationModel(NavigationModel):
             self.last_subtask_id = self.current_subtask_id
         return self.current_subtask_id, is_subtask_start
 
-    def _build_query_tokens(self) -> torch.Tensor:
-        tokens = []
+    def _build_query_token_id_list(self) -> List[int]:
+        tokens: List[int] = []
         for _ in range(self.num_query_tokens):
             tokens.append(self.action_query_token_id)
             tokens.append(self.progress_query_token_id)
+        return tokens
+
+    def _build_query_tokens(self) -> torch.Tensor:
+        tokens = self._build_query_token_id_list()
         return torch.tensor(tokens, dtype=torch.long, device=self.device).unsqueeze(0)
 
     def _build_inputs(self, images: List[Image.Image], prompt: str) -> dict:
@@ -408,9 +413,9 @@ class ThinkVLNActorNavigationModel(NavigationModel):
             is_subtask_start=is_subtask_start,
         )
 
-    def _prepare_memory_images_from_bank(self) -> List[Image.Image]:
+    def _prepare_memory_images_from_bank(self) -> Tuple[List[Image.Image], List[int], List[int]]:
         if not self.memory_bank_images:
-            return []
+            return [], [], []
         frame_idx = len(self.memory_bank_images) - 1
         subtask_sequence = self.memory_bank_subtasks
         history_indices = select_memory_frame_indices(
@@ -424,7 +429,28 @@ class ThinkVLNActorNavigationModel(NavigationModel):
             for idx in selected_indices
             if 0 <= idx < len(self.memory_bank_images)
         ]
-        return images
+        selected_subtask_ids = [
+            int(self.memory_bank_subtasks[idx])
+            for idx in selected_indices
+            if 0 <= idx < len(self.memory_bank_subtasks)
+        ]
+        return images, list(selected_indices), selected_subtask_ids
+
+    def get_last_debug_snapshot(self) -> Optional[Dict[str, Any]]:
+        if self._last_debug_snapshot is None:
+            return None
+        snapshot = dict(self._last_debug_snapshot)
+        for key in (
+            "query_token_ids",
+            "selected_indices",
+            "selected_subtask_ids",
+            "memory_bank_subtasks",
+            "selected_images",
+        ):
+            value = snapshot.get(key)
+            if isinstance(value, list):
+                snapshot[key] = list(value)
+        return snapshot
 
     def predict_action_with_progress_and_done(
         self,
@@ -441,7 +467,8 @@ class ThinkVLNActorNavigationModel(NavigationModel):
             subtask_id=resolved_subtask_id,
             is_subtask_start=is_subtask_start,
         )
-        images = self._prepare_memory_images_from_bank()
+        prev_progress_input = float(self.prev_progress)
+        images, selected_indices, selected_subtask_ids = self._prepare_memory_images_from_bank()
         memory_hint = (
             "Historical observations are provided.\n"
             if len(images) > 1
@@ -450,9 +477,21 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         prompt = self.prompt_template.format(
             instruction=instruction,
             subgoal=subgoal,
-            prev_progress=self.prev_progress,
+            prev_progress=prev_progress_input,
             memory_hint=memory_hint,
         )
+        query_token_ids = self._build_query_token_id_list()
+        self._last_debug_snapshot = {
+            "prompt": prompt,
+            "query_token_ids": query_token_ids,
+            "selected_indices": list(selected_indices),
+            "selected_subtask_ids": list(selected_subtask_ids),
+            "prev_progress_input": prev_progress_input,
+            "predicted_progress": None,
+            "memory_bank_size": len(self.memory_bank_images),
+            "memory_bank_subtasks": list(self.memory_bank_subtasks),
+            "selected_images": list(images),
+        }
         model_inputs = self._build_inputs(images, prompt)
 
         with torch.no_grad():
@@ -467,6 +506,8 @@ class ThinkVLNActorNavigationModel(NavigationModel):
 
         progress_preds = outputs.get("progress_preds")
         progress = max(0.0, min(1.0, self._first_scalar(progress_preds, default=0.0)))
+        if self._last_debug_snapshot is not None:
+            self._last_debug_snapshot["predicted_progress"] = float(progress)
 
         done_probs = outputs.get("done_preds")
         if done_probs is not None:

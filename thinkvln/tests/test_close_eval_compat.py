@@ -35,6 +35,9 @@ class CloseEvalCompatibilityTest(unittest.TestCase):
             "--model_type",
             "--ladder_mode",
             "--summary_full_path",
+            "--target_episode_key",
+            "--enable_step_debug",
+            "--step_debug_format",
             "--sample_rate",
             "--subgoal_success_distance",
             "--subtask_step_budget_factor",
@@ -66,6 +69,9 @@ class CloseEvalCompatibilityTest(unittest.TestCase):
         self.assertEqual(args.model_max_length, 4096)
         self.assertEqual(args.memory_num_history_images, 6)
         self.assertEqual(args.done_threshold, 0.85)
+        self.assertEqual(args.target_episode_key, "")
+        self.assertEqual(args.enable_step_debug, False)
+        self.assertEqual(args.step_debug_format, "none")
 
 
 if __name__ == "__main__":

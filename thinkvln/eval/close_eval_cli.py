@@ -74,6 +74,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--habitat_config_path", type=str, default="config/vln_r2r.yaml")
     parser.add_argument("--eval_split", type=str, default="val_unseen")
     parser.add_argument(
+        "--target_episode_key",
+        type=str,
+        default="",
+        help="Evaluate only the specified episode key (scene_episode).",
+    )
+    parser.add_argument(
+        "--enable_step_debug",
+        action="store_true",
+        default=False,
+        help="Enable per-step debug artifact writing.",
+    )
+    parser.add_argument(
+        "--step_debug_format",
+        type=str,
+        default="none",
+        choices=["none", "html"],
+        help="Step debug output format.",
+    )
+    parser.add_argument(
         "--sample_rate",
         type=float,
         default=1.0,
