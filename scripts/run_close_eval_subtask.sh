@@ -3,12 +3,12 @@
 # Close-loop subtask evaluation for ThinkVLNActor LoRA checkpoint.
 
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=7
 
 STARTUP_SCAN_TURNS=0
-RECOVERY_TURN_STEPS=6
+RECOVERY_TURN_STEPS=0
 
-torchrun --nproc_per_node=8 thinkvln/eval/close_eval.py \
+torchrun --nproc_per_node=1 thinkvln/eval/close_eval.py \
   --model_type thinkvln_actor \
   --model_path outputs/actor/lora/run-3-3 \
   --ladder_mode subtask \
@@ -20,4 +20,4 @@ torchrun --nproc_per_node=8 thinkvln/eval/close_eval.py \
   --sample_rate 0.1 \
   --startup_scan_turns "${STARTUP_SCAN_TURNS}" \
   --recovery_turn_steps "${RECOVERY_TURN_STEPS}" \
-  --output_path results/env_eval/run-3-9
+  --output_path results/env_eval/run-3-9-no-stuck

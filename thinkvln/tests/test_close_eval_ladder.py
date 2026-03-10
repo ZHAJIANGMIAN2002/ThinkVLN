@@ -145,23 +145,36 @@ class TestStuckRecoveryHelpers:
         assert delta2 == 1.0
         assert is_collision2 is True
 
-    def test_detect_stuck_uses_forward_collision_or_window_stationary(self):
+    def test_detect_stuck_uses_collision_streak_and_window_stationary(self):
         recent_steps = [
             {"step_displacement": 0.01, "distance_improve": 0.0},
             {"step_displacement": 0.01, "distance_improve": 0.0},
             {"step_displacement": 0.01, "distance_improve": 0.0},
         ]
-        stuck_collision, reason_collision = VLNEvaluator._detect_stuck(
+        stuck_collision_early, _ = VLNEvaluator._detect_stuck(
+            rollout_steps=3,
             executed_action=1,
             collision_delta=1.0,
+            forward_collision_streak=2,
+            recent_steps=recent_steps,
+        )
+        assert stuck_collision_early is False
+
+        stuck_collision, reason_collision = VLNEvaluator._detect_stuck(
+            rollout_steps=6,
+            executed_action=1,
+            collision_delta=1.0,
+            forward_collision_streak=2,
             recent_steps=recent_steps,
         )
         assert stuck_collision is True
         assert reason_collision == "forward_collision"
 
         stuck_window, reason_window = VLNEvaluator._detect_stuck(
+            rollout_steps=6,
             executed_action=2,
             collision_delta=0.0,
+            forward_collision_streak=0,
             recent_steps=recent_steps,
         )
         assert stuck_window is True
@@ -171,18 +184,28 @@ class TestStuckRecoveryHelpers:
         assert VLNEvaluator._can_trigger_recovery(
             recovery_turn_steps=2,
             cooldown_remaining=1,
+            rollout_steps=10,
             startup_scan_phase=False,
             recovery_active=False,
         ) is False
         assert VLNEvaluator._can_trigger_recovery(
             recovery_turn_steps=0,
             cooldown_remaining=0,
+            rollout_steps=10,
             startup_scan_phase=False,
             recovery_active=False,
         ) is False
         assert VLNEvaluator._can_trigger_recovery(
             recovery_turn_steps=2,
             cooldown_remaining=0,
+            rollout_steps=3,
+            startup_scan_phase=False,
+            recovery_active=False,
+        ) is False
+        assert VLNEvaluator._can_trigger_recovery(
+            recovery_turn_steps=2,
+            cooldown_remaining=0,
+            rollout_steps=10,
             startup_scan_phase=False,
             recovery_active=False,
         ) is True

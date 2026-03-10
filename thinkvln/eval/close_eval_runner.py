@@ -52,8 +52,12 @@ logger = logging.getLogger(__name__)
 STUCK_WINDOW_SIZE = 3
 STUCK_MIN_DISPLACEMENT = 0.05
 STUCK_MIN_GEODESIC_IMPROVE = 0.02
+STUCK_MIN_FORWARD_COLLISIONS = 2
+STUCK_MIN_ROLLOUT_STEPS = 8
+STUCK_FORWARD_COLLISION_PROGRESS_EPS = 0.02
 RECOVERY_COOLDOWN_STEPS = 2
-RECOVERY_TURN_ACTION = 2  # turn_left
+RECOVERY_TURN_LEFT_ACTION = 2
+RECOVERY_TURN_RIGHT_ACTION = 3
 
 
 class VLNEvaluator:
@@ -261,12 +265,22 @@ class VLNEvaluator:
 
     @staticmethod
     def _detect_stuck(
+        rollout_steps: int,
         executed_action: int,
         collision_delta: float,
+        forward_collision_streak: int,
         recent_steps: Deque[Dict[str, float]],
     ) -> Tuple[bool, str]:
-        if int(executed_action) == 1 and float(collision_delta) > 0.0:
-            return True, "forward_collision"
+        if int(rollout_steps) < STUCK_MIN_ROLLOUT_STEPS:
+            return False, ""
+        if (
+            int(executed_action) == 1
+            and float(collision_delta) > 0.0
+            and int(forward_collision_streak) >= STUCK_MIN_FORWARD_COLLISIONS
+        ):
+            progress_sum = sum(float(item.get("distance_improve", 0.0)) for item in recent_steps)
+            if progress_sum <= STUCK_FORWARD_COLLISION_PROGRESS_EPS:
+                return True, "forward_collision"
         if len(recent_steps) < STUCK_WINDOW_SIZE:
             return False, ""
         displacement_sum = sum(float(item.get("step_displacement", 0.0)) for item in recent_steps)
@@ -279,12 +293,14 @@ class VLNEvaluator:
     def _can_trigger_recovery(
         recovery_turn_steps: int,
         cooldown_remaining: int,
+        rollout_steps: int,
         startup_scan_phase: bool,
         recovery_active: bool,
     ) -> bool:
         return (
             int(recovery_turn_steps) > 0
             and int(cooldown_remaining) <= 0
+            and int(rollout_steps) >= STUCK_MIN_ROLLOUT_STEPS
             and not bool(startup_scan_phase)
             and not bool(recovery_active)
         )
@@ -501,6 +517,8 @@ class VLNEvaluator:
                         stuck_events = 0
                         recovery_steps = 0
                         startup_scan_steps = 0
+                        forward_collision_streak = 0
+                        recovery_turn_action = RECOVERY_TURN_LEFT_ACTION
                         collision_count: Optional[float] = None
 
                         current_pos = self._current_position(env)
@@ -528,16 +546,20 @@ class VLNEvaluator:
 
                             startup_scan_phase = rollout_steps < startup_scan_target
                             recovery_active = (not startup_scan_phase) and recovery_remaining > 0
+                            stuck_control_mode = "none"
                             executed_action = model_action
                             if startup_scan_phase:
-                                executed_action = RECOVERY_TURN_ACTION
+                                executed_action = RECOVERY_TURN_LEFT_ACTION
                                 startup_scan_steps += 1
+                                stuck_control_mode = "startup_scan"
                             elif recovery_active:
-                                executed_action = RECOVERY_TURN_ACTION
+                                executed_action = recovery_turn_action
                                 recovery_remaining -= 1
                                 recovery_steps += 1
+                                stuck_control_mode = "recovery_turn"
                                 if recovery_remaining == 0:
                                     cooldown_remaining = RECOVERY_COOLDOWN_STEPS
+                            stuck_control_applied = stuck_control_mode != "none"
 
                             target_progress = timeline_progress(rollout_steps, gt_subtask_steps)
                             stats["progress_abs_error_sum"] += abs(pred_progress - target_progress)
@@ -591,6 +613,10 @@ class VLNEvaluator:
                                 collision_count_before,
                             )
                             collision_count = collision_count_after
+                            if int(executed_action) == 1 and float(collision_delta) > 0.0:
+                                forward_collision_streak += 1
+                            else:
+                                forward_collision_streak = 0
                             recent_steps.append(
                                 {
                                     "step_displacement": float(step_displacement),
@@ -600,23 +626,52 @@ class VLNEvaluator:
 
                             stuck_detected = False
                             stuck_reason = ""
+                            recovery_triggered = False
                             if self._can_trigger_recovery(
                                 recovery_turn_steps=recovery_turn_steps,
                                 cooldown_remaining=cooldown_remaining,
+                                rollout_steps=rollout_steps,
                                 startup_scan_phase=startup_scan_phase,
                                 recovery_active=recovery_active,
                             ):
                                 stuck_detected, stuck_reason = self._detect_stuck(
+                                    rollout_steps=rollout_steps,
                                     executed_action=executed_action,
                                     collision_delta=collision_delta,
+                                    forward_collision_streak=forward_collision_streak,
                                     recent_steps=recent_steps,
                                 )
                                 if stuck_detected:
+                                    recovery_turn_action = (
+                                        RECOVERY_TURN_RIGHT_ACTION
+                                        if recovery_turn_action == RECOVERY_TURN_LEFT_ACTION
+                                        else RECOVERY_TURN_LEFT_ACTION
+                                    )
                                     recovery_remaining = recovery_turn_steps
                                     stuck_events += 1
+                                    recovery_triggered = True
+                                    forward_collision_streak = 0
+                                    recent_steps.clear()
 
                             if cooldown_remaining > 0 and not recovery_active:
                                 cooldown_remaining -= 1
+
+                            if debug_episode and (stuck_control_applied or recovery_triggered):
+                                logger.info(
+                                    "[stuck-control][rank=%d] key=%s subtask=%d rollout=%d mode=%s model_action=%d executed_action=%d stuck_detected=%s stuck_reason=%s recovery_triggered=%s recovery_remaining=%d cooldown_remaining=%d",
+                                    idx,
+                                    episode_key,
+                                    subtask_idx,
+                                    rollout_steps,
+                                    stuck_control_mode,
+                                    model_action,
+                                    executed_action,
+                                    bool(stuck_detected),
+                                    stuck_reason,
+                                    bool(recovery_triggered),
+                                    int(recovery_remaining),
+                                    int(cooldown_remaining),
+                                )
 
                             if debugger is not None:
                                 debug_images = snapshot.get("selected_images", [image]) if snapshot is not None else [image]
@@ -647,6 +702,12 @@ class VLNEvaluator:
                                     "distance_improve": float(distance_improve),
                                     "stuck_detected": bool(stuck_detected),
                                     "stuck_reason": stuck_reason,
+                                    "stuck_control_applied": bool(stuck_control_applied),
+                                    "stuck_control_mode": stuck_control_mode,
+                                    "recovery_triggered": bool(recovery_triggered),
+                                    "recovery_remaining": int(recovery_remaining),
+                                    "forward_collision_streak": int(forward_collision_streak),
+                                    "recovery_turn_action": int(recovery_turn_action),
                                     "recovery_active": bool(recovery_active),
                                     "cooldown_remaining": int(cooldown_remaining),
                                     "startup_scan_phase": bool(startup_scan_phase),
