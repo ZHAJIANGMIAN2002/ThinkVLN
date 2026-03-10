@@ -1,9 +1,8 @@
 import argparse
-from collections import deque
 import os
 import logging
 import time
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Quiet Habitat-Sim C++ logs by default. Set THINKVLN_QUIET_HABITAT_SIM=0 to disable.
 if os.environ.get("THINKVLN_QUIET_HABITAT_SIM", "1") == "1":
@@ -48,16 +47,6 @@ from thinkvln.eval.close_eval_utils import (
 
 
 logger = logging.getLogger(__name__)
-
-STUCK_WINDOW_SIZE = 3
-STUCK_MIN_DISPLACEMENT = 0.05
-STUCK_MIN_GEODESIC_IMPROVE = 0.02
-STUCK_MIN_FORWARD_COLLISIONS = 2
-STUCK_MIN_ROLLOUT_STEPS = 8
-STUCK_FORWARD_COLLISION_PROGRESS_EPS = 0.02
-RECOVERY_COOLDOWN_STEPS = 2
-RECOVERY_TURN_LEFT_ACTION = 2
-RECOVERY_TURN_RIGHT_ACTION = 3
 
 
 class VLNEvaluator:
@@ -235,76 +224,6 @@ class VLNEvaluator:
         except Exception:
             return float(np.linalg.norm(current_pos - goal_pos))
 
-    @staticmethod
-    def _collision_info_to_count(
-        info: Dict[str, Any],
-        prev_collision_count: Optional[float],
-    ) -> Tuple[float, float, bool]:
-        collisions = info.get("collisions") if isinstance(info, dict) else None
-        prev = float(prev_collision_count) if prev_collision_count is not None else 0.0
-        count = prev
-        is_collision = False
-
-        if isinstance(collisions, dict):
-            raw_count = collisions.get("count")
-            if isinstance(raw_count, (int, float, np.integer, np.floating)):
-                count = float(raw_count)
-            elif "is_collision" in collisions:
-                is_collision = bool(collisions.get("is_collision", False))
-                count = prev + (1.0 if is_collision else 0.0)
-        elif isinstance(collisions, (int, float, np.integer, np.floating)):
-            count = float(collisions)
-        elif isinstance(collisions, bool):
-            is_collision = bool(collisions)
-            count = prev + (1.0 if is_collision else 0.0)
-
-        delta = max(0.0, float(count - prev))
-        if delta > 0.0:
-            is_collision = True
-        return float(count), float(delta), bool(is_collision)
-
-    @staticmethod
-    def _detect_stuck(
-        rollout_steps: int,
-        executed_action: int,
-        collision_delta: float,
-        forward_collision_streak: int,
-        recent_steps: Deque[Dict[str, float]],
-    ) -> Tuple[bool, str]:
-        if int(rollout_steps) < STUCK_MIN_ROLLOUT_STEPS:
-            return False, ""
-        if (
-            int(executed_action) == 1
-            and float(collision_delta) > 0.0
-            and int(forward_collision_streak) >= STUCK_MIN_FORWARD_COLLISIONS
-        ):
-            progress_sum = sum(float(item.get("distance_improve", 0.0)) for item in recent_steps)
-            if progress_sum <= STUCK_FORWARD_COLLISION_PROGRESS_EPS:
-                return True, "forward_collision"
-        if len(recent_steps) < STUCK_WINDOW_SIZE:
-            return False, ""
-        displacement_sum = sum(float(item.get("step_displacement", 0.0)) for item in recent_steps)
-        progress_sum = sum(float(item.get("distance_improve", 0.0)) for item in recent_steps)
-        if displacement_sum <= STUCK_MIN_DISPLACEMENT and progress_sum <= STUCK_MIN_GEODESIC_IMPROVE:
-            return True, "stationary_no_progress"
-        return False, ""
-
-    @staticmethod
-    def _can_trigger_recovery(
-        recovery_turn_steps: int,
-        cooldown_remaining: int,
-        rollout_steps: int,
-        startup_scan_phase: bool,
-        recovery_active: bool,
-    ) -> bool:
-        return (
-            int(recovery_turn_steps) > 0
-            and int(cooldown_remaining) <= 0
-            and int(rollout_steps) >= STUCK_MIN_ROLLOUT_STEPS
-            and not bool(startup_scan_phase)
-            and not bool(recovery_active)
-        )
-
     def _replay_gt_positions(self, env: Env, episode: Any, actions: List[Any]) -> List[np.ndarray]:
         """Replay full GT action sequence and collect per-step positions."""
         env.current_episode = episode
@@ -400,9 +319,6 @@ class VLNEvaluator:
             "steps_success_count": 0.0,
             "progress_abs_error_sum": 0.0,
             "progress_count": 0.0,
-            "stuck_events_total": 0.0,
-            "recovery_steps_total": 0.0,
-            "startup_scan_steps_total": 0.0,
         }
 
         detail_path = os.path.join(self.output_path, f"subtask_closed_loop_rank{idx}.jsonl")
@@ -504,23 +420,8 @@ class VLNEvaluator:
                             subgoal_text,
                         )
 
-                        startup_scan_target = 0
-                        if subtask_idx == 1 and start_frame == 0:
-                            startup_scan_target = int(getattr(self.args, "startup_scan_turns", 0))
-                        recovery_turn_steps = int(getattr(self.args, "recovery_turn_steps", 2))
-
                         rollout_steps = 0
                         previous_pred_progress: Optional[float] = None
-                        recent_steps: Deque[Dict[str, float]] = deque(maxlen=STUCK_WINDOW_SIZE)
-                        recovery_remaining = 0
-                        cooldown_remaining = 0
-                        stuck_events = 0
-                        recovery_steps = 0
-                        startup_scan_steps = 0
-                        forward_collision_streak = 0
-                        recovery_turn_action = RECOVERY_TURN_LEFT_ACTION
-                        collision_count: Optional[float] = None
-
                         current_pos = self._current_position(env)
                         final_distance = self._safe_geodesic_distance(env, current_pos, goal_pos)
                         success = final_distance <= float(self.args.subgoal_success_distance)
@@ -528,11 +429,6 @@ class VLNEvaluator:
 
                         while (not success) and (not env.episode_over) and rollout_steps < step_budget:
                             info = env.get_metrics()
-                            collision_count_before, _, _ = self._collision_info_to_count(info, collision_count)
-                            collision_count = collision_count_before
-                            distance_before_step = float(final_distance)
-                            prev_pos_for_step = current_pos.copy()
-
                             image = self.prepare_image_with_map(observations["rgb"], info)
                             action, pred_progress, _ = self.nav_model.predict_action_with_progress_and_done(
                                 observation=image,
@@ -541,25 +437,7 @@ class VLNEvaluator:
                                 episode_key=episode_key,
                                 subtask_id=subtask_idx,
                             )
-                            model_action = int(action)
                             snapshot = self.nav_model.get_last_debug_snapshot()
-
-                            startup_scan_phase = rollout_steps < startup_scan_target
-                            recovery_active = (not startup_scan_phase) and recovery_remaining > 0
-                            stuck_control_mode = "none"
-                            executed_action = model_action
-                            if startup_scan_phase:
-                                executed_action = RECOVERY_TURN_LEFT_ACTION
-                                startup_scan_steps += 1
-                                stuck_control_mode = "startup_scan"
-                            elif recovery_active:
-                                executed_action = recovery_turn_action
-                                recovery_remaining -= 1
-                                recovery_steps += 1
-                                stuck_control_mode = "recovery_turn"
-                                if recovery_remaining == 0:
-                                    cooldown_remaining = RECOVERY_COOLDOWN_STEPS
-                            stuck_control_applied = stuck_control_mode != "none"
 
                             target_progress = timeline_progress(rollout_steps, gt_subtask_steps)
                             stats["progress_abs_error_sum"] += abs(pred_progress - target_progress)
@@ -600,79 +478,6 @@ class VLNEvaluator:
                             else:
                                 memory_includes_past_subtask = True
 
-                            observations = env.step(executed_action)
-                            rollout_steps += 1
-
-                            current_pos = self._current_position(env)
-                            final_distance = self._safe_geodesic_distance(env, current_pos, goal_pos)
-                            step_displacement = float(np.linalg.norm(current_pos - prev_pos_for_step))
-                            distance_improve = max(0.0, distance_before_step - float(final_distance))
-                            info_after = env.get_metrics()
-                            collision_count_after, collision_delta, is_collision = self._collision_info_to_count(
-                                info_after,
-                                collision_count_before,
-                            )
-                            collision_count = collision_count_after
-                            if int(executed_action) == 1 and float(collision_delta) > 0.0:
-                                forward_collision_streak += 1
-                            else:
-                                forward_collision_streak = 0
-                            recent_steps.append(
-                                {
-                                    "step_displacement": float(step_displacement),
-                                    "distance_improve": float(distance_improve),
-                                }
-                            )
-
-                            stuck_detected = False
-                            stuck_reason = ""
-                            recovery_triggered = False
-                            if self._can_trigger_recovery(
-                                recovery_turn_steps=recovery_turn_steps,
-                                cooldown_remaining=cooldown_remaining,
-                                rollout_steps=rollout_steps,
-                                startup_scan_phase=startup_scan_phase,
-                                recovery_active=recovery_active,
-                            ):
-                                stuck_detected, stuck_reason = self._detect_stuck(
-                                    rollout_steps=rollout_steps,
-                                    executed_action=executed_action,
-                                    collision_delta=collision_delta,
-                                    forward_collision_streak=forward_collision_streak,
-                                    recent_steps=recent_steps,
-                                )
-                                if stuck_detected:
-                                    recovery_turn_action = (
-                                        RECOVERY_TURN_RIGHT_ACTION
-                                        if recovery_turn_action == RECOVERY_TURN_LEFT_ACTION
-                                        else RECOVERY_TURN_LEFT_ACTION
-                                    )
-                                    recovery_remaining = recovery_turn_steps
-                                    stuck_events += 1
-                                    recovery_triggered = True
-                                    forward_collision_streak = 0
-                                    recent_steps.clear()
-
-                            if cooldown_remaining > 0 and not recovery_active:
-                                cooldown_remaining -= 1
-
-                            if debug_episode and (stuck_control_applied or recovery_triggered):
-                                logger.info(
-                                    "[stuck-control][rank=%d] key=%s subtask=%d rollout=%d mode=%s model_action=%d executed_action=%d stuck_detected=%s stuck_reason=%s recovery_triggered=%s recovery_remaining=%d cooldown_remaining=%d",
-                                    idx,
-                                    episode_key,
-                                    subtask_idx,
-                                    rollout_steps,
-                                    stuck_control_mode,
-                                    model_action,
-                                    executed_action,
-                                    bool(stuck_detected),
-                                    stuck_reason,
-                                    bool(recovery_triggered),
-                                    int(recovery_remaining),
-                                    int(cooldown_remaining),
-                                )
-
                             if debugger is not None:
                                 debug_images = snapshot.get("selected_images", [image]) if snapshot is not None else [image]
                                 debug_row = {
@@ -680,7 +485,7 @@ class VLNEvaluator:
                                     "episode_id": episode.episode_id,
                                     "episode_key": episode_key,
                                     "subtask_idx": int(subtask_idx),
-                                    "rollout_step": int(rollout_steps - 1),
+                                    "rollout_step": int(rollout_steps),
                                     "frame_start": int(start_frame),
                                     "frame_end": int(end_frame),
                                     "prompt": snapshot.get("prompt", "") if snapshot is not None else "",
@@ -693,25 +498,6 @@ class VLNEvaluator:
                                     "progress_pass_through_delta": progress_pass_through_delta,
                                     "memory_bank_size": int(memory_bank_size),
                                     "expected_memory_bank_size": int(expected_memory_bank_size),
-                                    "model_action": int(model_action),
-                                    "executed_action": int(executed_action),
-                                    "collision_delta": float(collision_delta),
-                                    "step_displacement": float(step_displacement),
-                                    "distance_before_step": float(distance_before_step),
-                                    "distance_after_step": float(final_distance),
-                                    "distance_improve": float(distance_improve),
-                                    "stuck_detected": bool(stuck_detected),
-                                    "stuck_reason": stuck_reason,
-                                    "stuck_control_applied": bool(stuck_control_applied),
-                                    "stuck_control_mode": stuck_control_mode,
-                                    "recovery_triggered": bool(recovery_triggered),
-                                    "recovery_remaining": int(recovery_remaining),
-                                    "forward_collision_streak": int(forward_collision_streak),
-                                    "recovery_turn_action": int(recovery_turn_action),
-                                    "recovery_active": bool(recovery_active),
-                                    "cooldown_remaining": int(cooldown_remaining),
-                                    "startup_scan_phase": bool(startup_scan_phase),
-                                    "is_collision": bool(is_collision),
                                     "checks": {
                                         "memory_frame_count_ok": bool(memory_frame_count_ok),
                                         "memory_includes_past_subtask": bool(memory_includes_past_subtask),
@@ -723,9 +509,14 @@ class VLNEvaluator:
                                 }
                                 debugger.record_step(debug_row, images=debug_images)
 
+                            observations = env.step(action)
+                            rollout_steps += 1
+
+                            current_pos = self._current_position(env)
+                            final_distance = self._safe_geodesic_distance(env, current_pos, goal_pos)
                             if log_interval > 0 and (rollout_steps % log_interval == 0):
                                 logger.info(
-                                    "[subtask][rank=%d] key=%s subtask=%d rollout=%d/%d distance=%.3f pred_progress=%.3f target_progress=%.3f model_action=%d executed_action=%d",
+                                    "[subtask][rank=%d] key=%s subtask=%d rollout=%d/%d distance=%.3f pred_progress=%.3f target_progress=%.3f",
                                     idx,
                                     episode_key,
                                     subtask_idx,
@@ -734,8 +525,6 @@ class VLNEvaluator:
                                     final_distance,
                                     pred_progress,
                                     target_progress,
-                                    model_action,
-                                    executed_action,
                                 )
                             if final_distance <= float(self.args.subgoal_success_distance):
                                 success = True
@@ -746,9 +535,6 @@ class VLNEvaluator:
                             fail_reason = "episode_over"
 
                         stats["subtasks_total"] += 1.0
-                        stats["stuck_events_total"] += float(stuck_events)
-                        stats["recovery_steps_total"] += float(recovery_steps)
-                        stats["startup_scan_steps_total"] += float(startup_scan_steps)
                         if success:
                             stats["subtasks_success"] += 1.0
                             stats["steps_success_sum"] += float(rollout_steps)
@@ -768,9 +554,6 @@ class VLNEvaluator:
                             "final_distance": float(final_distance),
                             "subgoal_text": subgoal_text,
                             "fail_reason": fail_reason,
-                            "stuck_events": int(stuck_events),
-                            "recovery_steps": int(recovery_steps),
-                            "startup_scan_steps": int(startup_scan_steps),
                             "replay_leading_sentinel_stripped": bool(
                                 replay_meta["leading_sentinel_stripped"]
                             ),

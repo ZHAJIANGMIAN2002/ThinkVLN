@@ -19,13 +19,6 @@ from thinkvln.models.navigation_model import NavigationModel
 logger = logging.getLogger(__name__)
 
 
-def _non_negative_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError(f"value must be >= 0, got {parsed}")
-    return parsed
-
-
 def _setup_logging(level_name: str) -> None:
     level = getattr(logging, level_name.upper(), logging.INFO)
     logging.basicConfig(
@@ -155,18 +148,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=25,
         help="Log rollout progress every N steps in subtask mode (<=0 disables interval logs)",
-    )
-    parser.add_argument(
-        "--startup_scan_turns",
-        type=_non_negative_int,
-        default=0,
-        help="Forced turn steps before subtask-1 rollout at frame 0.",
-    )
-    parser.add_argument(
-        "--recovery_turn_steps",
-        type=_non_negative_int,
-        default=2,
-        help="Forced turn steps after stuck detection (0 disables recovery).",
     )
     return parser
 

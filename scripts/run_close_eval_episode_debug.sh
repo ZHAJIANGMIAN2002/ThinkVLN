@@ -25,8 +25,6 @@ torchrun --nproc_per_node=1 thinkvln/eval/close_eval.py \
   --target_episode_key "${EPISODE_KEY}" \
   --enable_step_debug \
   --step_debug_format html \
-  --startup_scan_turns 0 \
-  --recovery_turn_steps 8 \
   --output_path results/env_eval/run-3-3
 
 echo "Debug HTML generated at: results/env_eval/run-3-3/debug_${EPISODE_KEY}/index.html"
