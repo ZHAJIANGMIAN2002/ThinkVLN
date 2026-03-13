@@ -226,6 +226,34 @@ class TestActorWrapper:
         )
         assert "Previous progress: 0.000" in processor.prompts[-1]
 
+    def test_disable_memory_keeps_single_current_image(self):
+        model = _DummyActor(progress_value=0.4, done_prob=0.0)
+        processor = _DummyProcessor()
+        wrapper = ThinkVLNActorNavigationModel(
+            model=model,
+            processor=processor,
+            device="cpu",
+            use_memory=False,
+        )
+
+        wrapper.predict_action_with_progress_and_done(
+            observation=Image.new("RGB", (8, 8), color=(40, 40, 40)),
+            instruction="instr",
+            subgoal="subgoal two",
+            episode_key="scene_003",
+            subtask_id=2,
+        )
+        wrapper.predict_action_with_progress_and_done(
+            observation=Image.new("RGB", (8, 8), color=(45, 45, 45)),
+            instruction="instr",
+            subgoal="subgoal two",
+            episode_key="scene_003",
+            subtask_id=2,
+        )
+
+        assert processor.last_image_count == 1
+        assert "Historical observations are provided." not in processor.prompts[-1]
+
 
 class _ReplayEnv:
     def __init__(self, frames):
@@ -252,6 +280,22 @@ class _ReplayEnv:
 
 
 class TestSubtaskReplayMemoryPriming:
+    def test_prepare_model_image_uses_rgb_only(self):
+        rgb = np.full((8, 8, 3), 7, dtype=np.uint8)
+        info = {
+            "top_down_map": {
+                "map": np.ones((8, 8), dtype=np.uint8),
+                "fog_of_war_mask": np.ones((8, 8), dtype=np.uint8),
+                "agent_map_coord": (4, 4),
+                "agent_angle": 0.0,
+            }
+        }
+
+        image = VLNEvaluator.prepare_model_image(None, rgb, info)
+
+        assert image.size == (8, 8)
+        assert np.array(image).tolist() == rgb.tolist()
+
     def test_replay_to_frame_primes_memory_path_and_resets_per_call(self):
         model = _DummyActor(progress_value=0.3, done_prob=0.0)
         processor = _DummyProcessor()
@@ -283,6 +327,7 @@ class TestSubtaskReplayMemoryPriming:
         assert nav_model.memory_bank_subtasks == [1, 1, 2]
         assert nav_model.subtask_start_bank_indices == [0, 2]
         assert len(nav_model.memory_bank_images) == 3
+        assert all(image.size == (8, 8) for image in nav_model.memory_bank_images)
 
         evaluator._replay_to_frame_with_memory(
             env=env,

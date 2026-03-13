@@ -238,6 +238,7 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         device: str = "cuda",
         memory_num_history_images: int = 8,
         done_threshold: float = 0.85,
+        use_memory: bool = True,
     ):
         self.model = model
         self.processor = processor
@@ -254,6 +255,7 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         self.progress_query_token_id = int(getattr(model.config, "progress_query_token_id", 151701))
         self.memory_num_history_images = int(memory_num_history_images)
         self.done_threshold = float(done_threshold)
+        self.use_memory = bool(use_memory)
         self.prompt_template = (
             "Instruction: {instruction}\n"
             "Current subgoal: {subgoal}\n"
@@ -381,11 +383,34 @@ class ThinkVLNActorNavigationModel(NavigationModel):
             return action_logits[0, 0]
         return None
 
+    @staticmethod
+    def select_action_from_logits(
+        action_logits: Optional[torch.Tensor],
+        sample_action: bool = False,
+        action_generator: Optional[torch.Generator] = None,
+    ) -> int:
+        if action_logits is None:
+            return 0
+
+        logits = action_logits.detach().to(device="cpu", dtype=torch.float32)
+        if logits.ndim != 1 or logits.numel() == 0:
+            return 0
+        if not sample_action:
+            return int(torch.argmax(logits, dim=-1).item())
+
+        probs = torch.softmax(logits, dim=-1)
+        if (not torch.isfinite(probs).all()) or float(probs.sum().item()) <= 0.0:
+            return int(torch.argmax(logits, dim=-1).item())
+        sampled = torch.multinomial(probs, 1, generator=action_generator)
+        return int(sampled.item())
+
     def _maybe_reset_for_episode(self, episode_key: Optional[str]):
         if episode_key is not None and episode_key != self.episode_key:
             self.reset_episode_state(episode_key=episode_key)
 
     def _append_observation_to_memory_bank(self, observation: Image.Image, subtask_id: int, is_subtask_start: bool) -> None:
+        if not self.use_memory:
+            return
         self.memory_bank_images.append(observation)
         self.memory_bank_subtasks.append(subtask_id)
         frame_idx = len(self.memory_bank_images) - 1
@@ -414,6 +439,8 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         )
 
     def _prepare_memory_images_from_bank(self) -> Tuple[List[Image.Image], List[int], List[int]]:
+        if not self.use_memory:
+            return [], [], []
         if not self.memory_bank_images:
             return [], [], []
         frame_idx = len(self.memory_bank_images) - 1
@@ -459,16 +486,23 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         subgoal: str,
         episode_key: Optional[str] = None,
         subtask_id: Optional[int] = None,
+        sample_action: bool = False,
+        action_generator: Optional[torch.Generator] = None,
     ) -> Tuple[int, float, bool]:
         self._maybe_reset_for_episode(episode_key)
         resolved_subtask_id, is_subtask_start = self._update_subtask_state(subgoal, subtask_id=subtask_id)
-        self._append_observation_to_memory_bank(
-            observation=observation,
-            subtask_id=resolved_subtask_id,
-            is_subtask_start=is_subtask_start,
-        )
         prev_progress_input = float(self.prev_progress)
-        images, selected_indices, selected_subtask_ids = self._prepare_memory_images_from_bank()
+        if self.use_memory:
+            self._append_observation_to_memory_bank(
+                observation=observation,
+                subtask_id=resolved_subtask_id,
+                is_subtask_start=is_subtask_start,
+            )
+            images, selected_indices, selected_subtask_ids = self._prepare_memory_images_from_bank()
+        else:
+            images = [observation]
+            selected_indices = [0]
+            selected_subtask_ids = [resolved_subtask_id]
         memory_hint = (
             "Historical observations are provided.\n"
             if len(images) > 1
@@ -499,10 +533,11 @@ class ThinkVLNActorNavigationModel(NavigationModel):
 
         action_logits = outputs.get("action_logits")
         first_step_logits = self._first_vector_logits(action_logits)
-        if first_step_logits is None:
-            action = self.actions2idx["stop"]
-        else:
-            action = int(torch.argmax(first_step_logits, dim=-1).item())
+        action = self.select_action_from_logits(
+            first_step_logits,
+            sample_action=sample_action,
+            action_generator=action_generator,
+        )
 
         progress_preds = outputs.get("progress_preds")
         progress = max(0.0, min(1.0, self._first_scalar(progress_preds, default=0.0)))

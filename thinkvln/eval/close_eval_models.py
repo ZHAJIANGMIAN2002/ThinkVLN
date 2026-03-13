@@ -94,6 +94,7 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
             device=str(device),
             memory_num_history_images=getattr(args, "memory_num_history_images", 6),
             done_threshold=getattr(args, "done_threshold", 0.85),
+            use_memory=getattr(args, "use_memory", True),
         )
 
     if args.model_type == "streamvln":

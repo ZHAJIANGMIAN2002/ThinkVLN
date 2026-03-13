@@ -19,7 +19,6 @@ from habitat.config.default_structured_configs import (
     FogOfWarConfig,
     TopDownMapMeasurementConfig,
 )
-from habitat.utils.visualizations import maps
 from habitat_baselines.config.default import get_config as get_habitat_config
 from PIL import Image
 
@@ -120,18 +119,10 @@ class VLNEvaluator:
         )
         return env
 
-    def prepare_image_with_map(self, rgb: np.ndarray, info: Dict[str, Any]) -> Image.Image:
-        """Create model input image by concatenating RGB view and top-down map."""
-        rgb_image = rgb.astype(np.uint8)
-        if info.get("top_down_map") is not None:
-            top_down_map = info["top_down_map"]
-            top_down_map_vis = maps.colorize_draw_agent_and_fit_to_height(
-                top_down_map, rgb_image.shape[0]
-            )
-        else:
-            top_down_map_vis = np.zeros((rgb_image.shape[0], rgb_image.shape[1], 3), dtype=np.uint8)
-        concatenated = np.concatenate((rgb_image, top_down_map_vis), axis=1)
-        return Image.fromarray(concatenated)
+    def prepare_model_image(self, rgb: np.ndarray, info: Dict[str, Any]) -> Image.Image:
+        """Create model input image from RGB only."""
+        del info
+        return Image.fromarray(rgb.astype(np.uint8))
 
     @staticmethod
     def _episode_instruction(config_path: str, episode: Any) -> str:
@@ -281,7 +272,7 @@ class VLNEvaluator:
             if env.episode_over:
                 break
             info = env.get_metrics()
-            image = self.prepare_image_with_map(observations["rgb"], info)
+            image = self.prepare_model_image(observations["rgb"], info)
             self.nav_model.record_memory_observation(
                 observation=image,
                 subtask_id=self._subtask_idx_at_frame(subtask_sequence, step_idx),
@@ -429,7 +420,7 @@ class VLNEvaluator:
 
                         while (not success) and (not env.episode_over) and rollout_steps < step_budget:
                             info = env.get_metrics()
-                            image = self.prepare_image_with_map(observations["rgb"], info)
+                            image = self.prepare_model_image(observations["rgb"], info)
                             action, pred_progress, _ = self.nav_model.predict_action_with_progress_and_done(
                                 observation=image,
                                 instruction=episode_instruction,
