@@ -10,7 +10,7 @@ fi
 
 EPISODE_KEY="$1"
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=7
 
 torchrun --nproc_per_node=1 thinkvln/eval/close_eval.py \
   --model_type thinkvln_actor \

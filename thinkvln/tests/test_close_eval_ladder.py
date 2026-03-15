@@ -26,6 +26,7 @@ class _DummyProcessor:
     def __init__(self):
         self.prompts = []
         self.last_image_count = 0
+        self.received_images = None
 
     def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
         prompt = messages[0]["content"][-1]["text"]
@@ -36,9 +37,12 @@ class _DummyProcessor:
     def __call__(self, text, images, return_tensors, padding):
         assert len(text) == 1
         assert len(images) >= 1
+        self.received_images = list(images)
         return {
             "input_ids": torch.tensor([[11, 12]], dtype=torch.long),
             "attention_mask": torch.tensor([[1, 1]], dtype=torch.long),
+            "pixel_values": torch.ones((len(images), 3, 8, 8), dtype=torch.float32),
+            "image_grid_thw": torch.tensor([[1, 8, 8]] * len(images), dtype=torch.long),
         }
 
 
@@ -109,6 +113,26 @@ class CloseEvalLadderUtilsTest:
         assert summary["progress_mae"] == 0.25
 
 class TestActorWrapper:
+    def test_build_inputs_includes_image_tensors(self):
+        model = _DummyActor(progress_value=0.1, done_prob=0.0)
+        processor = _DummyProcessor()
+        wrapper = ThinkVLNActorNavigationModel(model=model, processor=processor, device="cpu")
+
+        images = [
+            Image.new("RGB", (8, 8), color=(10, 10, 10)),
+            Image.new("RGB", (8, 8), color=(20, 20, 20)),
+        ]
+
+        model_inputs = wrapper._build_inputs(images, "prompt text")
+
+        assert processor.last_image_count == 2
+        assert processor.received_images is not None
+        assert len(processor.received_images) == 2
+        assert "pixel_values" in model_inputs
+        assert "image_grid_thw" in model_inputs
+        assert tuple(model_inputs["pixel_values"].shape) == (2, 3, 8, 8)
+        assert tuple(model_inputs["image_grid_thw"].shape) == (2, 3)
+
     def test_predict_action_progress_done_and_memory(self):
         model = _DummyActor(progress_value=1.7, done_prob=0.9)
         processor = _DummyProcessor()
@@ -339,6 +363,133 @@ class TestSubtaskReplayMemoryPriming:
         )
         assert nav_model.memory_bank_subtasks == [1]
         assert nav_model.subtask_start_bank_indices == [0]
+
+    def test_warmup_subtask_one_turns_24_steps_and_keeps_6_memory_frames(self):
+        model = _DummyActor(progress_value=0.3, done_prob=0.0)
+        processor = _DummyProcessor()
+        nav_model = ThinkVLNActorNavigationModel(model=model, processor=processor, device="cpu")
+
+        evaluator = VLNEvaluator.__new__(VLNEvaluator)
+        evaluator.nav_model = nav_model
+
+        frames = [np.full((8, 8, 3), idx, dtype=np.uint8) for idx in range(25)]
+        env = _ReplayEnv(frames)
+
+        observations = evaluator._warmup_subtask_one_with_memory(
+            env=env,
+            episode=SimpleNamespace(episode_id="ep-2"),
+            episode_key="scene_004_ep-2",
+            subtask_id=1,
+        )
+
+        assert observations["rgb"].tolist() == frames[24].tolist()
+        assert env.step_actions == [3] * 24
+        assert nav_model.memory_bank_subtasks == [1] * 6
+        assert nav_model.subtask_start_bank_indices == [0]
+        assert len(nav_model.memory_bank_images) == 6
+
+    def test_warmup_subtask_one_skips_non_first_subtask(self):
+        model = _DummyActor(progress_value=0.3, done_prob=0.0)
+        processor = _DummyProcessor()
+        nav_model = ThinkVLNActorNavigationModel(model=model, processor=processor, device="cpu")
+
+        evaluator = VLNEvaluator.__new__(VLNEvaluator)
+        evaluator.nav_model = nav_model
+
+        frames = [np.full((8, 8, 3), idx, dtype=np.uint8) for idx in range(3)]
+        env = _ReplayEnv(frames)
+
+        observations = evaluator._warmup_subtask_one_with_memory(
+            env=env,
+            episode=SimpleNamespace(episode_id="ep-3"),
+            episode_key="scene_004_ep-3",
+            subtask_id=2,
+        )
+
+        assert observations["rgb"].tolist() == frames[0].tolist()
+        assert env.step_actions == []
+        assert nav_model.memory_bank_subtasks == []
+
+    def test_subtask_eval_forbids_stop_action(self, tmp_path, monkeypatch):
+        model = _DummyActor(progress_value=0.3, done_prob=0.0)
+        processor = _DummyProcessor()
+        nav_model = ThinkVLNActorNavigationModel(model=model, processor=processor, device="cpu")
+
+        evaluator = VLNEvaluator.__new__(VLNEvaluator)
+        evaluator.nav_model = nav_model
+        evaluator.output_path = str(tmp_path)
+        evaluator.env_num = 1
+        evaluator.args = SimpleNamespace(
+            debug_log_interval=0,
+            subtask_step_budget_factor=1.0,
+            subgoal_success_distance=0.1,
+        )
+        evaluator.target_episode_key = ""
+        evaluator.enable_step_debug = False
+        evaluator.step_debug_format = "none"
+        evaluator.config_path = "config/vln_r2r.yaml"
+        evaluator._episode_instruction = lambda config_path, episode: "go forward"
+        evaluator._iter_assigned_episodes = lambda env, idx: [("scene_010", env.episodes[0])]
+
+        class _FakeSim:
+            def __init__(self):
+                self.position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+            def get_agent_state(self):
+                return SimpleNamespace(position=self.position.copy())
+
+            def geodesic_distance(self, start, goal):
+                return float(np.linalg.norm(np.array(start) - np.array(goal)))
+
+        class _FakeEnv:
+            def __init__(self):
+                self.episodes = [SimpleNamespace(scene_id="scene_010.glb", episode_id="ep-1")]
+                self.current_episode = None
+                self.episode_over = False
+                self.sim = _FakeSim()
+
+            def reset(self):
+                self.episode_over = False
+                self.sim.position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+                return {"rgb": np.zeros((8, 8, 3), dtype=np.uint8)}
+
+            def step(self, action):
+                if int(action) == 1:
+                    self.sim.position = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+                return {"rgb": np.zeros((8, 8, 3), dtype=np.uint8)}
+
+            def get_metrics(self):
+                return {}
+
+            def close(self):
+                return None
+
+        env = _FakeEnv()
+        evaluator.config_env = lambda: env
+
+        captured = {}
+
+        def _predict(**kwargs):
+            captured["forbidden_actions"] = kwargs.get("forbidden_actions")
+            return 1, 0.5, False
+
+        monkeypatch.setattr(nav_model, "predict_action_with_progress_and_done", _predict)
+        monkeypatch.setattr(
+            "thinkvln.eval.close_eval_runner.write_jsonl_record",
+            lambda handle, payload, sync_to_disk=True: handle.write("ok\n"),
+        )
+
+        summary_full = {
+            "scene_010_ep-1": {
+                "actions": [1, 1],
+                "subtask_sequence": [1, 1],
+                "plan": ["go forward"],
+            }
+        }
+
+        evaluator.eval_subtask_closed_loop(0, summary_full)
+
+        assert captured["forbidden_actions"] == [0]
 
 
 class TestReplayActionNormalization:

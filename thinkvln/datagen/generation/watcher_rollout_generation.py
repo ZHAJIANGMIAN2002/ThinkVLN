@@ -108,6 +108,16 @@ def load_existing_sample_ids(manifest_file: Path) -> set[str]:
     }
 
 
+def load_existing_episode_keys(manifest_file: Path) -> set[str]:
+    if not manifest_file.exists():
+        return set()
+    return {
+        str(row["episode_key"])
+        for row in load_jsonl(manifest_file)
+        if isinstance(row, dict) and isinstance(row.get("episode_key"), str)
+    }
+
+
 def strip_leading_sentinel(actions: List[Any]) -> List[int]:
     if not actions:
         return []
@@ -335,7 +345,7 @@ def generate_bundle(args: argparse.Namespace) -> int:
     bundle_root = args.bundle_root.resolve()
     manifest_file = resolve_manifest_file(bundle_root, args.manifest_file)
     summary_root = args.summary_full_path.resolve().parent
-    existing_sample_ids = load_existing_sample_ids(manifest_file) if args.resume else set()
+    completed_episode_keys = load_existing_episode_keys(manifest_file) if args.resume else set()
 
     nav_model = build_nav_model(build_nav_args(args, device), device, rank=0, world_size=1)
     evaluator = VLNEvaluator(
@@ -349,14 +359,22 @@ def generate_bundle(args: argparse.Namespace) -> int:
     env = evaluator.config_env()
     episode_lookup = build_episode_lookup(env)
     summary_records = load_jsonl(args.summary_full_path)
+    pending_records = [
+        meta
+        for meta in summary_records
+        if str(meta.get("episode_key", "")).strip()
+        and str(meta.get("episode_key", "")).strip() not in completed_episode_keys
+    ]
 
     bundle_root.mkdir(parents=True, exist_ok=True)
     processed_samples = 0
     processed_episodes = 0
     total_records = len(summary_records)
+    total_pending_records = len(pending_records)
     logger.info(
-        "watcher rollout generation start: records=%d num_pivots=%d num_rollouts=%d steps=%d..%d",
+        "watcher rollout generation start: records=%d pending=%d num_pivots=%d num_rollouts=%d steps=%d..%d",
         total_records,
+        total_pending_records,
         args.num_pivots,
         args.num_rollouts,
         args.min_rollout_steps,
@@ -370,6 +388,8 @@ def generate_bundle(args: argparse.Namespace) -> int:
         episode_samples = 0
         episode_key = str(meta.get("episode_key", "")).strip()
         if not episode_key:
+            continue
+        if episode_key in completed_episode_keys:
             continue
         episode = episode_lookup.get(episode_key)
         if episode is None:
@@ -401,7 +421,7 @@ def generate_bundle(args: argparse.Namespace) -> int:
         logger.info(
             "episode %d/%d key=%s pivots=%d",
             processed_episodes + 1,
-            total_records,
+            total_pending_records,
             episode_key,
             len(pivots),
         )
@@ -427,9 +447,6 @@ def generate_bundle(args: argparse.Namespace) -> int:
 
             for rollout_id in range(1, args.num_rollouts + 1):
                 sample_id = build_sample_id(episode_key, pivot_frame, rollout_id)
-                if sample_id in existing_sample_ids:
-                    continue
-
                 row_seed = derive_seed(args.seed, episode_key, pivot_frame, rollout_id)
                 rollout_steps = Random(derive_seed(row_seed, "rollout_steps")).randint(
                     min(args.min_rollout_steps, args.max_rollout_steps),
@@ -479,11 +496,11 @@ def generate_bundle(args: argparse.Namespace) -> int:
                     "seed": int(row_seed),
                 }
                 episode_rows.append(row)
-                existing_sample_ids.add(sample_id)
                 processed_samples += 1
                 episode_samples += 1
 
         flush_episode_outputs(manifest_file, episode_rows, episode_images)
+        completed_episode_keys.add(episode_key)
         processed_episodes += 1
         logger.info(
             "episode done key=%s elapsed=%.2fs samples=%d pending_images=%d",

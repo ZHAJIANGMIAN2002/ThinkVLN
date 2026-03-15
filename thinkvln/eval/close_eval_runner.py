@@ -281,6 +281,35 @@ class VLNEvaluator:
             observations = env.step(normalize_action(actions[step_idx]))
         return observations
 
+    def _warmup_subtask_one_with_memory(
+        self,
+        env: Env,
+        episode: Any,
+        episode_key: str,
+        subtask_id: int,
+    ):
+        env.current_episode = episode
+        observations = env.reset()
+        if not isinstance(self.nav_model, ThinkVLNActorNavigationModel) or int(subtask_id) != 1:
+            return observations
+
+        self.nav_model.reset_episode_state(episode_key=episode_key)
+        warmup_actions = 24
+        keep_every = max(1, warmup_actions // 6)
+        for step_idx in range(warmup_actions):
+            if env.episode_over:
+                break
+            observations = env.step(3)
+            if (step_idx + 1) % keep_every == 0:
+                info = env.get_metrics()
+                image = self.prepare_model_image(observations["rgb"], info)
+                self.nav_model.record_memory_observation(
+                    observation=image,
+                    subtask_id=1,
+                    episode_key=episode_key,
+                )
+        return observations
+
     def eval_subtask_closed_loop(self, idx: int, summary_full: Dict[str, Dict[str, Any]]) -> Dict[str, float]:
         """Evaluate subtask-by-subtask closed-loop success for ThinkVLNActor.
 
@@ -387,14 +416,22 @@ class VLNEvaluator:
                             float(self.args.subtask_step_budget_factor),
                         )
 
-                        observations = self._replay_to_frame_with_memory(
-                            env=env,
-                            episode=episode,
-                            actions=replay_actions,
-                            subtask_sequence=subtask_sequence,
-                            target_frame=start_frame,
-                            episode_key=episode_key,
-                        )
+                        if int(subtask_idx) == 1:
+                            observations = self._warmup_subtask_one_with_memory(
+                                env=env,
+                                episode=episode,
+                                episode_key=episode_key,
+                                subtask_id=subtask_idx,
+                            )
+                        else:
+                            observations = self._replay_to_frame_with_memory(
+                                env=env,
+                                episode=episode,
+                                actions=replay_actions,
+                                subtask_sequence=subtask_sequence,
+                                target_frame=start_frame,
+                                episode_key=episode_key,
+                            )
                         replay_memory_count = len(self.nav_model.memory_bank_images)
                         goal_pos = gt_positions[min(end_frame, len(gt_positions) - 1)]
                         plan_idx = min(max(subtask_idx - 1, 0), len(plan_steps) - 1)
@@ -427,6 +464,7 @@ class VLNEvaluator:
                                 subgoal=subgoal_text,
                                 episode_key=episode_key,
                                 subtask_id=subtask_idx,
+                                forbidden_actions=[0],
                             )
                             snapshot = self.nav_model.get_last_debug_snapshot()
 

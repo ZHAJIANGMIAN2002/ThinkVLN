@@ -1,3 +1,4 @@
+import logging
 from random import Random
 from types import SimpleNamespace
 import json
@@ -5,10 +6,13 @@ import json
 import numpy as np
 import torch
 
+import thinkvln.datagen.generation.watcher_rollout_generation as watcher_rollout_generation
 from thinkvln.datagen.generation.watcher_rollout_generation import (
     classify_sim_label,
     collect_episode_cache,
     flush_episode_outputs,
+    generate_bundle,
+    load_existing_episode_keys,
     restore_episode_frame,
 )
 from thinkvln.datagen.generation.watcher_utils import (
@@ -274,3 +278,235 @@ class TestWatcherRolloutGeneration:
             rows = [json.loads(line) for line in handle if line.strip()]
         assert rows == pending_rows
         assert pending_images[0][1].exists()
+
+    def test_load_existing_episode_keys_marks_episode_complete_once_any_row_exists(self, tmp_path):
+        manifest_file = tmp_path / "manifest.jsonl"
+        manifest_file.write_text(
+            "\n".join(
+                [
+                    json.dumps({"sample_id": "s1", "episode_key": "ep-1"}),
+                    json.dumps({"sample_id": "s2", "episode_key": "ep-1"}),
+                    json.dumps({"sample_id": "s3", "episode_key": "ep-2"}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        episode_keys = load_existing_episode_keys(manifest_file)
+
+        assert episode_keys == {"ep-1", "ep-2"}
+
+    def test_generate_bundle_resume_skips_any_episode_already_in_manifest(self, tmp_path, monkeypatch):
+        summary_full_path = tmp_path / "summary_full.jsonl"
+        summary_full_path.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "episode_key": "scene_1",
+                            "episode_id": 1,
+                            "scene_id": "scene",
+                            "instruction": "go",
+                            "plan": ["step"],
+                            "subtask_sequence": [1],
+                            "actions": [1],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "episode_key": "scene_2",
+                            "episode_id": 2,
+                            "scene_id": "scene",
+                            "instruction": "go",
+                            "plan": ["step"],
+                            "subtask_sequence": [1],
+                            "actions": [1],
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        manifest_file = tmp_path / "bundle" / "manifest" / "watcher_rollout_manifest.jsonl"
+        manifest_file.parent.mkdir(parents=True, exist_ok=True)
+        manifest_file.write_text(json.dumps({"sample_id": "s1", "episode_key": "scene_1"}) + "\n", encoding="utf-8")
+
+        episodes = [
+            SimpleNamespace(episode_id="1", scene_id="root/scene/glb"),
+            SimpleNamespace(episode_id="2", scene_id="root/scene/glb"),
+        ]
+        rollout_calls = []
+
+        class _Env:
+            def __init__(self):
+                self.episodes = episodes
+                self.current_episode = None
+
+            def close(self):
+                return None
+
+        class _Evaluator:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+                self.nav_model = object()
+
+            def config_env(self):
+                return _Env()
+
+            def prepare_model_image(self, rgb, info):
+                del info
+                return rgb
+
+            def _current_position(self, env):
+                del env
+                return np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+        monkeypatch.setattr(watcher_rollout_generation.torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(watcher_rollout_generation, "build_nav_model", lambda *args, **kwargs: object())
+        monkeypatch.setattr(watcher_rollout_generation, "VLNEvaluator", _Evaluator)
+        monkeypatch.setattr(
+            watcher_rollout_generation,
+            "collect_episode_cache",
+            lambda env, episode, actions: {
+                "positions": [np.array([0.0, 0.0, 0.0], dtype=np.float32)],
+                "rgb_frames": [np.zeros((2, 2, 3), dtype=np.uint8)],
+            },
+        )
+        monkeypatch.setattr(
+            watcher_rollout_generation,
+            "run_rollout",
+            lambda **kwargs: (
+                rollout_calls.append(kwargs["episode_key"]) or (["stop"], [], [np.array([0.0, 0.0, 0.0], dtype=np.float32)])
+            ),
+        )
+        monkeypatch.setattr(watcher_rollout_generation, "copy_pivot_rgb", lambda **kwargs: "pivot.jpg")
+        monkeypatch.setattr(watcher_rollout_generation, "classify_sim_label", lambda **kwargs: "PROCEED")
+
+        args = SimpleNamespace(
+            summary_full_path=summary_full_path,
+            habitat_config_path="config/vln_r2r.yaml",
+            model_path="model",
+            base_model_path=None,
+            bundle_root=tmp_path / "bundle",
+            manifest_file=None,
+            max_episodes=None,
+            num_pivots=1,
+            num_rollouts=1,
+            min_rollout_steps=1,
+            max_rollout_steps=1,
+            seed=0,
+            resume=True,
+        )
+
+        processed_samples = generate_bundle(args)
+
+        assert processed_samples == 1
+        assert rollout_calls == ["scene_2"]
+
+    def test_generate_bundle_logs_remaining_episode_count_when_resuming(self, tmp_path, monkeypatch, caplog):
+        summary_full_path = tmp_path / "summary_full.jsonl"
+        summary_full_path.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "episode_key": "scene_1",
+                            "episode_id": 1,
+                            "scene_id": "scene",
+                            "instruction": "go",
+                            "plan": ["step"],
+                            "subtask_sequence": [1],
+                            "actions": [1],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "episode_key": "scene_2",
+                            "episode_id": 2,
+                            "scene_id": "scene",
+                            "instruction": "go",
+                            "plan": ["step"],
+                            "subtask_sequence": [1],
+                            "actions": [1],
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        manifest_file = tmp_path / "bundle" / "manifest" / "watcher_rollout_manifest.jsonl"
+        manifest_file.parent.mkdir(parents=True, exist_ok=True)
+        manifest_file.write_text(json.dumps({"sample_id": "s1", "episode_key": "scene_1"}) + "\n", encoding="utf-8")
+
+        episodes = [
+            SimpleNamespace(episode_id="1", scene_id="root/scene/glb"),
+            SimpleNamespace(episode_id="2", scene_id="root/scene/glb"),
+        ]
+
+        class _Env:
+            def __init__(self):
+                self.episodes = episodes
+                self.current_episode = None
+
+            def close(self):
+                return None
+
+        class _Evaluator:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+                self.nav_model = object()
+
+            def config_env(self):
+                return _Env()
+
+            def prepare_model_image(self, rgb, info):
+                del info
+                return rgb
+
+            def _current_position(self, env):
+                del env
+                return np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+        monkeypatch.setattr(watcher_rollout_generation.torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(watcher_rollout_generation, "build_nav_model", lambda *args, **kwargs: object())
+        monkeypatch.setattr(watcher_rollout_generation, "VLNEvaluator", _Evaluator)
+        monkeypatch.setattr(
+            watcher_rollout_generation,
+            "collect_episode_cache",
+            lambda env, episode, actions: {
+                "positions": [np.array([0.0, 0.0, 0.0], dtype=np.float32)],
+                "rgb_frames": [np.zeros((2, 2, 3), dtype=np.uint8)],
+            },
+        )
+        monkeypatch.setattr(
+            watcher_rollout_generation,
+            "run_rollout",
+            lambda **kwargs: (["stop"], [], [np.array([0.0, 0.0, 0.0], dtype=np.float32)]),
+        )
+        monkeypatch.setattr(watcher_rollout_generation, "copy_pivot_rgb", lambda **kwargs: "pivot.jpg")
+        monkeypatch.setattr(watcher_rollout_generation, "classify_sim_label", lambda **kwargs: "PROCEED")
+
+        args = SimpleNamespace(
+            summary_full_path=summary_full_path,
+            habitat_config_path="config/vln_r2r.yaml",
+            model_path="model",
+            base_model_path=None,
+            bundle_root=tmp_path / "bundle",
+            manifest_file=None,
+            max_episodes=None,
+            num_pivots=1,
+            num_rollouts=1,
+            min_rollout_steps=1,
+            max_rollout_steps=1,
+            seed=0,
+            resume=True,
+        )
+
+        with caplog.at_level(logging.INFO):
+            generate_bundle(args)
+
+        episode_logs = [record.message for record in caplog.records if record.message.startswith("episode ")]
+        assert "episode 1/1 key=scene_2 pivots=1" in episode_logs

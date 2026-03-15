@@ -3,9 +3,9 @@
 # Close-loop subtask evaluation for ThinkVLNActor LoRA checkpoint.
 
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0,7
 
-torchrun --nproc_per_node=1 thinkvln/eval/close_eval.py \
+torchrun --nproc_per_node=2 thinkvln/eval/close_eval.py \
   --model_type thinkvln_actor \
   --model_path outputs/actor/lora/run-3-3 \
   --ladder_mode subtask \
@@ -15,4 +15,4 @@ torchrun --nproc_per_node=1 thinkvln/eval/close_eval.py \
   --habitat_config_path config/vln_r2r.yaml \
   --eval_split train \
   --sample_rate 0.1 \
-  --output_path results/env_eval/run-3-10-reverted
+  --output_path results/env_eval/run-3-13-rgb

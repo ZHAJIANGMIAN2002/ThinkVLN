@@ -21,7 +21,7 @@ from habitat.config.default_structured_configs import (
     FogOfWarConfig,
 )
 
-from habitat_extensions import measures
+from thinkvln.habitat_extensions import measures
 
 DATASET = "r2r"
 CONFIG_PATH = "./config/vln_r2r.yaml"

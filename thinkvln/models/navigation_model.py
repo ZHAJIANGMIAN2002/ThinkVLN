@@ -388,6 +388,7 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         action_logits: Optional[torch.Tensor],
         sample_action: bool = False,
         action_generator: Optional[torch.Generator] = None,
+        forbidden_actions: Optional[List[int]] = None,
     ) -> int:
         if action_logits is None:
             return 0
@@ -395,6 +396,15 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         logits = action_logits.detach().to(device="cpu", dtype=torch.float32)
         if logits.ndim != 1 or logits.numel() == 0:
             return 0
+        if forbidden_actions:
+            valid_mask = torch.ones_like(logits, dtype=torch.bool)
+            for action_idx in forbidden_actions:
+                if 0 <= int(action_idx) < logits.numel():
+                    valid_mask[int(action_idx)] = False
+            if not bool(valid_mask.any().item()):
+                return 0
+            logits = logits.clone()
+            logits[~valid_mask] = float("-inf")
         if not sample_action:
             return int(torch.argmax(logits, dim=-1).item())
 
@@ -488,6 +498,7 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         subtask_id: Optional[int] = None,
         sample_action: bool = False,
         action_generator: Optional[torch.Generator] = None,
+        forbidden_actions: Optional[List[int]] = None,
     ) -> Tuple[int, float, bool]:
         self._maybe_reset_for_episode(episode_key)
         resolved_subtask_id, is_subtask_start = self._update_subtask_state(subgoal, subtask_id=subtask_id)
@@ -537,6 +548,7 @@ class ThinkVLNActorNavigationModel(NavigationModel):
             first_step_logits,
             sample_action=sample_action,
             action_generator=action_generator,
+            forbidden_actions=forbidden_actions,
         )
 
         progress_preds = outputs.get("progress_preds")
