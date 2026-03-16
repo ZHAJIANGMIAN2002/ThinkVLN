@@ -17,6 +17,11 @@ from thinkvln.datagen.generation.watcher_utils import (
     load_jsonl_by_key,
     resolve_bundle_image_path,
 )
+from thinkvln.eval.close_eval_utils import (
+    build_episode_key,
+    extract_scene_id,
+    load_summary_full,
+)
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -31,89 +36,72 @@ MODEL_NAME = 'qwen/qwen3.5-397b-a17b'
 DEFAULT_REASONING_EFFORT = "none"
 
 
-MEMORY_START_SYSTEM_PROMPT = """You are generating running watcher memory for a navigation agent.
+MEMORY_START_SYSTEM_PROMPT = """You write watcher memory for navigation rollouts.
 
 Return JSON only:
 {"memory_start":"..."}
 
-Goal:
-Compress the episode prefix from the episode start up to the pivot into one short watcher state that will be used for future decision-making.
-
-Definition:
-memory_start is not a trajectory summary. It is a compact running state that tells a future watcher:
-1. what important progress has already been completed and still remains relevant,
-2. what the current state is at the pivot,
-3. what subtask or immediate goal is still active,
-4. what recent failure fact should be remembered, only if it still matters.
-
-Content requirements:
-- Preserve only progress that is still useful for understanding the current state or the next decision.
-- Describe the current position or orientation only through stable, task-relevant landmarks when possible.
-- Make the active unfinished goal explicit.
-- Mention a failure clue only if it is visible, recent, and important for future recovery.
-
 Rules:
-- Output JSON only.
-- memory_start must be exactly 1 sentence.
+- Please summarize all the history frames you see.
+- Keep only useful progress that still matters.
+- Make the current pivot state explicit.
+- using "The agent" to describe the robot's current state is recommended.
 - Use neutral declarative style.
-- Do not use first person.
-- Write a watcher state update, not a frame-by-frame narration.
-- Do not list actions, count turns, or describe intermediate steps.
-- Do not restate the full instruction or merely paraphrase the subtask text.
-- Prefer stable, subtask-relevant landmarks over incidental details such as generic walls unless they are necessary.
-- Do not mention image order, uncertainty, formatting, or missing information.
-- Keep the sentence compact, information-dense, and directly useful for the next watcher decision.
+- Do not restate instructions, plan steps, or guesses about what to do next.
+
+Good examples:
+- {"memory_start":"The agent has left the dining area and is aligned with the hallway toward the bathroom."}
+- {"memory_start":"The agent is at the bathroom entrance facing inward toward the sink side."}
+
+Bad examples:
+- {"memory_start":"First the agent moved forward, then turned left, then moved again, and now sees a hallway."}
+- {"memory_start":"The instruction says to go to the bathroom, so the agent should keep going there next."}
 """
 
 
-
-ROLLOUT_SYSTEM_PROMPT = """You are labeling a rollout span for a navigation watcher and updating its running memory.
+ROLLOUT_SYSTEM_PROMPT = """You update watcher memory and choose the robot's next subtask.
 
 Return JSON only:
-{"label":"PROCEED|RESUME|FAIL","memory_end":"..."}
+{"done":true,"next_subtask":"...","memory_end":"..."}
 
-Overall goal:
-Use memory_start together with the rollout observations to decide whether the current subtask has been completed, should continue, or has clearly failed, and then rewrite the running watcher memory for the rollout end state.
+memory_end is the updated cumulative memory of the memory_start after seeing the rollout frames and actions.
+You can throw away parts of memory_start that are no longer relevant, but keep the still-relevant progress that matters.
+Make the memory as consistent as possible, don't only mention the current state, you should summary the whole memory.
 
-Decision procedure:
-1. Choose PROCEED if the current subtask is completed by the end of the rollout, so the next subtask should begin.
-2. Otherwise choose FAIL if the rollout ends clearly off-route, stalled, reversed, looping, wrongly stopped, or in a wrong area for the current subtask.
-3. Otherwise choose RESUME.
+Done flag rules:
+- Set done=true only if the current active step reaches a natural handoff by rollout end.
+- Set done=false if the current active step should remain active, including recovery cases.
+- done=true means the current active step moves to done and the first pending step becomes active.
+- If no pending step remains after done=true, the next_subtask should be stop.
 
-Label meanings:
-- PROCEED: the current subtask is completed by rollout end.
-- RESUME: the current subtask is not completed, but the rollout still makes usable progress and remains broadly on track.
-- FAIL: the current subtask is not completed and the rollout is clearly not usable as normal progress.
+Next subtask rules:
+- next_subtask must be short and actionable.
+- Write it as an imperative instruction.
+- If done=false, continue or refine the current active step, or write a short recovery step.
+- If done=true, describe the new active step after transition, or use "stop" if nothing is pending.
 
-Definition of memory_end:
-memory_end is the updated running watcher memory after this rollout.
-It is not a trajectory summary and not a chain-of-thought explanation.
-It should rewrite memory_start into a new compact state by:
-1. preserving only still-relevant prior progress,
-2. adding the new progress that remains relevant,
-3. describing the current end state,
-4. stating the unfinished goal, or the next goal if label is PROCEED,
-5. mentioning one brief failure clue only if needed.
-
-Content requirements:
-- Keep earlier progress only when it is still useful for understanding the current state or the next decision.
-- Drop obsolete details that no longer matter.
-- Make the end state explicit.
-- If label is PROCEED, make clear that the current subtask is complete and state the next immediate goal when possible.
-- If label is RESUME, make clear what remains unfinished.
-- If label is FAIL, make clear the wrong end state or the main failure clue.
-
-Rules:
-- Output JSON only.
+Memory_end rules:
 - memory_end must be exactly 1 sentence.
 - Use neutral declarative style.
 - Do not use first person.
-- Do not narrate step-by-step actions.
+- Do not narrate actions step by step.
 - Do not count turns or list intermediate moves.
-- Do not output a chain-of-thought or detailed explanation.
-- Do not merely copy memory_start; rewrite it using the rollout result.
-- Do not mention image order, uncertainty, formatting, or missing information.
-- Keep the sentence compact, cumulative, and directly useful for the next watcher decision.
+- Rewrite memory_start into updated cumulative memory.
+- Preserve still-relevant past progress, but compress it when possible.
+- Add only new progress that matters plus the current end state.
+- Do not explain why next_subtask was chosen.
+- Prefer stable, task-relevant landmarks over incidental details.
+- memory_end should be usable directly as the next stage's memory_start.
+- Do not mention image order, uncertainty, or formatting.
+
+Good examples:
+- {"done":false,"next_subtask":"continue walking into the bathroom","memory_end":"The agent has left the hallway and is now entering the bathroom toward the sink."}
+- {"done":true,"next_subtask":"Stop near the sink.","memory_end":"The agent has entered the bathroom and moved up beside the sink."}
+- {"done":false,"next_subtask":"turn left and move back to the hallway","memory_end":"The agent has drifted into the wrong room and is now facing back toward the hallway exit."}
+
+Bad examples:
+- {"done":"RESUME","next_subtask":"continue","memory_end":"The agent is near the doorway."}
+- {"done":false,"next_subtask":"The rollout failed","memory_end":"This rollout failed because the agent is off-route."}
 """
 
 
@@ -123,6 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bundle_root", type=Path, required=True)
     parser.add_argument("--manifest_file", type=Path, required=True)
     parser.add_argument("--output_file", type=Path, required=True)
+    parser.add_argument("--summary_full_path", type=Path, default=None)
     parser.add_argument("--image_stride", type=int, default=3)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--debug_html_dir", type=Path, default=None)
@@ -234,32 +223,84 @@ def build_reasoning_config(reasoning_effort: str) -> Dict[str, Any]:
     return {"effort": effort, "exclude": True}
 
 
+def normalize_plan_steps(plan: Any) -> List[str]:
+    if isinstance(plan, list):
+        return [str(step).strip() for step in plan if str(step).strip()]
+    if isinstance(plan, str):
+        return [line.strip() for line in plan.splitlines() if line.strip()]
+    return []
+
+
+def resolve_current_plan_step(record: Dict[str, Any], plan_steps: List[str]) -> str:
+    if plan_steps:
+        subtask_id = max(1, int(record.get("subtask_id", 1)))
+        index = min(subtask_id - 1, len(plan_steps) - 1)
+        return plan_steps[index]
+    return str(record.get("subtask_text", "")).strip()
+
+
+def split_plan_state(record: Dict[str, Any], plan_steps: List[str]) -> tuple[List[str], List[str], List[str]]:
+    if not plan_steps:
+        active_step = str(record.get("subtask_text", "")).strip()
+        return [], [active_step] if active_step else [], []
+    subtask_id = max(1, int(record.get("subtask_id", 1)))
+    index = min(subtask_id - 1, len(plan_steps) - 1)
+    return plan_steps[:index], [plan_steps[index]], plan_steps[index + 1:]
+
+
+def format_plan_section(steps: List[str]) -> str:
+    if not steps:
+        return "- None."
+    return "\n".join(f"- {step}" for step in steps)
+
+
+def resolve_summary_record(
+    record: Dict[str, Any],
+    summary_lookup: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any] | None:
+    episode_key = str(record.get("episode_key", "")).strip()
+    if episode_key and episode_key in summary_lookup:
+        return summary_lookup[episode_key]
+    scene_id = record.get("scene_id")
+    episode_id = record.get("episode_id")
+    if scene_id is None or episode_id is None:
+        return None
+    derived_key = build_episode_key(extract_scene_id(str(scene_id)), episode_id)
+    return summary_lookup.get(derived_key)
+
+
+def enrich_record_from_summary(
+    record: Dict[str, Any],
+    summary_lookup: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not summary_lookup:
+        return record
+    summary_record = resolve_summary_record(record, summary_lookup)
+    if summary_record is None:
+        return record
+    enriched = dict(record)
+    plan_steps = normalize_plan_steps(summary_record.get("plan", []))
+    if plan_steps:
+        enriched["plan"] = plan_steps
+    if not str(enriched.get("instruction", "")).strip():
+        enriched["instruction"] = str(summary_record.get("instruction", ""))
+    return enriched
+
+
 def build_memory_start_messages(
     record: Dict[str, Any],
     history_images: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     user_text = (
-    "Task\n"
-    f"- Instruction: {record['instruction']}\n"
-    f"- Current subtask id: {record['subtask_id']}\n"
-    f"- Current subtask: {record['subtask_text']}\n"
-    f"- Pivot frame: {int(record.get('pivot_frame', 0))}\n"
-    "Context\n"
-    "- Images are sampled in time order from the episode start to the pivot.\n"
-    "- The first image is the episode start and the last image is the pivot state.\n"
-    "Memory target\n"
-    "- Write memory_start as the running watcher memory at the pivot.\n"
-    "- Keep only completed progress that is still relevant.\n"
-    "- Make the current pivot state explicit.\n"
-    "- State the current unfinished subtask or immediate goal.\n"
-    "- Mention one recent failure clue only if it still matters.\n"
-    "Output rules\n"
-    "- Write a watcher state update, not a trajectory summary.\n"
-    "- Do not narrate frame by frame.\n"
-    "- Do not list actions or count turns.\n"
-    "- Do not merely restate the instruction or subtask text.\n"
-    "- Keep memory_start to exactly 1 short sentence.\n"
-)
+        "History\n"
+        f"- Pivot frame: {int(record.get('pivot_frame', 0))}\n"
+        "- Images are sampled from episode start to the pivot in time order.\n"
+        "- First image = episode start. Last image = pivot.\n"
+        "Write memory_start in one sentence.\n"
+        "- Keep only useful progress that still matters.\n"
+        "- Make the current pivot state explicit.\n"
+        "- Do not narrate frame by frame."
+    )
     return [
         {"role": "system", "content": MEMORY_START_SYSTEM_PROMPT},
         {
@@ -274,35 +315,30 @@ def build_rollout_messages(
     image_paths: List[Path],
     memory_start: str,
 ) -> List[Dict[str, Any]]:
+    plan_steps = normalize_plan_steps(record.get("plan", []))
+    done_steps, active_steps, pending_steps = split_plan_state(record, plan_steps)
     user_text = (
-    "Task\n"
-    f"- Instruction: {record['instruction']}\n"
-    f"- Current subtask id: {record['subtask_id']}\n"
-    f"- Current subtask: {record['subtask_text']}\n"
-    f"- Memory start: {memory_start}\n"
-    f"- Rollout actions: {record['actions']}\n"
-    "Context\n"
-    "- The rollout images are in time order from the pivot to the rollout end.\n"
-    "- The last rollout image is the final state for label judgment.\n"
-    "Decision target\n"
-    "- First decide whether the current subtask is completed by the end of the rollout.\n"
-    "- If the current subtask is completed, choose PROCEED.\n"
-    "- Otherwise, if the rollout ends clearly off-route, stalled, reversed, looping, wrongly stopped, or in a wrong area for the current subtask, choose FAIL.\n"
-    "- Otherwise choose RESUME.\n"
-    "Memory target\n"
-    "- Rewrite memory_start into a new running watcher memory for the rollout end state.\n"
-    "- Keep only earlier progress that is still relevant.\n"
-    "- Add new rollout progress only if it remains useful for understanding the current state or next decision.\n"
-    "- Make the current end state explicit.\n"
-    "- If label is PROCEED, state that the current subtask is complete and give the next immediate goal when possible.\n"
-    "- If label is RESUME, state what remains unfinished.\n"
-    "- If label is FAIL, state the wrong end state or one brief failure clue.\n"
-    "Output rules\n"
-    "- Do not narrate the rollout step by step.\n"
-    "- Do not count turns or list intermediate actions.\n"
-    "- Do not write a chain-of-thought explanation.\n"
-    "- Keep memory_end to exactly 1 short sentence.\n"
-)
+        "Plan state\n"
+        "Done\n"
+        f"{format_plan_section(done_steps)}\n"
+        "Active\n"
+        f"{format_plan_section(active_steps)}\n"
+        "Pending\n"
+        f"{format_plan_section(pending_steps)}\n"
+        "State\n"
+        f"- Memory start: {memory_start}\n"
+        f"- Rollout actions: {record['actions']}\n"
+        "Decision\n"
+        "- If the active step reaches a natural handoff, set done=true.\n"
+        "- If the active step is still the right step, set done=false.\n"
+        "- With done=false, next_subtask should continue the active step or give a short recovery step.\n"
+        "- With done=true, next_subtask should describe the promoted pending step, or stop if pending is empty.\n"
+        "Memory\n"
+        "- Rewrite memory_start into a new cumulative watcher memory.\n"
+        "- Keep only the still-relevant part of memory_start.\n"
+        "- Add only new progress that matters plus the current end state.\n"
+        "- Keep memory_end to exactly 1 short sentence."
+    )
     content: List[Dict[str, Any]] = [{"type": "text", "text": user_text}]
     content.extend(encode_image_content(path) for path in image_paths)
     return [
@@ -363,16 +399,20 @@ def annotate_sample(
         log_prefix=f"[annotate] sample={sample_id} stage=memory_end",
         reasoning_effort=reasoning_effort,
     )
-    label = str(rollout_payload["label"]).strip().upper()
+    done = rollout_payload.get("done")
+    next_subtask = str(rollout_payload["next_subtask"]).strip()
     memory_end = str(rollout_payload["memory_end"]).strip()
-    if label not in {"RESUME", "PROCEED", "FAIL"}:
-        raise ValueError(f"invalid label: {label}")
+    if not isinstance(done, bool):
+        raise ValueError(f"done must be boolean: {done!r}")
+    if not next_subtask:
+        raise ValueError("next_subtask is empty")
     if not memory_end:
         raise ValueError("memory_end is empty")
     return {
         "sample_id": str(record["sample_id"]),
         "memory_start": memory_start,
-        "label": label,
+        "done": done,
+        "next_subtask": next_subtask,
         "memory_end": memory_end,
         "gt_history_images": history_images,
         "rollout_images": rollout_images,
@@ -383,7 +423,8 @@ def build_persisted_annotation(annotation: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "sample_id": str(annotation["sample_id"]),
         "memory_start": str(annotation["memory_start"]),
-        "label": str(annotation["label"]),
+        "done": bool(annotation["done"]),
+        "next_subtask": str(annotation["next_subtask"]),
         "memory_end": str(annotation["memory_end"]),
     }
 
@@ -392,6 +433,8 @@ def write_debug_html(debug_html_dir: Path, records: List[Dict[str, Any]]) -> Non
     debug_html_dir.mkdir(parents=True, exist_ok=True)
     sections: List[str] = []
     for record in records:
+        plan_steps = normalize_plan_steps(record.get("plan", []))
+        done_steps, active_steps, pending_steps = split_plan_state(record, plan_steps)
         gt_images = "".join(
             f'<img src="{html.escape(item["image_url"]["url"])}" alt="gt" loading="lazy" />'
             for item in record.get("gt_history_images", [])
@@ -405,10 +448,14 @@ def write_debug_html(debug_html_dir: Path, records: List[Dict[str, Any]]) -> Non
 <section class="sample">
   <h2>{html.escape(str(record.get("sample_id", "")))}</h2>
   <p><strong>Instruction:</strong> {html.escape(str(record.get("instruction", "")))}</p>
-  <p><strong>Subtask:</strong> {html.escape(str(record.get("subtask_id", "")))} - {html.escape(str(record.get("subtask_text", "")))}</p>
   <p><strong>Actions:</strong> {html.escape(str(record.get("actions", [])))}</p>
+  <p><strong>Plan State:</strong></p>
+  <p><strong>Done Plan:</strong> {html.escape(str(done_steps))}</p>
+  <p><strong>Active Plan:</strong> {html.escape(str(active_steps))}</p>
+  <p><strong>Pending Plan:</strong> {html.escape(str(pending_steps))}</p>
   <p><strong>Memory Start:</strong> {html.escape(str(record.get("memory_start", "")))}</p>
-  <p><strong>Label:</strong> {html.escape(str(record.get("label", "")))}</p>
+  <p><strong>Done:</strong> {html.escape(str(record.get("done", "")))}</p>
+  <p><strong>Next Subtask:</strong> {html.escape(str(record.get("next_subtask", "")))}</p>
   <p><strong>Memory End:</strong> {html.escape(str(record.get("memory_end", "")))}</p>
   <div class="strip">{gt_images}</div>
   <div class="strip">{rollout_images}</div>
@@ -471,6 +518,8 @@ def run_multimodal_ping(client: OpenAI, model: str, pivot_image_path: Path) -> N
 
 def annotate_manifest(args: argparse.Namespace) -> int:
     manifest_rows = load_jsonl(args.manifest_file)
+    summary_full_path = getattr(args, "summary_full_path", None)
+    summary_lookup = load_summary_full(str(summary_full_path)) if summary_full_path is not None else {}
     existing = load_jsonl_by_key(args.output_file, "sample_id") if args.resume else {}
     pending_rows = [
         row for row in manifest_rows
@@ -500,6 +549,7 @@ def annotate_manifest(args: argparse.Namespace) -> int:
     skipped_missing_gt = 0
     debug_records: List[Dict[str, Any]] = []
     for idx, row in enumerate(pending_rows, start=1):
+        enriched_row = enrich_record_from_summary(row, summary_lookup)
         sample_id = str(row.get("sample_id", ""))
         print(f"[annotate] progress={idx}/{len(pending_rows)} sample={sample_id}")
         try:
@@ -508,7 +558,7 @@ def annotate_manifest(args: argparse.Namespace) -> int:
                 model=MODEL_NAME,
                 gt_image_root=args.gt_image_root,
                 bundle_root=args.bundle_root,
-                record=row,
+                record=enriched_row,
                 image_stride=max(1, int(args.image_stride)),
                 request_timeout=float(getattr(args, "request_timeout", 180.0)),
                 max_retries=max(1, int(getattr(args, "max_retries", 4))),
@@ -526,13 +576,15 @@ def annotate_manifest(args: argparse.Namespace) -> int:
         if getattr(args, "debug_html_dir", None) is not None:
             debug_records.append(
                 {
-                    "sample_id": str(row.get("sample_id", "")),
-                    "instruction": str(row.get("instruction", "")),
-                    "subtask_id": row.get("subtask_id"),
-                    "subtask_text": str(row.get("subtask_text", "")),
-                    "actions": row.get("actions", []),
+                    "sample_id": str(enriched_row.get("sample_id", "")),
+                    "instruction": str(enriched_row.get("instruction", "")),
+                    "plan": enriched_row.get("plan", []),
+                    "subtask_id": enriched_row.get("subtask_id"),
+                    "subtask_text": str(enriched_row.get("subtask_text", "")),
+                    "actions": enriched_row.get("actions", []),
                     "memory_start": annotation["memory_start"],
-                    "label": annotation["label"],
+                    "done": annotation["done"],
+                    "next_subtask": annotation["next_subtask"],
                     "memory_end": annotation["memory_end"],
                     "gt_history_images": annotation.get("gt_history_images", []),
                     "rollout_images": annotation.get("rollout_images", []),

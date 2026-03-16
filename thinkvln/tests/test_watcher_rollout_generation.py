@@ -404,6 +404,8 @@ class TestWatcherRolloutGeneration:
 
         assert processed_samples == 1
         assert rollout_calls == ["scene_2"]
+        rows = [json.loads(line) for line in manifest_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert rows[-1]["plan"] == ["step"]
 
     def test_generate_bundle_logs_remaining_episode_count_when_resuming(self, tmp_path, monkeypatch, caplog):
         summary_full_path = tmp_path / "summary_full.jsonl"

@@ -486,6 +486,7 @@ def generate_bundle(args: argparse.Namespace) -> int:
                     "rollout_id": int(rollout_id),
                     "subtask_id": int(subtask_id),
                     "instruction": instruction,
+                    "plan": list(plan_steps),
                     "subtask_text": subtask_text,
                     "base_image_path": "images",
                     "pivot_image_relpath": pivot_relpath,

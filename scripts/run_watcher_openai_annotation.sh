@@ -13,6 +13,7 @@ cmd=(
   --bundle_root results/watcher_rollout_train_full_v2
   --manifest_file results/watcher_rollout_train_full_v2/manifest/watcher_rollout_manifest.jsonl
   --output_file results/watcher_rollout_train_full_v2/watcher_openai_annotations.jsonl
+  --summary_full_path data/trajectory_data/R2R_back/summary_full.jsonl
   --image_stride 3
   --max_samples 10
   --request_timeout "${REQUEST_TIMEOUT}"

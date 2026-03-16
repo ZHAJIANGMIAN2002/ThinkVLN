@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict
@@ -26,16 +27,34 @@ def find_trajectory_videos(video_root: Path) -> List[Path]:
     return sorted(video_root.rglob("trajectory.mp4"))
 
 
+def get_episode_state(destination_dir: Path) -> str:
+    if not destination_dir.exists():
+        return "missing"
+    rgb_files = sorted(destination_dir.glob("*_rgb.jpg"))
+    map_files = sorted(destination_dir.glob("*_map.jpg"))
+    if rgb_files and len(rgb_files) == len(map_files):
+        return "complete"
+    return "partial"
+
+
+def split_frame(frame, fixed_rgb_width: int):
+    height, width = frame.shape[:2]
+    if width <= fixed_rgb_width:
+        raise ValueError(f"frame width {width} must be larger than rgb width {fixed_rgb_width}")
+    return frame[:, :fixed_rgb_width], frame[:, fixed_rgb_width:]
+
+
 def extract_frames(
     video_path: Path,
     video_root: Path,
     output_root: Path,
     overwrite: bool,
+    fixed_rgb_width: int = 640,
 ) -> Dict[str, object]:
     """Extract every frame from `video_path` and store them under `output_root`."""
     rel_dir = video_path.parent.relative_to(video_root)
     destination_dir = output_root / rel_dir
-    destination_dir.mkdir(parents=True, exist_ok=True)
+    state = get_episode_state(destination_dir)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -44,7 +63,23 @@ def extract_frames(
             "error": "cannot open video",
             "frames_extracted": 0,
             "frames_skipped": 0,
+            "status": "error",
         }
+
+    frames_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    if state == "complete" and not overwrite:
+        cap.release()
+        return {
+            "video": str(rel_dir),
+            "frames_extracted": 0,
+            "frames_skipped": frames_total * 2,
+            "frames_total": frames_total,
+            "status": "skipped_complete",
+        }
+
+    if state == "partial" or overwrite:
+        shutil.rmtree(destination_dir, ignore_errors=True)
+    destination_dir.mkdir(parents=True, exist_ok=True)
 
     frame_idx = 0
     saved = 0
@@ -56,22 +91,27 @@ def extract_frames(
             if not success:
                 break
 
-            frame_path = destination_dir / f"{frame_idx:06d}.jpg"
-            if frame_path.exists() and not overwrite:
-                skipped += 1
+            rgb_frame, map_frame = split_frame(frame, fixed_rgb_width)
+            rgb_path = destination_dir / f"{frame_idx:06d}_rgb.jpg"
+            map_path = destination_dir / f"{frame_idx:06d}_map.jpg"
+            if rgb_path.exists() and map_path.exists() and not overwrite:
+                skipped += 2
             else:
-                cv2.imwrite(str(frame_path), frame)
-                saved += 1
+                cv2.imwrite(str(rgb_path), rgb_frame)
+                cv2.imwrite(str(map_path), map_frame)
+                saved += 2
 
             frame_idx += 1
     finally:
         cap.release()
 
+    status = "rebuilt_partial" if state == "partial" else "extracted"
     return {
         "video": str(rel_dir),
         "frames_extracted": saved,
         "frames_skipped": skipped,
         "frames_total": frame_idx,
+        "status": status,
     }
 
 
@@ -98,7 +138,13 @@ def main() -> None:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Overwrite existing frame files instead of skipping them.",
+        help="Rebuild episode outputs even when rgb/map frames already exist.",
+    )
+    parser.add_argument(
+        "--fixed-rgb-width",
+        type=int,
+        default=640,
+        help="Width of the left RGB panel inside each composite video frame.",
     )
 
     args = parser.parse_args()
@@ -125,7 +171,14 @@ def main() -> None:
     stats: List[Dict[str, object]] = []
     with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
         futures = {
-            executor.submit(extract_frames, video, args.video_root, args.output_dir, args.overwrite): video
+            executor.submit(
+                extract_frames,
+                video,
+                args.video_root,
+                args.output_dir,
+                args.overwrite,
+                args.fixed_rgb_width,
+            ): video
             for video in videos
         }
 
@@ -135,8 +188,9 @@ def main() -> None:
                 result = future.result()
                 stats.append(result)
                 logging.info(
-                    "Video %s → extracted=%s skipped=%s total=%s",
+                    "Video %s → status=%s extracted=%s skipped=%s total=%s",
                     result["video"],
+                    result.get("status"),
                     result.get("frames_extracted"),
                     result.get("frames_skipped"),
                     result.get("frames_total"),

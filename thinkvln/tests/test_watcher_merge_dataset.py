@@ -49,7 +49,8 @@ class TestWatcherMergeDataset:
             {
                 "sample_id": "sample_1",
                 "memory_start": "The agent is near the doorway.",
-                "label": "PROCEED",
+                "done": True,
+                "next_subtask": "stop",
                 "memory_end": "The agent entered the room.",
             }
         ]
@@ -70,6 +71,8 @@ class TestWatcherMergeDataset:
             merged = json.loads(handle.readline())
 
         assert merged["traj"] == "a=[forward,turn_right]"
+        assert merged["done"] is True
+        assert merged["next_subtask"] == "stop"
         assert merged["base_image_path"] == "images"
         assert merged["pivot_image_relpath"] == "pivot/scene_1/pivot_000010_rgb.jpg"
         assert merged["rollout_image_relpaths"] == manifest_rows[0]["rollout_image_relpaths"]
