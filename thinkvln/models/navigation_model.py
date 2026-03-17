@@ -8,6 +8,7 @@ All navigation models should implement this interface to work with the evaluator
 """
 
 from abc import ABC, abstractmethod
+import math
 from typing import Optional, Tuple, Any, List, Dict
 from PIL import Image
 import torch
@@ -607,6 +608,166 @@ class ThinkVLNActorNavigationModel(NavigationModel):
             return action, None
         except Exception:
             return self.actions2idx["stop"], None
+
+
+class ThinkVLNFMNavigationModel(ThinkVLNActorNavigationModel):
+    """Navigation wrapper for flow-matching waypoint actor."""
+
+    def __init__(
+        self,
+        model,
+        processor,
+        device: str = "cuda",
+        memory_num_history_images: int = 8,
+        done_threshold: float = 0.85,
+        use_memory: bool = True,
+        stop_distance_threshold: float = 0.06,
+        turn_ratio_threshold: float = 0.6,
+    ):
+        super().__init__(
+            model=model,
+            processor=processor,
+            device=device,
+            memory_num_history_images=memory_num_history_images,
+            done_threshold=done_threshold,
+            use_memory=use_memory,
+        )
+        self.stop_distance_threshold = float(stop_distance_threshold)
+        self.turn_ratio_threshold = float(turn_ratio_threshold)
+        self.prompt_template = (
+            "Instruction: {instruction}\n"
+            "Current subgoal: {subgoal}\n"
+            "Previous progress: {prev_progress:.3f}\n"
+            "{memory_hint}"
+            "Predict waypoint deltas for the next horizon."
+        )
+
+    def _build_inputs(self, images: List[Image.Image], prompt: str) -> dict:
+        model_inputs = super()._build_inputs(images, prompt)
+        model_inputs.pop("action_labels", None)
+        model_inputs.pop("progress_labels", None)
+        model_inputs.pop("done_labels", None)
+        return model_inputs
+
+    def _waypoint_to_action_logits(self, waypoint_preds: Optional[torch.Tensor]) -> torch.Tensor:
+        logits = torch.full((4,), -2.0, dtype=torch.float32)
+        if waypoint_preds is None or waypoint_preds.numel() == 0:
+            logits[0] = 2.0
+            return logits
+
+        if waypoint_preds.ndim == 3:
+            first_wp = waypoint_preds[0, 0]
+        elif waypoint_preds.ndim == 2:
+            first_wp = waypoint_preds[0]
+        else:
+            logits[0] = 2.0
+            return logits
+
+        dx = float(first_wp[0].item()) if first_wp.numel() > 0 else 0.0
+        dz = float(first_wp[1].item()) if first_wp.numel() > 1 else 0.0
+        dist = math.sqrt(dx * dx + dz * dz)
+        lateral_ratio = abs(dx) / max(abs(dz), 1e-6)
+
+        if dist <= self.stop_distance_threshold:
+            logits[0] = 3.0
+            return logits
+
+        if lateral_ratio >= self.turn_ratio_threshold:
+            if dx >= 0:
+                logits[3] = 2.5
+                logits[2] = -0.5
+            else:
+                logits[2] = 2.5
+                logits[3] = -0.5
+            logits[1] = 0.3
+        else:
+            logits[1] = 2.5
+            logits[2] = 0.1
+            logits[3] = 0.1
+        return logits
+
+    def predict_action_with_progress_and_done(
+        self,
+        observation: Image.Image,
+        instruction: str,
+        subgoal: str,
+        episode_key: Optional[str] = None,
+        subtask_id: Optional[int] = None,
+        sample_action: bool = False,
+        action_generator: Optional[torch.Generator] = None,
+        forbidden_actions: Optional[List[int]] = None,
+    ) -> Tuple[int, float, bool]:
+        self._maybe_reset_for_episode(episode_key)
+        resolved_subtask_id, is_subtask_start = self._update_subtask_state(subgoal, subtask_id=subtask_id)
+        prev_progress_input = float(self.prev_progress)
+
+        if self.use_memory:
+            self._append_observation_to_memory_bank(
+                observation=observation,
+                subtask_id=resolved_subtask_id,
+                is_subtask_start=is_subtask_start,
+            )
+            images, selected_indices, selected_subtask_ids = self._prepare_memory_images_from_bank()
+        else:
+            images = [observation]
+            selected_indices = [0]
+            selected_subtask_ids = [resolved_subtask_id]
+
+        memory_hint = "Historical observations are provided.\n" if len(images) > 1 else ""
+        prompt = self.prompt_template.format(
+            instruction=instruction,
+            subgoal=subgoal,
+            prev_progress=prev_progress_input,
+            memory_hint=memory_hint,
+        )
+        query_token_ids = self._build_query_token_id_list()
+        self._last_debug_snapshot = {
+            "prompt": prompt,
+            "query_token_ids": query_token_ids,
+            "selected_indices": list(selected_indices),
+            "selected_subtask_ids": list(selected_subtask_ids),
+            "prev_progress_input": prev_progress_input,
+            "predicted_progress": None,
+            "memory_bank_size": len(self.memory_bank_images),
+            "memory_bank_subtasks": list(self.memory_bank_subtasks),
+            "selected_images": list(images),
+            "waypoint_first": None,
+        }
+
+        model_inputs = self._build_inputs(images, prompt)
+        with torch.no_grad():
+            outputs = self.model(**model_inputs, return_dict=True)
+
+        waypoint_preds = outputs.get("waypoint_preds")
+        action_logits = self._waypoint_to_action_logits(waypoint_preds)
+        action = self.select_action_from_logits(
+            action_logits,
+            sample_action=sample_action,
+            action_generator=action_generator,
+            forbidden_actions=forbidden_actions,
+        )
+
+        if waypoint_preds is not None and waypoint_preds.numel() > 0:
+            first = waypoint_preds[0, 0] if waypoint_preds.ndim == 3 else waypoint_preds[0]
+            dx = float(first[0].item()) if first.numel() > 0 else 0.0
+            dz = float(first[1].item()) if first.numel() > 1 else 0.0
+            dist = math.sqrt(dx * dx + dz * dz)
+            if self._last_debug_snapshot is not None:
+                self._last_debug_snapshot["waypoint_first"] = [dx, dz]
+        else:
+            dist = 0.0
+
+        progress_increment = min(0.25, dist / 0.5)
+        if action == self.actions2idx["stop"]:
+            progress_increment = max(progress_increment, 0.05)
+        progress = max(0.0, min(1.0, prev_progress_input + progress_increment))
+
+        if self._last_debug_snapshot is not None:
+            self._last_debug_snapshot["predicted_progress"] = float(progress)
+
+        done = bool(action == self.actions2idx["stop"] or progress > self.done_threshold)
+        self.prev_progress = progress
+        return action, progress, done
 
 
 class StreamVLNNavigationModel(NavigationModel):

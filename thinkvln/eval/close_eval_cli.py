@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model_type",
         type=str,
         default="thinkvln",
-        choices=["thinkvln", "streamvln", "thinkvln_actor"],
+        choices=["thinkvln", "streamvln", "thinkvln_actor", "thinkvln_fm_actor"],
         help="Model type",
     )
     parser.add_argument(
@@ -174,8 +174,11 @@ def eval():
     args.device = device
     logger.info("Distributed initialized: rank=%d world_size=%d gpu=%d device=%s", rank, world_size, gpu, device)
 
-    if args.model_type != "thinkvln_actor":
-        raise ValueError("Subtask closed-loop evaluation currently supports model_type=thinkvln_actor only.")
+    if args.model_type not in {"thinkvln_actor", "thinkvln_fm_actor"}:
+        raise ValueError(
+            "Subtask closed-loop evaluation currently supports model_type in "
+            "{thinkvln_actor, thinkvln_fm_actor} only."
+        )
     if not args.summary_full_path:
         raise ValueError("--summary_full_path is required.")
     logger.info("Loading summary_full from %s", args.summary_full_path)

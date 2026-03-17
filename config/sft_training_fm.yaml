@@ -1,0 +1,33 @@
+model:
+  model_name_or_path: /mnt/swx/ThinkVLN/model_weights/qwen3vl-2
+  num_query_tokens: 4
+  action_horizon: 5
+  action_dim: 2
+  freeze_backbone: true
+
+data:
+  image_root: /mnt/swx/ThinkVLN/data/trajectory_data/R2R_back/r2r
+  waypoint_data_path: /mnt/swx/ThinkVLN/data/trajectory_data/R2R_back/summary_full_with_waypoints.jsonl
+  memory_num_history_images: 0
+
+training:
+  output_dir: checkpoints/thinkvln_fm_actor
+  num_train_epochs: 1
+  max_steps: -1
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 1
+  learning_rate: 2.0e-5
+  weight_decay: 0.0
+  warmup_steps: 0
+  logging_steps: 10
+  save_steps: 1000
+  save_total_limit: 2
+  bf16: true
+  fp16: false
+  dataloader_num_workers: 2
+  dataloader_pin_memory: true
+  deepspeed: null
+
+logging:
+  report_to: []
+  run_name: thinkvln-fm-waypoint

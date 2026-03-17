@@ -88,7 +88,25 @@ class TestWatcherOpenAIAnnotation:
         history_images = [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,aaa"}}]
 
         memory_messages = build_memory_start_messages(record, history_images)
+        memory_system = memory_messages[0]["content"]
         memory_text = memory_messages[1]["content"][0]["text"]
+        assert '{"memory_start":"..."}' in memory_system
+        assert "Use this exact order: traj summary; current state; neutral status" in memory_system
+        assert "Do not mark ready for next step or task complete." in memory_system
+        assert "Write it so memory_end can directly update it in the same format." in memory_system
+        assert (
+            '{"memory_start":"Left the dining area and entered the hall; at the bathroom entrance facing inward; active step in progress"}'
+            in memory_system
+        )
+        assert (
+            '{"memory_start":"Left the dining area and entered the hall; at the bathroom entrance facing inward; ready for next step"}'
+            in memory_system
+        )
+        assert "Write memory_start as exactly three short semicolon-separated fragments." in memory_text
+        assert "Use this exact order: traj summary; current state; neutral status." in memory_text
+        assert "The third fragment must stay neutral" in memory_text
+        assert "Do not use ready for next step or task complete." in memory_text
+        assert "Make it the same format that memory_end will update later." in memory_text
         assert "Keep only useful progress that still matters" in memory_text
         assert "Make the current pivot state explicit" in memory_text
         assert "Do not narrate frame by frame" in memory_text
@@ -104,10 +122,28 @@ class TestWatcherOpenAIAnnotation:
         rollout_text = rollout_messages[1]["content"][0]["text"]
         assert '{"done":true,"next_subtask":"...","memory_end":"..."}' in rollout_system
         assert "Done flag rules:" in rollout_system
+        assert "Transition logic table:" in rollout_system
+        assert "| Turn | Rotating into a new heading. |" in rollout_system
+        assert "| Region Transition | Passing through a doorway or room boundary. |" in rollout_system
+        assert "| Visual Approach | Closing in on a visible target object or stop point. |" in rollout_system
+        assert "| General Cruise | Moving along a hall, room edge, or open route toward a future event. |" in rollout_system
+        assert "| Stop | Settling into the intended stopping position. |" in rollout_system
         assert "Next subtask rules:" in rollout_system
         assert "Memory_end rules:" in rollout_system
         assert (
-            '{"done":false,"next_subtask":"continue walking into the bathroom","memory_end":"The agent has left the hallway and is now entering the bathroom toward the sink."}'
+            '{"done":false,"next_subtask":"continue toward the intersection before turning right","memory_end":"Left the bedroom and followed the hall; approaching the dining-room opening, not at the turn yet; step ongoing"}'
+            in rollout_system
+        )
+        assert (
+            '{"done":false,"next_subtask":"finish turning right toward the hallway","memory_end":"Reached the hallway entrance from the room; mid-turn toward the hallway; step ongoing"}'
+            in rollout_system
+        )
+        assert (
+            '{"done":true,"next_subtask":"enter the bathroom","memory_end":"Cleared the dining area and reached the hall entrance; aligned with the bathroom approach; ready for next step"}'
+            in rollout_system
+        )
+        assert (
+            '{"done":true,"next_subtask":"stop","memory_end":"Entered the bathroom and approached the sink; beside the sink in the stopping spot; task complete"}'
             in rollout_system
         )
         assert "Plan state" in rollout_text
@@ -119,11 +155,23 @@ class TestWatcherOpenAIAnnotation:
         assert "- Stop near the sink." in rollout_text
         assert "Current step" not in rollout_text
         assert "Current plan step:" not in rollout_text
-        assert "If the active step reaches a natural handoff, set done=true" in rollout_text
+        assert "Set done=true only if the active step reaches a natural handoff by rollout end" in rollout_text
+        assert "The rollout end must also be a good starting point for the next subtask" in rollout_text
+        assert "Do not hand off early just because the active step looks mostly complete" in rollout_text
+        assert "If the next pending step is a turn, judge whether the robot has actually reached the turning point" in rollout_text
+        assert "If the active step is a turn, judge it together with the next pending step and only hand off once the robot is aligned for that next movement" in rollout_text
         assert "If the active step is still the right step, set done=false" in rollout_text
         assert "Rewrite memory_start into a new cumulative watcher memory" in rollout_text
         assert "Keep only the still-relevant part of memory_start" in rollout_text
-        assert "Keep memory_end to exactly 1 short sentence" in rollout_text
+        assert "Write memory_end as a direct update of memory_start" in rollout_text
+        assert "Prefer extending memory_start forward with the new observation and then compressing if needed" in rollout_text
+        assert "Do not reduce memory_end to only the final frame" in rollout_text
+        assert "Write memory_end as exactly three short semicolon-separated fragments" in rollout_text
+        assert "Use this exact order: traj summary; current state; task status" in rollout_text
+        assert "The first fragment must summarize the path already traveled before the final state" in rollout_text
+        assert "The third fragment must say whether the step is ongoing, ready for next step, or task complete" in rollout_text
+        assert "Sentence fragments are allowed" in rollout_text
+        assert "Keep memory_end to exactly 1 short sentence" not in rollout_text
 
     def test_select_stride_paths_uses_stride_and_keeps_final(self):
         relpaths = select_stride_paths(

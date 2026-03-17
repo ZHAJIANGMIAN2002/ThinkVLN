@@ -10,6 +10,7 @@ from thinkvln.models.navigation_model import (
     NavigationModel,
     StreamVLNNavigationModel,
     ThinkVLNActorNavigationModel,
+    ThinkVLNFMNavigationModel,
     ThinkVLNNavigationModel,
 )
 
@@ -89,6 +90,50 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
             base_model_path=args.base_model_path,
         )
         return ThinkVLNActorNavigationModel(
+            model=model,
+            processor=processor,
+            device=str(device),
+            memory_num_history_images=getattr(args, "memory_num_history_images", 6),
+            done_threshold=getattr(args, "done_threshold", 0.85),
+            use_memory=getattr(args, "use_memory", True),
+        )
+
+    if args.model_type == "thinkvln_fm_actor":
+        from transformers import AutoProcessor
+        from thinkvln.models.thinkvln_fm_actor import ThinkVLNFMActor
+
+        adapter_config_path = os.path.join(args.model_path, "adapter_config.json")
+        is_lora = os.path.exists(adapter_config_path)
+
+        if is_lora:
+            with open(adapter_config_path, "r", encoding="utf-8") as f:
+                adapter_config = json.load(f)
+            actual_base_model = args.base_model_path or adapter_config.get("base_model_name_or_path")
+            if not actual_base_model:
+                raise ValueError(
+                    "Base model path is required for LoRA FM checkpoint. "
+                    "Use --base_model_path or include base_model_name_or_path in adapter_config.json."
+                )
+            processor = AutoProcessor.from_pretrained(actual_base_model, trust_remote_code=True)
+            model = ThinkVLNFMActor.from_pretrained(
+                actual_base_model,
+                device_map="cpu",
+                dtype=torch.bfloat16,
+            )
+            from peft import PeftModel
+
+            model = PeftModel.from_pretrained(model, args.model_path)
+            model = model.to(dtype=torch.bfloat16).to(device)
+        else:
+            processor = AutoProcessor.from_pretrained(args.model_path, trust_remote_code=True)
+            model = ThinkVLNFMActor.from_pretrained(
+                args.model_path,
+                dtype=torch.bfloat16,
+            ).to(device)
+
+        model.requires_grad_(False)
+        model.eval()
+        return ThinkVLNFMNavigationModel(
             model=model,
             processor=processor,
             device=str(device),

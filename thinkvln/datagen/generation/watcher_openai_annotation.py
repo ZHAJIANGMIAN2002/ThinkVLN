@@ -42,18 +42,24 @@ Return JSON only:
 {"memory_start":"..."}
 
 Rules:
-- Please summarize all the history frames you see.
+- memory_start must be a single line with exactly three short semicolon-separated fragments.
+- Use this exact order: traj summary; current state; neutral status
+- The first fragment must summarize the path already traveled before the pivot state.
+- The second fragment must state where the robot is now at the pivot.
+- The third fragment must stay neutral, such as active step in progress, still on current step, or approach still ongoing.
+- Sentence fragments are allowed.
+- Do not mark ready for next step or task complete.
 - Keep only useful progress that still matters.
 - Make the current pivot state explicit.
-- using "The agent" to describe the robot's current state is recommended.
-- Use neutral declarative style.
+- Write it so memory_end can directly update it in the same format.
 - Do not restate instructions, plan steps, or guesses about what to do next.
 
 Good examples:
-- {"memory_start":"The agent has left the dining area and is aligned with the hallway toward the bathroom."}
-- {"memory_start":"The agent is at the bathroom entrance facing inward toward the sink side."}
+- {"memory_start":"Left the dining area and entered the hall; at the bathroom entrance facing inward; active step in progress"}
+- {"memory_start":"Moved along the wall from the bedroom; near the doorway to the sink area; still on current step"}
 
 Bad examples:
+- {"memory_start":"Left the dining area and entered the hall; at the bathroom entrance facing inward; ready for next step"}
 - {"memory_start":"First the agent moved forward, then turned left, then moved again, and now sees a hallway."}
 - {"memory_start":"The instruction says to go to the bathroom, so the agent should keep going there next."}
 """
@@ -64,15 +70,25 @@ ROLLOUT_SYSTEM_PROMPT = """You update watcher memory and choose the robot's next
 Return JSON only:
 {"done":true,"next_subtask":"...","memory_end":"..."}
 
-memory_end is the updated cumulative memory of the memory_start after seeing the rollout frames and actions.
-You can throw away parts of memory_start that are no longer relevant, but keep the still-relevant progress that matters.
-Make the memory as consistent as possible, don't only mention the current state, you should summary the whole memory.
+There is no map. Judge progress only from memory_start, rollout frames, rollout actions, and plan state.
 
 Done flag rules:
-- Set done=true only if the current active step reaches a natural handoff by rollout end.
+- Set done=true only if both conditions hold by rollout end:
+  1. The current active step reaches a natural handoff.
+  2. The rollout end is already a good starting point for the next subtask.
 - Set done=false if the current active step should remain active, including recovery cases.
+- Do not hand off early just because the active step looks mostly complete.
+- If no pending step remains after done=true, the next_subtask should be stop only when the final stopping condition is met.
 - done=true means the current active step moves to done and the first pending step becomes active.
-- If no pending step remains after done=true, the next_subtask should be stop.
+
+Transition logic table:
+| Meta-Action | Current Behavior | Switch when | Stay on current step when |
+| :--- | :--- | :--- | :--- |
+| Turn | Rotating into a new heading. | Orientation is stably aligned with the new path and the next movement can start now. | Still rotating, still correcting angle, or not yet aligned for the next move. |
+| Region Transition | Passing through a doorway or room boundary. | The robot has clearly crossed into the next region. | The doorway or boundary is still ahead, straddled, or only partially crossed. |
+| Visual Approach | Closing in on a visible target object or stop point. | The target or stopping point is immediate and ready for the final settle. | The target is still a short approach away. |
+| General Cruise | Moving along a hall, room edge, or open route toward a future event. | The robot has reached the structural trigger for the next step, such as an intersection, doorway, corner, or hall end. | The trigger point is still ahead, even if the current route looks mostly complete. |
+| Stop | Settling into the intended stopping position. | The robot is already in the intended stopping position. | The robot is still adjusting position or orientation. |
 
 Next subtask rules:
 - next_subtask must be short and actionable.
@@ -81,25 +97,27 @@ Next subtask rules:
 - If done=true, describe the new active step after transition, or use "stop" if nothing is pending.
 
 Memory_end rules:
-- memory_end must be exactly 1 sentence.
-- Use neutral declarative style.
-- Do not use first person.
-- Do not narrate actions step by step.
-- Do not count turns or list intermediate moves.
-- Rewrite memory_start into updated cumulative memory.
-- Preserve still-relevant past progress, but compress it when possible.
-- Add only new progress that matters plus the current end state.
-- Do not explain why next_subtask was chosen.
+- memory_end must be a single line with exactly three short semicolon-separated fragments.
+- Use this exact order: traj summary; current state; task status
+- The first fragment must summarize the path already traveled before the final state.
+- The second fragment must state where the robot is now.
+- The third fragment must say whether the step is ongoing, ready for next step, or task complete.
+- Sentence fragments are allowed.
+- Start from past progress, not the final frame.
+- Write memory_end as a direct update of memory_start.
+- Keep only still-relevant past progress.
 - Prefer stable, task-relevant landmarks over incidental details.
-- memory_end should be usable directly as the next stage's memory_start.
+- Do not explain why next_subtask was chosen.
 - Do not mention image order, uncertainty, or formatting.
 
 Good examples:
-- {"done":false,"next_subtask":"continue walking into the bathroom","memory_end":"The agent has left the hallway and is now entering the bathroom toward the sink."}
-- {"done":true,"next_subtask":"Stop near the sink.","memory_end":"The agent has entered the bathroom and moved up beside the sink."}
-- {"done":false,"next_subtask":"turn left and move back to the hallway","memory_end":"The agent has drifted into the wrong room and is now facing back toward the hallway exit."}
+- {"done":false,"next_subtask":"continue toward the intersection before turning right","memory_end":"Left the bedroom and followed the hall; approaching the dining-room opening, not at the turn yet; step ongoing"}
+- {"done":false,"next_subtask":"finish turning right toward the hallway","memory_end":"Reached the hallway entrance from the room; mid-turn toward the hallway; step ongoing"}
+- {"done":true,"next_subtask":"enter the bathroom","memory_end":"Cleared the dining area and reached the hall entrance; aligned with the bathroom approach; ready for next step"}
+- {"done":true,"next_subtask":"stop","memory_end":"Entered the bathroom and approached the sink; beside the sink in the stopping spot; task complete"}
 
 Bad examples:
+- {"done":true,"next_subtask":"turn right","memory_end":"At the intersection; ready for next step; turned down the hall"}
 - {"done":"RESUME","next_subtask":"continue","memory_end":"The agent is near the doorway."}
 - {"done":false,"next_subtask":"The rollout failed","memory_end":"This rollout failed because the agent is off-route."}
 """
@@ -296,7 +314,12 @@ def build_memory_start_messages(
         f"- Pivot frame: {int(record.get('pivot_frame', 0))}\n"
         "- Images are sampled from episode start to the pivot in time order.\n"
         "- First image = episode start. Last image = pivot.\n"
-        "Write memory_start in one sentence.\n"
+        "- Write memory_start as exactly three short semicolon-separated fragments.\n"
+        "- Use this exact order: traj summary; current state; neutral status.\n"
+        "- The first fragment must summarize the path already traveled before the pivot state.\n"
+        "- The third fragment must stay neutral, such as active step in progress, still on current step, or approach still ongoing.\n"
+        "- Do not use ready for next step or task complete.\n"
+        "- Make it the same format that memory_end will update later.\n"
         "- Keep only useful progress that still matters.\n"
         "- Make the current pivot state explicit.\n"
         "- Do not narrate frame by frame."
@@ -329,15 +352,25 @@ def build_rollout_messages(
         f"- Memory start: {memory_start}\n"
         f"- Rollout actions: {record['actions']}\n"
         "Decision\n"
-        "- If the active step reaches a natural handoff, set done=true.\n"
+        "- Set done=true only if the active step reaches a natural handoff by rollout end.\n"
+        "- The rollout end must also be a good starting point for the next subtask.\n"
+        "- Do not hand off early just because the active step looks mostly complete.\n"
+        "- If the next pending step is a turn, judge whether the robot has actually reached the turning point.\n"
+        "- If the active step is a turn, judge it together with the next pending step and only hand off once the robot is aligned for that next movement.\n"
         "- If the active step is still the right step, set done=false.\n"
         "- With done=false, next_subtask should continue the active step or give a short recovery step.\n"
         "- With done=true, next_subtask should describe the promoted pending step, or stop if pending is empty.\n"
         "Memory\n"
         "- Rewrite memory_start into a new cumulative watcher memory.\n"
         "- Keep only the still-relevant part of memory_start.\n"
-        "- Add only new progress that matters plus the current end state.\n"
-        "- Keep memory_end to exactly 1 short sentence."
+        "- Write memory_end as a direct update of memory_start.\n"
+        "- Prefer extending memory_start forward with the new observation and then compressing if needed.\n"
+        "- Do not reduce memory_end to only the final frame.\n"
+        "- Write memory_end as exactly three short semicolon-separated fragments.\n"
+        "- Use this exact order: traj summary; current state; task status.\n"
+        "- The first fragment must summarize the path already traveled before the final state.\n"
+        "- The third fragment must say whether the step is ongoing, ready for next step, or task complete.\n"
+        "- Sentence fragments are allowed."
     )
     content: List[Dict[str, Any]] = [{"type": "text", "text": user_text}]
     content.extend(encode_image_content(path) for path in image_paths)
