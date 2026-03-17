@@ -13,3 +13,9 @@
 [submodule "third_party/LLaVA-NeXT"]
 	path = third_party/LLaVA-NeXT
 	url = https://github.com/LLaVA-VL/LLaVA-NeXT.git
+[submodule "third_party/third_party/OmniNav"]
+	path = third_party/third_party/OmniNav
+	url = https://github.com/amap-cvlab/OmniNav.git
+[submodule "third_party/OmniNav"]
+	path = third_party/OmniNav
+	url = https://github.com/amap-cvlab/OmniNav.git
