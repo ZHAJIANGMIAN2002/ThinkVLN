@@ -1,7 +1,7 @@
 model:
   model_name_or_path: /mnt/swx/ThinkVLN/model_weights/qwen3vl-2
   num_query_tokens: 4
-  action_horizon: 5
+  action_horizon: 4
   action_dim: 2
   freeze_backbone: true
 
