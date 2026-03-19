@@ -5,7 +5,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-180}"
 MAX_RETRIES="${MAX_RETRIES:-4}"
-REASONING_EFFORT="${REASONING_EFFORT:-none}"
+REASONING_EFFORT="${REASONING_EFFORT:-high}"
 
 cmd=(
   python -m thinkvln.datagen.generation.watcher_openai_annotation
