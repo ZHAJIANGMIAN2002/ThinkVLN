@@ -497,6 +497,7 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         subgoal: str,
         episode_key: Optional[str] = None,
         subtask_id: Optional[int] = None,
+        hint: Optional[str] = None,
         sample_action: bool = False,
         action_generator: Optional[torch.Generator] = None,
         forbidden_actions: Optional[List[int]] = None,
@@ -520,11 +521,16 @@ class ThinkVLNActorNavigationModel(NavigationModel):
             if len(images) > 1
             else ""
         )
+        watcher_hint = (
+            f"Hint from watcher: {str(hint).strip()}\n"
+            if str(hint or "").strip()
+            else ""
+        )
         prompt = self.prompt_template.format(
             instruction=instruction,
             subgoal=subgoal,
             prev_progress=prev_progress_input,
-            memory_hint=memory_hint,
+            memory_hint=memory_hint + watcher_hint,
         )
         query_token_ids = self._build_query_token_id_list()
         self._last_debug_snapshot = {
@@ -578,6 +584,7 @@ class ThinkVLNActorNavigationModel(NavigationModel):
         subgoal: str,
         episode_key: Optional[str] = None,
         subtask_id: Optional[int] = None,
+        hint: Optional[str] = None,
     ) -> Tuple[int, float]:
         action, progress, _ = self.predict_action_with_progress_and_done(
             observation=observation,
@@ -585,6 +592,7 @@ class ThinkVLNActorNavigationModel(NavigationModel):
             subgoal=subgoal,
             episode_key=episode_key,
             subtask_id=subtask_id,
+            hint=hint,
         )
         return action, progress
 
@@ -604,6 +612,7 @@ class ThinkVLNActorNavigationModel(NavigationModel):
                 subgoal=subgoal,
                 episode_key=kwargs.get("episode_key"),
                 subtask_id=kwargs.get("subtask_id"),
+                hint=kwargs.get("hint"),
             )
             return action, None
         except Exception:
@@ -693,6 +702,7 @@ class ThinkVLNFMNavigationModel(ThinkVLNActorNavigationModel):
         subgoal: str,
         episode_key: Optional[str] = None,
         subtask_id: Optional[int] = None,
+        hint: Optional[str] = None,
         sample_action: bool = False,
         action_generator: Optional[torch.Generator] = None,
         forbidden_actions: Optional[List[int]] = None,
@@ -714,11 +724,16 @@ class ThinkVLNFMNavigationModel(ThinkVLNActorNavigationModel):
             selected_subtask_ids = [resolved_subtask_id]
 
         memory_hint = "Historical observations are provided.\n" if len(images) > 1 else ""
+        watcher_hint = (
+            f"Hint from watcher: {str(hint).strip()}\n"
+            if str(hint or "").strip()
+            else ""
+        )
         prompt = self.prompt_template.format(
             instruction=instruction,
             subgoal=subgoal,
             prev_progress=prev_progress_input,
-            memory_hint=memory_hint,
+            memory_hint=memory_hint + watcher_hint,
         )
         query_token_ids = self._build_query_token_id_list()
         self._last_debug_snapshot = {

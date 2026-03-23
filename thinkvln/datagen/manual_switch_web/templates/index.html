@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body data-page-size="{{ page_size }}">
+  <div class="page">
+    <div class="topbar">
+      <div>
+        <h1>{{ title }}</h1>
+        <p class="status-line">Watch the rollout video and decide whether the current task should switch to the next one.</p>
+      </div>
+      <div class="summary">
+        <span>Total: <strong id="total-count">{{ status.total }}</strong></span>
+        <span>Labeled: <strong id="labeled-count">{{ status.labeled }}</strong></span>
+        <span>Remaining: <strong id="remaining-count">{{ status.remaining }}</strong></span>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <label class="toolbar-item">
+        <span>View</span>
+        <select id="view-select">
+          <option value="pending" selected>Pending</option>
+          <option value="all">All</option>
+        </select>
+      </label>
+      <div class="pager">
+        <button id="prev-page" type="button">Prev</button>
+        <span id="page-info">Page 1 / 1</span>
+        <button id="next-page" type="button">Next</button>
+      </div>
+    </div>
+
+    <div id="flash" class="flash" hidden></div>
+    <div id="sample-list" class="sample-list"></div>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
