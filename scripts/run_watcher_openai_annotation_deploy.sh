@@ -21,7 +21,7 @@ DEBUG_DIR="${DEBUG_DIR_BASE}_${TS}"
 
 cmd=(
   python "thinkvln/datagen/generation/watcher_openai_annotation_deploy.py"
-  --gt_image_root "data/trajectory_data/R2R_back/r2r"
+  --gt_video_root "/mnt/swx/ThinkVLN/data/trajectory_data/R2R_back/images"
   --bundle_root "results/watcher_rollout_train_full_v2"
   --manifest_file "${MANIFEST_FILE}"
   --output_file "${OUT_FILE}"

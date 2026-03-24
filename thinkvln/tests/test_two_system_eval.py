@@ -297,6 +297,33 @@ class _FakeEnv:
         }
 
 
+class _LongFakeEnv:
+    def __init__(self):
+        self.current_episode = None
+        self.episode_over = False
+        self.step_count = 0
+        self.sim = SimpleNamespace(get_agent_state=self._get_agent_state)
+
+    def _get_agent_state(self):
+        return SimpleNamespace(
+            position=np.array([float(self.step_count), 0.0, 0.0], dtype=np.float32),
+            rotation=np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+        )
+
+    def reset(self):
+        self.step_count = 0
+        self.episode_over = False
+        return {"rgb": np.zeros((8, 8, 3), dtype=np.uint8)}
+
+    def step(self, action):
+        del action
+        self.step_count += 1
+        return {"rgb": np.full((8, 8, 3), self.step_count % 255, dtype=np.uint8)}
+
+    def get_metrics(self):
+        return {"success": 0.0, "distance_to_goal": float(max(0, 20 - self.step_count))}
+
+
 class _StagnantEnv:
     def __init__(self):
         self.current_episode = None
@@ -410,6 +437,7 @@ def _write_config(path: Path) -> None:
         "rollout": {
             "max_steps_per_wakeup": 10,
             "progress_threshold": 0.85,
+            "max_watcher_wakeups": 10,
             "episode_step_cap": 50,
             "forbidden_actions": [0],
         },
@@ -465,6 +493,16 @@ class TestTwoSystemEval:
         assert config["watcher"]["image_stride"] == 3
         assert config["rollout"]["max_steps_per_wakeup"] == 10
         assert config["debug"]["enabled"] is False
+
+    def test_local_debug20_config_exists_and_uses_local_watcher(self):
+        config = load_config("config/two_system_eval.local_debug20.yaml")
+
+        assert config["watcher"]["backend"] == "local"
+        assert config["watcher"]["model_path"] == "/mnt/swx/ThinkVLN/model_weights/qwen3vl-8"
+        assert config["output"]["save_debug_video"] is True
+        assert config["debug"]["sample_limit"] == 20
+        assert config["debug"]["sample_seed"] == 0
+        assert config["rollout"]["max_watcher_wakeups"] == 10
 
     def test_prompt_builders_use_unified_schema(self):
         image = Image.new("RGB", (8, 8), color=(1, 2, 3))
@@ -722,6 +760,31 @@ class TestTwoSystemEval:
         assert result["failure_reason"] == "stagnation"
         assert result["watcher_wakeups"] == 2
 
+    def test_episode_runner_stops_when_actor_call_cap_is_hit(self):
+        actor = _FakeNavModel([(1, 0.2, False)] * 5)
+        runner = TwoSystemEpisodeRunner(
+            nav_model=actor,
+            watcher_backend=_LoopingWatcher(),
+            max_steps_per_wakeup=10,
+            progress_threshold=0.95,
+            episode_step_cap=20,
+            forbidden_actions=[0],
+            max_actor_calls_per_episode=2,
+        )
+
+        result = runner.run_episode(
+            env=_FakeEnv(),
+            episode_key="scene_actor_cap",
+            instruction="go ahead",
+            plan_steps=["move forward"],
+        )
+
+        assert result["watcher_complete"] is False
+        assert result["failed"] is True
+        assert result["failure_reason"] == "actor_call_cap_exceeded"
+        assert result["steps_total"] == 2
+        assert len(actor.calls) == 2
+
     def test_episode_runner_captures_watcher_update_failures(self):
         actor = _FakeNavModel([(1, 0.9, False)])
         runner = TwoSystemEpisodeRunner(
@@ -835,6 +898,84 @@ class TestTwoSystemEval:
         assert result["watcher_wakeups"] == 1
         assert result["trace"]["watcher_events"][-1]["wakeup_reason"] == "max_steps_per_wakeup"
 
+    def test_episode_runner_increments_subtask_id_when_watcher_rewrites_subtask(self):
+        class _RewriteSubtaskWatcher:
+            def __init__(self):
+                self.update_calls = 0
+
+            def initialize(self, instruction, plan_steps, first_observation, episode_key):
+                del instruction, plan_steps, first_observation, episode_key
+                return WatcherDecision(
+                    memory="start memory",
+                    done=False,
+                    subtask="reach the doorway",
+                    raw_response={"memory": "start memory", "done": False, "subtask": "reach the doorway"},
+                    wakeup_reason="init",
+                )
+
+            def update(self, instruction, todo_state, memory_text, rollout_slice, episode_key):
+                del instruction, todo_state, memory_text, rollout_slice, episode_key
+                self.update_calls += 1
+                if self.update_calls == 1:
+                    return WatcherDecision(
+                        memory="new memory",
+                        done=False,
+                        subtask="cross the open area",
+                        raw_response={"memory": "new memory", "done": False, "subtask": "cross the open area"},
+                        wakeup_reason="progress_threshold",
+                    )
+                return WatcherDecision(
+                    memory="done",
+                    done=True,
+                    subtask="stop",
+                    raw_response={"memory": "done", "done": True, "subtask": "stop"},
+                    wakeup_reason="stop_action",
+                )
+
+        actor = _FakeNavModel([(1, 0.9, False), (0, 0.1, False)])
+        runner = TwoSystemEpisodeRunner(
+            nav_model=actor,
+            watcher_backend=_RewriteSubtaskWatcher(),
+            max_steps_per_wakeup=5,
+            progress_threshold=0.85,
+            episode_step_cap=10,
+            forbidden_actions=[],
+        )
+
+        result = runner.run_episode(
+            env=_FakeEnv(),
+            episode_key="scene_subtask_rewrite",
+            instruction="go ahead",
+            plan_steps=["move forward"],
+        )
+
+        assert result["failed"] is False
+        assert [call["subtask_id"] for call in actor.calls] == [1, 2]
+
+    def test_episode_runner_stops_when_watcher_wakeup_cap_is_hit(self):
+        actor = _FakeNavModel([(1, 0.9, False)] * 4)
+        runner = TwoSystemEpisodeRunner(
+            nav_model=actor,
+            watcher_backend=_LoopingWatcher(),
+            max_steps_per_wakeup=5,
+            progress_threshold=0.85,
+            episode_step_cap=10,
+            forbidden_actions=[],
+            max_watcher_wakeups=2,
+        )
+
+        result = runner.run_episode(
+            env=_LongFakeEnv(),
+            episode_key="scene_wakeup_cap",
+            instruction="go ahead",
+            plan_steps=["move forward"],
+        )
+
+        assert result["failed"] is True
+        assert result["failure_reason"] == "watcher_wakeup_cap_exceeded"
+        assert result["watcher_wakeups"] == 2
+        assert result["trace"]["watcher_events"][-1]["stage"] == "watcher_wakeup_cap"
+
     def test_episode_runner_does_not_step_env_for_stop_action(self):
         runner = TwoSystemEpisodeRunner(
             nav_model=_FakeNavModel([(0, 0.1, False)]),
@@ -942,12 +1083,14 @@ class TestTwoSystemEval:
                         {
                             "step_index": 0,
                             "env_step_index": 0,
+                            "instruction": "go to the sink",
                             "action": "forward",
                             "actor_progress": 0.2,
                             "actor_done": False,
                             "active_plan_step": "move",
                             "watcher_hint": "hint",
                             "watcher_subtask": "reach door",
+                            "actor_prompt": "Instruction: go to the sink\nSubgoal: reach door\nHint from watcher: hint",
                         }
                     ],
                     "watcher_events": [
@@ -969,6 +1112,35 @@ class TestTwoSystemEval:
         assert "forward" in html
         assert "Watcher Events" in html
         assert "reach door" in html
+        assert "go to the sink" in html
+        assert "Hint from watcher: hint" in html
+
+        sections = two_system_eval._build_debug_video_sections(
+            episode_key="scene_1",
+            step={
+                "step_index": 0,
+                "env_step_index": 0,
+                "instruction": "go to the sink",
+                "action": "forward",
+                "actor_progress": 0.2,
+                "actor_done": False,
+                "active_plan_step": "move",
+                "watcher_hint": "hint",
+                "watcher_subtask": "reach door",
+                "actor_prompt": "Instruction: go to the sink\nSubgoal: reach door\nHint from watcher: hint",
+            },
+            watcher_event={
+                "wakeup_reason": "init",
+                "done": False,
+                "subtask": "reach door",
+                "memory": "find the door",
+            },
+        )
+        flat_lines = "\n".join(f"{title}: {label}: {value}" for title, fields in sections for label, value in fields)
+        assert "Actor Input: Instruction: go to the sink" in flat_lines
+        assert "Actor Input: Subtask: reach door" in flat_lines
+        assert "Actor Input: Hint: hint" in flat_lines
+        assert "Actor Input: Prompt: Instruction: go to the sink" in flat_lines
 
         captured = {}
 
@@ -1005,12 +1177,14 @@ class TestTwoSystemEval:
                             "step_index": 0,
                             "env_step_index": 0,
                             "image": Image.new("RGB", (32, 24), color=(10, 20, 30)),
+                            "instruction": "go to the sink",
                             "action": "forward",
                             "actor_progress": 0.2,
                             "actor_done": False,
                             "active_plan_step": "move",
                             "watcher_hint": "hint",
                             "watcher_subtask": "reach door",
+                            "actor_prompt": "Instruction: go to the sink\nSubgoal: reach door\nHint from watcher: hint",
                         },
                         {
                             "step_index": 1,
@@ -1054,6 +1228,78 @@ class TestTwoSystemEval:
         assert len(captured["frames"]) == 1
         assert captured["size"][0] > 32
         assert captured["size"][1] >= 24
+        assert captured["released"] is True
+
+    def test_write_debug_video_pads_variable_height_frames(self, tmp_path: Path, monkeypatch):
+        captured = {}
+
+        class _FakeWriter:
+            def __init__(self, path, fourcc, fps, size):
+                captured["path"] = path
+                captured["fourcc"] = fourcc
+                captured["fps"] = fps
+                captured["size"] = size
+                captured["frames"] = []
+
+            def write(self, frame):
+                assert frame.shape[1] == captured["size"][0]
+                assert frame.shape[0] == captured["size"][1]
+                captured["frames"].append(frame.shape[:2])
+
+            def release(self):
+                captured["released"] = True
+
+        fake_cv2 = SimpleNamespace(
+            VideoWriter=lambda path, fourcc, fps, size: _FakeWriter(path, fourcc, fps, size),
+            VideoWriter_fourcc=lambda *args: 1234,
+            COLOR_RGB2BGR=1,
+            cvtColor=lambda frame, code: frame,
+        )
+        monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+
+        video_path = tmp_path / "debug" / "variable_height.mp4"
+        two_system_eval._write_debug_video(
+            video_path,
+            {
+                "episode_key": "scene_variable_height",
+                "trace": {
+                    "steps": [
+                        {
+                            "step_index": 0,
+                            "env_step_index": 0,
+                            "image": Image.new("RGB", (32, 24), color=(10, 20, 30)),
+                            "instruction": "go to the sink",
+                            "action": "forward",
+                            "actor_progress": 0.2,
+                            "actor_done": False,
+                            "active_plan_step": "move",
+                            "watcher_hint": "hint",
+                            "watcher_subtask": "reach door",
+                            "actor_prompt": "short prompt",
+                        },
+                        {
+                            "step_index": 1,
+                            "env_step_index": 1,
+                            "image": Image.new("RGB", (32, 24), color=(30, 20, 10)),
+                            "instruction": "go to the sink",
+                            "action": "forward",
+                            "actor_progress": 0.9,
+                            "actor_done": True,
+                            "active_plan_step": "move",
+                            "watcher_hint": "long hint " * 20,
+                            "watcher_subtask": "move carefully toward the far side of the room",
+                            "actor_prompt": "long prompt " * 40,
+                        },
+                    ],
+                    "watcher_events": [],
+                },
+            },
+            fps=3,
+        )
+
+        assert captured["fps"] == 3
+        assert len(captured["frames"]) == 2
+        assert captured["frames"][0] == captured["frames"][1]
         assert captured["released"] is True
 
         config_path = tmp_path / "two_system_eval.yaml"
@@ -1461,6 +1707,7 @@ class TestTwoSystemEval:
         config["debug"]["enabled"] = True
         config["debug"]["episode_key"] = ""
         config["debug"]["sample_limit"] = 2
+        config["debug"]["sample_seed"] = 0
         config["debug"]["output_dir"] = str(tmp_path / "results" / "debug_sample_2")
         config["debug"]["video_fps"] = 5
 
@@ -1497,12 +1744,15 @@ class TestTwoSystemEval:
             def reset_episode_state(self, episode_key=None):
                 del episode_key
 
+        selected_episode_keys = []
+
         def _run_episode(self, env, episode_key, instruction, plan_steps):
             del self, env
             outcomes = {
-                "scene_1": ("go ahead", ["move"], True, 1.0),
                 "scene_2": ("turn right", ["turn"], False, 0.0),
+                "scene_3": ("stop there", ["stop"], True, 1.0),
             }
+            selected_episode_keys.append(episode_key)
             expected_instruction, expected_plan, watcher_complete, success = outcomes[episode_key]
             assert instruction == expected_instruction
             assert plan_steps == expected_plan
@@ -1571,18 +1821,19 @@ class TestTwoSystemEval:
         assert summary["episodes_evaluated"] == 2
         assert summary["watcher_complete_rate"] == 0.5
         assert summary["avg_success"] == 0.5
+        assert selected_episode_keys == ["scene_2", "scene_3"]
         assert captured["target_episode_key"] == ""
         assert captured["sample_rate"] == 1.0
         assert captured["output_path"] == str(debug_dir)
         assert (debug_dir / "summary.json").is_file()
         assert (debug_dir / "episodes.jsonl").is_file()
-        assert (debug_dir / "episodes" / "scene_1.json").is_file()
         assert (debug_dir / "episodes" / "scene_2.json").is_file()
-        assert not (debug_dir / "episodes" / "scene_3.json").exists()
-        assert (debug_dir / "debug" / "scene_1.html").is_file()
+        assert (debug_dir / "episodes" / "scene_3.json").is_file()
+        assert not (debug_dir / "episodes" / "scene_1.json").exists()
         assert (debug_dir / "debug" / "scene_2.html").is_file()
-        assert (debug_dir / "debug_video" / "scene_1.mp4").is_file()
+        assert (debug_dir / "debug" / "scene_3.html").is_file()
         assert (debug_dir / "debug_video" / "scene_2.mp4").is_file()
+        assert (debug_dir / "debug_video" / "scene_3.mp4").is_file()
 
     def test_json_safe_handles_zero_dim_ndarray(self):
         payload = two_system_eval._json_safe(

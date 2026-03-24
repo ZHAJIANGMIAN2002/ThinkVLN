@@ -11,32 +11,66 @@
     <div class="topbar">
       <div>
         <h1>{{ title }}</h1>
-        <p class="status-line">Watch the rollout video and decide whether the current task should switch to the next one.</p>
+        <p class="status-line">Multi-user queue annotation with invite-based registration.</p>
       </div>
       <div class="summary">
-        <span>Total: <strong id="total-count">{{ status.total }}</strong></span>
-        <span>Labeled: <strong id="labeled-count">{{ status.labeled }}</strong></span>
-        <span>Remaining: <strong id="remaining-count">{{ status.remaining }}</strong></span>
+        <span>User: <strong id="current-user">guest</strong></span>
+        <span>Role: <strong id="current-role">-</strong></span>
+        <span>Total: <strong id="total-count">0</strong></span>
+        <span>Labeled: <strong id="labeled-count">0</strong></span>
+        <span>Remaining: <strong id="remaining-count">0</strong></span>
+        <span>Mine Done: <strong id="mine-done-count">0</strong></span>
       </div>
     </div>
 
-    <div class="toolbar">
-      <label class="toolbar-item">
-        <span>View</span>
-        <select id="view-select">
-          <option value="pending" selected>Pending</option>
-          <option value="all">All</option>
-        </select>
-      </label>
-      <div class="pager">
-        <button id="prev-page" type="button">Prev</button>
-        <span id="page-info">Page 1 / 1</span>
-        <button id="next-page" type="button">Next</button>
+    <div id="auth-panel" class="panel">
+      <div class="auth-columns">
+        <section class="auth-card">
+          <h2>Login</h2>
+          <div class="form-grid">
+            <input id="login-username" placeholder="username" autocomplete="username" />
+            <input id="login-password" type="password" placeholder="password" autocomplete="current-password" />
+            <button id="login-btn" type="button">Login</button>
+          </div>
+        </section>
+        <section class="auth-card">
+          <h2>Register With Invite</h2>
+          <div class="form-grid">
+            <input id="register-username" placeholder="username" autocomplete="username" />
+            <input id="register-password" type="password" placeholder="password" autocomplete="new-password" />
+            <input id="register-invite" placeholder="invite code" />
+            <button id="register-btn" type="button">Create Account</button>
+          </div>
+        </section>
       </div>
+    </div>
+
+    <div id="workspace-panel" class="panel" hidden>
+      <div class="toolbar">
+        <button id="claim-btn" type="button">Claim Next Task</button>
+        <button id="refresh-btn" type="button">Refresh Status</button>
+        <button id="logout-btn" type="button">Logout</button>
+      </div>
+      <div id="sample-list" class="sample-list"></div>
+    </div>
+
+    <div id="admin-panel" class="panel" hidden>
+      <section class="admin-card">
+        <h2>Admin - Create Invite</h2>
+        <div class="form-row">
+          <label>Uses <input id="invite-uses" type="number" min="1" value="1" /></label>
+          <label>Expires (days, optional) <input id="invite-days" type="number" min="1" /></label>
+          <button id="create-invite-btn" type="button">Create Invite</button>
+        </div>
+        <p id="invite-output" class="muted"></p>
+      </section>
+      <section class="admin-card">
+        <h2>Admin - User Progress</h2>
+        <div id="admin-users"></div>
+      </section>
     </div>
 
     <div id="flash" class="flash" hidden></div>
-    <div id="sample-list" class="sample-list"></div>
   </div>
   <script src="/static/app.js"></script>
 </body>

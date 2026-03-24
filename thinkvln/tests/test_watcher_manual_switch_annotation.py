@@ -107,6 +107,8 @@ class TestWatcherManualSwitchAnnotation:
                 manifest_file=manifest_file,
                 output_file=output_file,
                 page_size=1,
+                max_samples=2,
+                bootstrap_admin_password="secret",
             )
         )
 
@@ -137,6 +139,110 @@ class TestWatcherManualSwitchAnnotation:
         todo_sample = next(sample for sample in all_samples if sample["sample_id"] == "todo_p000011_r01")
         assert todo_sample["annotation"]["should_switch"] is False
 
+    def test_build_store_defaults_to_seeded_random_ten_percent_sample(self, tmp_path: Path):
+        bundle_root = tmp_path / "bundle"
+        image_root = bundle_root / "images"
+        manifest_file = tmp_path / "manifest.jsonl"
+        output_file = tmp_path / "human_switch.jsonl"
+        lines = []
+        for idx in range(20):
+            pivot_path = image_root / "pivot" / "ep" / f"pivot_{idx:06d}_rgb.jpg"
+            rollout_path = image_root / "rollout" / "ep" / f"pivot_{idx:06d}" / "rollout_01" / "000000_rgb.jpg"
+            for image_path in [pivot_path, rollout_path]:
+                image_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (8, 8), color=(7, 0, 0)).save(image_path)
+            lines.append(
+                json.dumps(
+                    {
+                        "sample_id": f"sample_{idx:02d}",
+                        "episode_key": f"ep_{idx:02d}",
+                        "scene_id": "scene",
+                        "episode_id": idx,
+                        "pivot_frame": idx,
+                        "rollout_id": 1,
+                        "subtask_id": 1,
+                        "instruction": "Go to the room.",
+                        "plan": ["Enter the room."],
+                        "base_image_path": "images",
+                        "pivot_image_relpath": f"pivot/ep/pivot_{idx:06d}_rgb.jpg",
+                        "rollout_image_relpaths": [f"rollout/ep/pivot_{idx:06d}/rollout_01/000000_rgb.jpg"],
+                    }
+                )
+            )
+        manifest_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        store = build_store(
+            ManualSwitchConfig(
+                bundle_root=bundle_root,
+                manifest_file=manifest_file,
+                output_file=output_file,
+                seed=42,
+                bootstrap_admin_password="secret",
+            )
+        )
+
+        assert len(store.samples) == 2
+        assert [sample["sample_id"] for sample in store.samples] == ["sample_19", "sample_05"]
+
+    def test_build_store_reconciles_stale_tasks_when_sample_set_changes(self, tmp_path: Path):
+        bundle_root = tmp_path / "bundle"
+        image_root = bundle_root / "images"
+        manifest_file = tmp_path / "manifest.jsonl"
+        output_file = tmp_path / "human_switch.jsonl"
+        database_file = tmp_path / "manual_switch.sqlite3"
+        lines = []
+        for idx in range(3):
+            pivot_path = image_root / "pivot" / "ep" / f"pivot_{idx:06d}_rgb.jpg"
+            rollout_path = image_root / "rollout" / "ep" / f"pivot_{idx:06d}" / "rollout_01" / "000000_rgb.jpg"
+            for image_path in [pivot_path, rollout_path]:
+                image_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (8, 8), color=(7, 0, 0)).save(image_path)
+            lines.append(
+                json.dumps(
+                    {
+                        "sample_id": f"sample_{idx:02d}",
+                        "episode_key": f"ep_{idx:02d}",
+                        "scene_id": "scene",
+                        "episode_id": idx,
+                        "pivot_frame": idx,
+                        "rollout_id": 1,
+                        "subtask_id": 1,
+                        "instruction": "Go to the room.",
+                        "plan": ["Enter the room."],
+                        "base_image_path": "images",
+                        "pivot_image_relpath": f"pivot/ep/pivot_{idx:06d}_rgb.jpg",
+                        "rollout_image_relpaths": [f"rollout/ep/pivot_{idx:06d}/rollout_01/000000_rgb.jpg"],
+                    }
+                )
+            )
+        manifest_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        build_store(
+            ManualSwitchConfig(
+                bundle_root=bundle_root,
+                manifest_file=manifest_file,
+                output_file=output_file,
+                database_file=database_file,
+                max_samples=3,
+                bootstrap_admin_password="secret",
+            )
+        )
+
+        store = build_store(
+            ManualSwitchConfig(
+                bundle_root=bundle_root,
+                manifest_file=manifest_file,
+                output_file=output_file,
+                database_file=database_file,
+                max_samples=1,
+                bootstrap_admin_password="secret",
+            )
+        )
+
+        assert len(store.samples) == 1
+        assert store.status()["total"] == 1
+        assert list(store.sample_by_id) == ["sample_00"]
+
     def test_frontend_assets_drop_download_flow_and_keep_replay_logic(self):
         page = (APP_DIR / "templates" / "index.html").read_text(encoding="utf-8")
         script = (APP_DIR / "static" / "app.js").read_text(encoding="utf-8")
@@ -147,5 +253,10 @@ class TestWatcherManualSwitchAnnotation:
         assert "Download JSONL" not in script
         assert "async function fetchSamples" in script
         assert 'fetch("/api/annotations"' in script
+        assert "Instruction" not in script
+        assert "Done Plan" not in script
+        assert "Pending Plan" not in script
+        assert "Current Task" in script
+        assert "Next Task If Switched" in script
         assert "if (frameIndex >= frames.length - 1)" in script
         assert "renderFrame(0);" in script

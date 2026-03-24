@@ -1,9 +1,8 @@
 const state = {
-  page: 1,
-  pageSize: Number(document.body.dataset.pageSize || 20),
-  totalPages: 1,
-  view: "pending",
   loading: false,
+  token: localStorage.getItem("manualSwitchToken") || "",
+  user: null,
+  sample: null,
 };
 
 function escapeHtml(value) {
@@ -26,36 +25,44 @@ function setFlash(message) {
   flash.textContent = message;
 }
 
-function renderStatus(status) {
+function renderStatus(status = {}) {
   document.getElementById("total-count").textContent = String(status.total);
   document.getElementById("labeled-count").textContent = String(status.labeled);
   document.getElementById("remaining-count").textContent = String(status.remaining);
+  document.getElementById("mine-done-count").textContent = String(status.mine_done || 0);
 }
 
-function renderPager(page, totalPages) {
-  state.page = page;
-  state.totalPages = totalPages;
-  document.getElementById("page-info").textContent = `Page ${page} / ${totalPages}`;
-  document.getElementById("prev-page").disabled = page <= 1 || state.loading;
-  document.getElementById("next-page").disabled = page >= totalPages || state.loading;
+function authHeaders() {
+  if (!state.token) {
+    return {};
+  }
+  return { Authorization: `Bearer ${state.token}` };
 }
 
-async function fetchSamples(page) {
-  const response = await fetch(`/api/samples?page=${page}&page_size=${state.pageSize}&view=${state.view}`);
+async function postJson(url, body, withAuth = false) {
+  const headers = { "Content-Type": "application/json" };
+  if (withAuth) {
+    Object.assign(headers, authHeaders());
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body || {}),
+  });
   if (!response.ok) {
-    throw new Error(`failed to load samples: ${response.status}`);
+    const text = await response.text();
+    throw new Error(text || `request failed: ${response.status}`);
   }
   return response.json();
 }
 
-async function saveAnnotation(sampleId, shouldSwitch) {
-  const response = await fetch("/api/annotations", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sample_id: sampleId, should_switch: shouldSwitch }),
+async function getJson(url, withAuth = false) {
+  const response = await fetch(url, {
+    headers: withAuth ? authHeaders() : {},
   });
   if (!response.ok) {
-    throw new Error(`failed to save annotation: ${response.status}`);
+    const text = await response.text();
+    throw new Error(text || `request failed: ${response.status}`);
   }
   return response.json();
 }
@@ -76,6 +83,15 @@ function renderDecision(card, annotation) {
   }
   card.classList.add(annotation.should_switch ? "is-switch" : "is-stay");
   valueNode.textContent = rawValue;
+}
+
+function applyAuthState() {
+  const authed = Boolean(state.user);
+  document.getElementById("auth-panel").hidden = authed;
+  document.getElementById("workspace-panel").hidden = !authed;
+  document.getElementById("admin-panel").hidden = !authed || state.user.role !== "admin";
+  document.getElementById("current-user").textContent = authed ? state.user.username : "guest";
+  document.getElementById("current-role").textContent = authed ? state.user.role : "-";
 }
 
 function loadImageFrame(url) {
@@ -176,8 +192,6 @@ function initPlayer(card) {
 }
 
 function buildSampleCard(sample) {
-  const doneSteps = sample.done_steps.length ? `<ul>${sample.done_steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ul>` : "<p>None</p>";
-  const pendingSteps = sample.pending_steps.length ? `<ul>${sample.pending_steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ul>` : "<p>None</p>";
   return `
     <section class="sample-card" data-sample-id="${escapeHtml(sample.sample_id)}" data-frames='${escapeHtml(JSON.stringify(sample.rollout_frame_urls))}'>
       <div class="card-head">
@@ -193,20 +207,8 @@ function buildSampleCard(sample) {
       </div>
       <div class="context-grid">
         <div class="context-block">
-          <span class="label">Instruction</span>
-          <p>${escapeHtml(sample.instruction)}</p>
-        </div>
-        <div class="context-block">
-          <span class="label">Done Plan</span>
-          ${doneSteps}
-        </div>
-        <div class="context-block">
           <span class="label">Current Task</span>
           <p>${escapeHtml(sample.active_subtask)}</p>
-        </div>
-        <div class="context-block">
-          <span class="label">Pending Plan</span>
-          ${pendingSteps}
         </div>
         <div class="context-block">
           <span class="label">Next Task If Switched</span>
@@ -243,9 +245,9 @@ function bindSampleCard(card, sample) {
       try {
         state.loading = true;
         setFlash("Saving...");
-        const payload = await saveAnnotation(sample.sample_id, shouldSwitch);
+        const payload = await postJson(`/api/tasks/${encodeURIComponent(sample.sample_id)}/annotate`, { should_switch: shouldSwitch }, true);
         renderStatus(payload.status);
-        await loadPage(state.page);
+        await claimNext();
         setFlash("");
       } catch (error) {
         setFlash(error.message);
@@ -256,50 +258,162 @@ function bindSampleCard(card, sample) {
   });
 }
 
-async function loadPage(page) {
+function renderSample(sample) {
   state.loading = true;
-  renderPager(state.page, state.totalPages);
+  const list = document.getElementById("sample-list");
+  if (!sample) {
+    list.innerHTML = "<p class=\"muted\">No pending tasks in queue.</p>";
+    return;
+  }
+  list.innerHTML = buildSampleCard(sample);
+  const card = list.querySelector(`[data-sample-id="${CSS.escape(sample.sample_id)}"]`);
+  if (card) {
+    bindSampleCard(card, sample);
+  }
+}
+
+async function claimNext() {
   const list = document.getElementById("sample-list");
   try {
-    const payload = await fetchSamples(page);
+    list.innerHTML = "<p class=\"muted\">Claiming next task...</p>";
+    const payload = await postJson("/api/tasks/claim", {}, true);
     renderStatus(payload.status);
-    renderPager(payload.page, payload.total_pages);
-    if (!payload.samples.length && payload.page > 1) {
-      state.loading = false;
-      return loadPage(payload.page - 1);
-    }
-    list.innerHTML = payload.samples.length ? payload.samples.map((sample) => buildSampleCard(sample)).join("") : "<p class=\"muted\">No samples on this page.</p>";
-    payload.samples.forEach((sample) => {
-      const card = list.querySelector(`[data-sample-id="${CSS.escape(sample.sample_id)}"]`);
-      if (card) {
-        bindSampleCard(card, sample);
-      }
-    });
+    state.sample = payload.sample;
+    renderSample(payload.sample);
     setFlash("");
   } catch (error) {
     list.innerHTML = "";
     setFlash(error.message);
   } finally {
     state.loading = false;
-    renderPager(state.page, state.totalPages);
   }
 }
 
-document.getElementById("view-select").addEventListener("change", (event) => {
-  state.view = event.target.value;
-  loadPage(1);
-});
+async function refreshMe() {
+  if (!state.token) {
+    state.user = null;
+    state.sample = null;
+    applyAuthState();
+    renderStatus({ total: 0, labeled: 0, remaining: 0, mine_done: 0 });
+    renderSample(null);
+    return;
+  }
+  try {
+    const payload = await getJson("/api/me", true);
+    state.user = payload.user;
+    applyAuthState();
+    renderStatus(payload.status || {});
+    await claimNext();
+    if (state.user.role === "admin") {
+      await refreshAdminUsers();
+    }
+  } catch (error) {
+    localStorage.removeItem("manualSwitchToken");
+    state.token = "";
+    state.user = null;
+    applyAuthState();
+    setFlash(error.message);
+  }
+}
 
-document.getElementById("prev-page").addEventListener("click", () => {
-  if (state.page > 1 && !state.loading) {
-    loadPage(state.page - 1);
+async function refreshAdminUsers() {
+  if (!state.user || state.user.role !== "admin") {
+    return;
+  }
+  const box = document.getElementById("admin-users");
+  try {
+    const payload = await getJson("/api/admin/users", true);
+    const rows = payload.users || [];
+    if (!rows.length) {
+      box.innerHTML = "<p class=\"muted\">No users.</p>";
+      return;
+    }
+    box.innerHTML = `
+      <table class="user-table">
+        <thead><tr><th>Username</th><th>Role</th><th>Active</th><th>Done</th></tr></thead>
+        <tbody>
+          ${rows.map((row) => `
+            <tr>
+              <td>${escapeHtml(row.username)}</td>
+              <td>${escapeHtml(row.role)}</td>
+              <td>${row.is_active ? "yes" : "no"}</td>
+              <td>${escapeHtml(row.done_count)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+  } catch (error) {
+    box.innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`;
+  }
+}
+
+document.getElementById("login-btn").addEventListener("click", async () => {
+  try {
+    setFlash("Logging in...");
+    const payload = await postJson("/api/auth/login", {
+      username: document.getElementById("login-username").value.trim(),
+      password: document.getElementById("login-password").value,
+    });
+    state.token = payload.token;
+    localStorage.setItem("manualSwitchToken", state.token);
+    state.user = payload.user;
+    applyAuthState();
+    setFlash("");
+    await refreshMe();
+  } catch (error) {
+    setFlash(error.message);
   }
 });
 
-document.getElementById("next-page").addEventListener("click", () => {
-  if (state.page < state.totalPages && !state.loading) {
-    loadPage(state.page + 1);
+document.getElementById("register-btn").addEventListener("click", async () => {
+  try {
+    setFlash("Registering...");
+    await postJson("/api/auth/register", {
+      username: document.getElementById("register-username").value.trim(),
+      password: document.getElementById("register-password").value,
+      invite_code: document.getElementById("register-invite").value.trim(),
+    });
+    setFlash("Register success. Please login.");
+  } catch (error) {
+    setFlash(error.message);
   }
 });
 
-loadPage(1);
+document.getElementById("claim-btn").addEventListener("click", async () => {
+  await claimNext();
+});
+
+document.getElementById("refresh-btn").addEventListener("click", async () => {
+  await refreshMe();
+});
+
+document.getElementById("logout-btn").addEventListener("click", () => {
+  localStorage.removeItem("manualSwitchToken");
+  state.token = "";
+  state.user = null;
+  state.sample = null;
+  applyAuthState();
+  renderSample(null);
+  renderStatus({ total: 0, labeled: 0, remaining: 0, mine_done: 0 });
+  setFlash("");
+});
+
+document.getElementById("create-invite-btn").addEventListener("click", async () => {
+  try {
+    const payload = await postJson("/api/admin/invites", {
+      remaining_uses: Number(document.getElementById("invite-uses").value || 1),
+      expires_in_days: document.getElementById("invite-days").value
+        ? Number(document.getElementById("invite-days").value)
+        : null,
+    }, true);
+    const invite = payload.invite;
+    document.getElementById("invite-output").textContent = `Invite code: ${invite.code} (uses=${invite.remaining_uses})`;
+    await refreshAdminUsers();
+  } catch (error) {
+    setFlash(error.message);
+  }
+});
+
+applyAuthState();
+refreshMe();

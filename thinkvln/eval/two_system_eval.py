@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import os
+import random
 import sys
 import textwrap
 from dataclasses import dataclass, replace
@@ -30,6 +31,7 @@ from thinkvln.eval.close_eval_utils import load_summary_full, parse_plan_steps, 
 logger = logging.getLogger(__name__)
 
 DEFAULT_STAGNATION_DISTANCE = 0.05
+MAX_ACTOR_CALLS_PER_EPISODE = 128
 DATAGEN_WATCHER_MODEL_NAME = "qwen/qwen3.5-397b-a17b"
 DATAGEN_WATCHER_API_BASE_URL = "https://openrouter.ai/api/v1"
 DATAGEN_WATCHER_API_KEY_ENV = "OPENROUTER_API_KEY"
@@ -97,6 +99,7 @@ REQUIRED_CONFIG_KEYS = {
     "rollout": {
         "max_steps_per_wakeup",
         "progress_threshold",
+        "max_watcher_wakeups",
         "episode_step_cap",
         "forbidden_actions",
     },
@@ -396,6 +399,10 @@ def _debug_sample_limit(config: Dict[str, Any]) -> int:
     return limit
 
 
+def _debug_sample_seed(config: Dict[str, Any]) -> int:
+    return int(config["debug"].get("sample_seed", 0) or 0)
+
+
 def _debug_output_dir(config: Dict[str, Any], episode_key: str = "") -> Path:
     configured = str(config["debug"]["output_dir"] or "").strip()
     if configured:
@@ -456,6 +463,8 @@ def _debug_episode_payload(
             "debug": {
                 "enabled": bool(config["debug"]["enabled"]),
                 "episode_key": config["debug"]["episode_key"],
+                "sample_limit": int(config["debug"].get("sample_limit", 1) or 1),
+                "sample_seed": int(config["debug"].get("sample_seed", 0) or 0),
                 "output_dir": str(output_dir),
                 "video_fps": int(config["debug"]["video_fps"]),
             },
@@ -474,6 +483,17 @@ def _debug_batch_summary(episode_results: Sequence[Dict[str, Any]]) -> Dict[str,
         "avg_watcher_wakeups": sum(float(item["watcher_wakeups"]) for item in episode_results) / denom,
         "avg_success": sum(float(item["metrics"].get("success", 0.0)) for item in episode_results) / denom,
     }
+
+
+def _sample_debug_candidates(
+    candidates: Sequence[tuple[str, Any, Dict[str, Any]]],
+    sample_limit: int,
+    sample_seed: int,
+) -> List[tuple[str, Any, Dict[str, Any]]]:
+    items = list(candidates)
+    if len(items) <= int(sample_limit):
+        return items
+    return random.Random(int(sample_seed)).sample(items, int(sample_limit))
 
 
 def _write_debug_episode_artifacts(
@@ -767,14 +787,18 @@ class TwoSystemEpisodeRunner:
         max_steps_per_wakeup: int,
         progress_threshold: float,
         episode_step_cap: int,
+        max_watcher_wakeups: Optional[int] = None,
         forbidden_actions: Optional[Sequence[int]] = None,
+        max_actor_calls_per_episode: int = MAX_ACTOR_CALLS_PER_EPISODE,
     ):
         self.nav_model = nav_model
         self.watcher_backend = watcher_backend
         self.max_steps_per_wakeup = max(1, int(max_steps_per_wakeup))
         self.progress_threshold = float(progress_threshold)
+        self.max_watcher_wakeups = None if max_watcher_wakeups is None else max(1, int(max_watcher_wakeups))
         self.episode_step_cap = max(1, int(episode_step_cap))
         self.forbidden_actions = [int(action) for action in (forbidden_actions or [])]
+        self.max_actor_calls_per_episode = max(1, int(max_actor_calls_per_episode))
         self.stagnation_distance_threshold = DEFAULT_STAGNATION_DISTANCE
 
     @staticmethod
@@ -802,6 +826,7 @@ class TwoSystemEpisodeRunner:
     def _step_record(
         self,
         observation_image: Image.Image,
+        instruction: str,
         episode_key: str,
         step_index: int,
         env_step_index: Optional[int],
@@ -822,6 +847,7 @@ class TwoSystemEpisodeRunner:
         return {
             "step_index": int(step_index),
             "env_step_index": None if env_step_index is None else int(env_step_index),
+            "instruction": instruction,
             "image_ref": f"{episode_key}:step:{int(step_index):06d}",
             "image": observation_image,
             "action_id": int(action),
@@ -837,6 +863,7 @@ class TwoSystemEpisodeRunner:
             "step_in_rollout": int(step_in_rollout),
             "is_rollout_start": bool(step_in_rollout == 0),
             "is_rollout_end": False,
+            "actor_prompt": None if not debug_snapshot else debug_snapshot.get("prompt"),
             "predicted_waypoint": None if not debug_snapshot else debug_snapshot.get("waypoint_first"),
         }
 
@@ -929,6 +956,46 @@ class TwoSystemEpisodeRunner:
                 "previous_memory": previous_memory,
                 "rollout_step_indices": [int(item["step_index"]) for item in rollout_slice],
             }
+        )
+
+    @staticmethod
+    def _actor_subtask_signature(todo_state: WatcherTodoState, decision: WatcherDecision) -> tuple[str, str]:
+        return (
+            str(todo_state.active_step or "").strip(),
+            str(decision.subtask or todo_state.active_step or "").strip(),
+        )
+
+    def _watcher_wakeup_cap_result(
+        self,
+        episode_key: str,
+        trace: Dict[str, Any],
+        rollout_slice: Sequence[Dict[str, Any]],
+        wakeup_reason: str,
+        done_steps: Sequence[str],
+        steps_total: int,
+        watcher_wakeups: int,
+        final_memory: str,
+        env: Any,
+    ) -> Dict[str, Any]:
+        trace["watcher_events"].append(
+            {
+                "type": "error",
+                "stage": "watcher_wakeup_cap",
+                "error": "watcher wakeup cap exceeded",
+                "wakeup_reason": wakeup_reason,
+                "rollout_step_indices": [int(item["step_index"]) for item in rollout_slice],
+            }
+        )
+        return self._failure_result(
+            episode_key=episode_key,
+            trace=trace,
+            done_steps=done_steps,
+            steps_total=steps_total,
+            watcher_wakeups=watcher_wakeups,
+            final_memory=final_memory,
+            env=env,
+            failure_reason="watcher_wakeup_cap_exceeded",
+            error=f"Watcher wakeups reached cap {self.max_watcher_wakeups}.",
         )
 
     @staticmethod
@@ -1047,10 +1114,33 @@ class TwoSystemEpisodeRunner:
         episode_over = bool(getattr(env, "episode_over", False))
         rollout_index = 0
         last_active_step_end_position: Optional[np.ndarray] = None
+        actor_calls_total = 0
+        actor_subtask_id = 1
+        actor_subtask_signature = self._actor_subtask_signature(todo_state, current_decision)
 
         while steps_total < self.episode_step_cap and not watcher_complete and not episode_over:
             rollout_slice: List[Dict[str, Any]] = []
             while steps_total < self.episode_step_cap and not watcher_complete and not episode_over:
+                if actor_calls_total >= self.max_actor_calls_per_episode:
+                    trace["watcher_events"].append(
+                        {
+                            "type": "error",
+                            "stage": "actor_call_cap",
+                            "error": "actor call cap exceeded",
+                            "rollout_step_indices": [int(item["step_index"]) for item in rollout_slice],
+                        }
+                    )
+                    return self._failure_result(
+                        episode_key=episode_key,
+                        trace=trace,
+                        done_steps=done_steps,
+                        steps_total=steps_total,
+                        watcher_wakeups=watcher_wakeups,
+                        final_memory=current_decision.memory,
+                        env=env,
+                        failure_reason="actor_call_cap_exceeded",
+                        error=f"Actor was called {actor_calls_total} times, reached cap {self.max_actor_calls_per_episode}.",
+                    )
                 observation_image = self._observation_to_image(current_observation)
                 watcher_hint = current_decision.memory
                 watcher_subtask = current_decision.subtask or todo_state.active_step
@@ -1059,14 +1149,16 @@ class TwoSystemEpisodeRunner:
                     instruction=instruction,
                     subgoal=watcher_subtask,
                     episode_key=episode_key,
-                    subtask_id=len(done_steps) + 1,
+                    subtask_id=actor_subtask_id,
                     hint=watcher_hint or None,
                     forbidden_actions=self.forbidden_actions,
                 )
+                actor_calls_total += 1
 
                 if int(action) == 0:
                     step_record = self._step_record(
                         observation_image=observation_image,
+                        instruction=instruction,
                         episode_key=episode_key,
                         step_index=decision_index,
                         env_step_index=None,
@@ -1086,6 +1178,18 @@ class TwoSystemEpisodeRunner:
                     self._log_actor_decision(episode_key=episode_key, step_record=step_record)
                     decision_index += 1
                     previous_memory = current_decision.memory
+                    if self.max_watcher_wakeups is not None and watcher_wakeups >= self.max_watcher_wakeups:
+                        return self._watcher_wakeup_cap_result(
+                            episode_key=episode_key,
+                            trace=trace,
+                            rollout_slice=rollout_slice,
+                            wakeup_reason="stop_action",
+                            done_steps=done_steps,
+                            steps_total=steps_total,
+                            watcher_wakeups=watcher_wakeups,
+                            final_memory=previous_memory,
+                            env=env,
+                        )
                     try:
                         watcher_decision = self.watcher_backend.update(
                             instruction=instruction,
@@ -1151,6 +1255,10 @@ class TwoSystemEpisodeRunner:
                         previous_memory=previous_memory,
                     )
                     current_decision = watcher_decision
+                    new_signature = self._actor_subtask_signature(todo_state, current_decision)
+                    if new_signature != actor_subtask_signature:
+                        actor_subtask_id += 1
+                        actor_subtask_signature = new_signature
                     rollout_index += 1
                     break
 
@@ -1158,6 +1266,7 @@ class TwoSystemEpisodeRunner:
                 episode_over = bool(getattr(env, "episode_over", False))
                 step_record = self._step_record(
                     observation_image=observation_image,
+                    instruction=instruction,
                     episode_key=episode_key,
                     step_index=decision_index,
                     env_step_index=steps_total,
@@ -1187,6 +1296,18 @@ class TwoSystemEpisodeRunner:
                 if wakeup_reason:
                     rollout_slice[-1]["is_rollout_end"] = True
                     previous_memory = current_decision.memory
+                    if self.max_watcher_wakeups is not None and watcher_wakeups >= self.max_watcher_wakeups:
+                        return self._watcher_wakeup_cap_result(
+                            episode_key=episode_key,
+                            trace=trace,
+                            rollout_slice=rollout_slice,
+                            wakeup_reason=wakeup_reason,
+                            done_steps=done_steps,
+                            steps_total=steps_total,
+                            watcher_wakeups=watcher_wakeups,
+                            final_memory=previous_memory,
+                            env=env,
+                        )
                     try:
                         watcher_decision = self.watcher_backend.update(
                             instruction=instruction,
@@ -1278,6 +1399,10 @@ class TwoSystemEpisodeRunner:
                         previous_memory=previous_memory,
                     )
                     current_decision = watcher_decision
+                    new_signature = self._actor_subtask_signature(todo_state, current_decision)
+                    if new_signature != actor_subtask_signature:
+                        actor_subtask_id += 1
+                        actor_subtask_signature = new_signature
                     rollout_index += 1
                     break
 
@@ -1346,12 +1471,14 @@ def _write_debug_html(path: Path, episode_result: Dict[str, Any]) -> None:
             "<tr>"
             f"<td>{int(step.get('step_index', 0))}</td>"
             f"<td>{'' if step.get('env_step_index') is None else int(step['env_step_index'])}</td>"
+            f"<td><pre>{html_lib.escape(str(step.get('instruction', '')))}</pre></td>"
             f"<td>{html_lib.escape(str(step.get('action', '')))}</td>"
             f"<td>{float(step.get('actor_progress', 0.0)):.3f}</td>"
             f"<td>{html_lib.escape(str(step.get('actor_done', False)))}</td>"
             f"<td>{html_lib.escape(str(step.get('active_plan_step', '')))}</td>"
             f"<td>{html_lib.escape(str(step.get('watcher_subtask', '')))}</td>"
             f"<td><pre>{html_lib.escape(str(step.get('watcher_hint', '')))}</pre></td>"
+            f"<td><pre>{html_lib.escape(str(step.get('actor_prompt', '')))}</pre></td>"
             "</tr>"
         )
     watcher_rows = []
@@ -1373,7 +1500,7 @@ def _write_debug_html(path: Path, episode_result: Dict[str, Any]) -> None:
         f"<h1>{html_lib.escape(str(episode_result['episode_key']))}</h1>"
         "<h2>Actor Steps</h2>"
         "<table border='1'>"
-        "<tr><th>Decision</th><th>Env Step</th><th>Action</th><th>Progress</th><th>Done</th><th>Active Step</th><th>Watcher Subtask</th><th>Watcher Hint</th></tr>"
+        "<tr><th>Decision</th><th>Env Step</th><th>Instruction</th><th>Action</th><th>Progress</th><th>Done</th><th>Active Step</th><th>Watcher Subtask</th><th>Watcher Hint</th><th>Actor Prompt</th></tr>"
         f"{''.join(step_rows)}"
         "</table>"
         "<h2>Watcher Events</h2>"
@@ -1414,6 +1541,73 @@ def _draw_wrapped_text(
     return y
 
 
+def _build_debug_video_sections(
+    episode_key: str,
+    step: Dict[str, Any],
+    watcher_event: Optional[Dict[str, Any]] = None,
+) -> List[tuple[str, List[tuple[str, Any]]]]:
+    sections: List[tuple[str, List[tuple[str, Any]]]] = [
+        (
+            "Episode",
+            [
+                ("Episode", episode_key),
+                ("Decision", step.get("step_index", "")),
+                ("Env Step", step.get("env_step_index", "-")),
+            ],
+        ),
+        (
+            "Actor Input",
+            [
+                ("Instruction", step.get("instruction", "")),
+                ("Active Step", step.get("active_plan_step", "")),
+                ("Subtask", step.get("watcher_subtask", "")),
+                ("Hint", step.get("watcher_hint", "")),
+                ("Prompt", step.get("actor_prompt", "")),
+            ],
+        ),
+        (
+            "Actor Output",
+            [
+                ("Action", step.get("action", "")),
+                ("Progress", f"{float(step.get('actor_progress', 0.0)):.3f}"),
+                ("Done", step.get("actor_done", False)),
+            ],
+        ),
+    ]
+    if watcher_event is not None:
+        sections.append(
+            (
+                "Watcher Update",
+                [
+                    ("Wakeup", watcher_event.get("wakeup_reason", "")),
+                    ("Done", watcher_event.get("done", "")),
+                    ("Subtask", watcher_event.get("subtask", "")),
+                    ("Memory", watcher_event.get("memory", "")),
+                ],
+            )
+        )
+    return sections
+
+
+def _estimate_debug_video_height(
+    sections: Sequence[tuple[str, Sequence[tuple[str, Any]]]],
+    max_chars: int = 44,
+    line_height: int = 14,
+) -> int:
+    height = 12
+    for idx, (_, fields) in enumerate(sections):
+        if idx > 0:
+            height += 6
+        height += line_height + 2
+        for label, value in fields:
+            text = f"{label}: {value}"
+            lines = 0
+            for paragraph in str(text).splitlines() or [""]:
+                lines += max(1, len(textwrap.wrap(paragraph, width=max_chars)))
+            height += lines * line_height + 2
+    return height + 12
+
+
 def _render_debug_video_frame(
     episode_key: str,
     step: Dict[str, Any],
@@ -1424,7 +1618,8 @@ def _render_debug_video_frame(
         raise ValueError("Debug video frame requires PIL image in step record.")
     rgb = base_image.convert("RGB")
     panel_width = 480
-    canvas_height = max(int(rgb.height), 360)
+    sections = _build_debug_video_sections(episode_key, step, watcher_event)
+    canvas_height = max(int(rgb.height), _estimate_debug_video_height(sections), 360)
     canvas = Image.new("RGB", (int(rgb.width) + panel_width, canvas_height), color=(248, 248, 248))
     canvas.paste(rgb, (0, 0))
 
@@ -1456,32 +1651,21 @@ def _render_debug_video_frame(
         )
         y += 2
 
-    _section("Episode")
-    _field("Episode", episode_key)
-    _field("Decision", step.get("step_index", ""))
-    _field("Env Step", step.get("env_step_index", "-"))
-
-    y += 6
-    _section("Actor")
-    _field("Action", step.get("action", ""))
-    _field("Progress", f"{float(step.get('actor_progress', 0.0)):.3f}")
-    _field("Done", step.get("actor_done", False))
-    _field("Active Step", step.get("active_plan_step", ""))
-
-    y += 6
-    _section("Watcher State")
-    _field("Subtask", step.get("watcher_subtask", ""))
-    _field("Memory", step.get("watcher_hint", ""), max_chars=44)
-
-    if watcher_event is not None:
-        y += 6
-        _section("Watcher Update")
-        _field("Wakeup", watcher_event.get("wakeup_reason", ""))
-        _field("Done", watcher_event.get("done", ""))
-        _field("Subtask", watcher_event.get("subtask", ""))
-        _field("Memory", watcher_event.get("memory", ""), max_chars=44)
-
+    for idx, (title, fields) in enumerate(sections):
+        if idx > 0:
+            y += 6
+        _section(title)
+        for label, value in fields:
+            _field(label, value, max_chars=44)
     return canvas
+
+
+def _pad_debug_video_frame(frame: Image.Image, width: int, height: int) -> Image.Image:
+    if frame.size == (int(width), int(height)):
+        return frame
+    padded = Image.new("RGB", (int(width), int(height)), color=(248, 248, 248))
+    padded.paste(frame, (0, 0))
+    return padded
 
 
 def _write_debug_video(path: Path, episode_result: Dict[str, Any], fps: int = 2) -> None:
@@ -1505,7 +1689,8 @@ def _write_debug_video(path: Path, episode_result: Dict[str, Any], fps: int = 2)
         )
         for step in steps
     ]
-    width, height = rendered_frames[0].size
+    width = max(int(frame.width) for frame in rendered_frames)
+    height = max(int(frame.height) for frame in rendered_frames)
     path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
         str(path),
@@ -1518,7 +1703,8 @@ def _write_debug_video(path: Path, episode_result: Dict[str, Any], fps: int = 2)
         raise RuntimeError(f"Failed to open debug video writer: {path}")
     try:
         for frame in rendered_frames:
-            frame_bgr = cv2.cvtColor(np.asarray(frame, dtype=np.uint8), cv2.COLOR_RGB2BGR)
+            padded = _pad_debug_video_frame(frame, width=width, height=height)
+            frame_bgr = cv2.cvtColor(np.asarray(padded, dtype=np.uint8), cv2.COLOR_RGB2BGR)
             writer.write(frame_bgr)
     finally:
         writer.release()
@@ -1568,6 +1754,7 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
         max_steps_per_wakeup=config["rollout"]["max_steps_per_wakeup"],
         progress_threshold=config["rollout"]["progress_threshold"],
         episode_step_cap=config["rollout"]["episode_step_cap"],
+        max_watcher_wakeups=config["rollout"]["max_watcher_wakeups"],
         forbidden_actions=config["rollout"]["forbidden_actions"],
     )
 
@@ -1704,6 +1891,7 @@ def evaluate_debug(config: Dict[str, Any]) -> Dict[str, Any]:
         max_steps_per_wakeup=config["rollout"]["max_steps_per_wakeup"],
         progress_threshold=config["rollout"]["progress_threshold"],
         episode_step_cap=config["rollout"]["episode_step_cap"],
+        max_watcher_wakeups=config["rollout"]["max_watcher_wakeups"],
         forbidden_actions=config["rollout"]["forbidden_actions"],
     )
 
@@ -1753,12 +1941,19 @@ def evaluate_debug(config: Dict[str, Any]) -> Dict[str, Any]:
         return summary
 
     episode_summaries: List[Dict[str, Any]] = []
-    written = 0
+    candidates: List[tuple[str, Any, Dict[str, Any]]] = []
     for scene_id, episode in evaluator._iter_assigned_episodes(env, rank):
         current_episode_key = f"{scene_id}_{episode.episode_id}"
         record = summary_full.get(current_episode_key)
         if not record:
             continue
+        candidates.append((current_episode_key, episode, record))
+
+    for current_episode_key, episode, record in _sample_debug_candidates(
+        candidates,
+        sample_limit=sample_limit,
+        sample_seed=_debug_sample_seed(config),
+    ):
         instruction = evaluator._episode_instruction(env_cfg["habitat_config_path"], episode)
         plan_steps = parse_plan_steps(record.get("plan") or record.get("subtasks") or record.get("subtask_text"))
         env.current_episode = episode
@@ -1794,9 +1989,6 @@ def evaluate_debug(config: Dict[str, Any]) -> Dict[str, Any]:
                 }
             )
         )
-        written += 1
-        if written >= sample_limit:
-            break
 
     if not episode_summaries:
         raise ValueError("No debug episodes were evaluated.")

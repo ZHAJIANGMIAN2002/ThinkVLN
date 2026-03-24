@@ -7,12 +7,12 @@ actor:
   done_threshold: 0.85
 
 watcher:
-  backend: "api"
-  model_name: "qwen/qwen3.5-397b-a17b"
-  model_path: "/mnt/swx/ThinkVLN/model_weights/qwen3vl-2"
+  backend: "local"
+  model_name: "qwen3vl-8"
+  model_path: "/mnt/swx/ThinkVLN/model_weights/qwen3vl-8"
   base_model_path: null
   image_stride: 3
-  api_base_url: "https://openrouter.ai/api/v1"
+  api_base_url: ""
   api_key_env: "OPENROUTER_API_KEY"
   reasoning_effort: "none"
   request_timeout: 180.0
@@ -33,8 +33,8 @@ rollout:
   forbidden_actions: []
 
 output:
-  output_dir: "results/two_system_eval/api_smoke_17DRP5sb8fy_10154"
-  save_trace_jsonl: true
+  output_dir: "results/two_system_eval/local_debug20_train"
+  save_trace_jsonl: false
   save_summary_json: true
   save_step_debug_html: true
   save_debug_video: true
@@ -42,8 +42,10 @@ output:
 
 debug:
   enabled: true
-  episode_key: "17DRP5sb8fy_10154"
-  output_dir: "results/two_system_eval/api_smoke_17DRP5sb8fy_10154"
+  episode_key: ""
+  sample_limit: 20
+  sample_seed: 0
+  output_dir: "results/two_system_eval/local_debug20_train"
   video_fps: 2
 
 runtime:

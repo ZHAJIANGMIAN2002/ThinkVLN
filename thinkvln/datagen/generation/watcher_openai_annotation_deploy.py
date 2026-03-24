@@ -3,24 +3,25 @@ from __future__ import annotations
 import argparse
 import base64
 import concurrent.futures
-import html
 import json
 import mimetypes
 import os
 import random
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+import cv2
 from openai import OpenAI
 
 
-DEFAULT_MODEL_NAME = "qwen/qwen3.5-397b-a17b"
-DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_MODEL_NAME = "Qwen/Qwen3.5-397B-A17B"
+# DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_REASONING_EFFORT = "high"
-DEFAULT_API_KEY = "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"
+# DEFAULT_API_KEY = "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"
 
-# DEFAULT_BASE_URL = "http://localhost:11451/v1"
-# DEFAULT_API_KEY = "EMPTY"
+DEFAULT_BASE_URL = "http://localhost:11451/v1"
+DEFAULT_API_KEY = "EMPTY"
 
 MEMORY_START_SYSTEM_PROMPT = """You write watcher memory for navigation rollouts.
 
@@ -39,6 +40,15 @@ Rules:
 - Make the current pivot state explicit.
 - Write it so memory_end can directly update it in the same format.
 - Do not restate instructions, plan steps, or guesses about what to do next.
+
+Good examples:
+- {"memory_start":"Left the dining area and entered the hall; at the bathroom entrance facing inward; active step in progress"}
+- {"memory_start":"Moved along the wall from the bedroom; near the doorway to the sink area; still on current step"}
+
+Bad examples:
+- {"memory_start":"Left the dining area and entered the hall; at the bathroom entrance facing inward; ready for next step"}
+- {"memory_start":"First the agent moved forward, then turned left, then moved again, and now sees a hallway."}
+- {"memory_start":"The instruction says to go to the bathroom, so the agent should keep going there next."}
 """
 
 ROLLOUT_SYSTEM_PROMPT = """You are a navigation evaluator updating watcher memory and deciding if the current subtask is complete.
@@ -48,28 +58,41 @@ You MUST return JSON only, and strictly in this EXACT order:
 
 # Thinking Guidelines (For your internal reasoning before generating JSON)
 1. Identify the robot's current 'Active' step from the plan.
-2. Look at the FINAL rollout frame: Has the specific visual or physical goal of this active step been achieved?
+2. Look at the FINAL rollout frame: Has the specific visual or physical goal of this active step been achieved? (e.g., if the step is "enter kitchen", is it clearly inside the kitchen?)
 3. Is the robot fully aligned and ready to start the "Pending" step, or is it still adjusting?
 
 # Output Rules
-- memory_end must be exactly three short semicolon-separated fragments: [traj summary]; [current physical state]; [neutral status].
-- done=true only if the active step's goal is fully reached AND the robot is stable to begin the next step.
-- done=false if still moving/turning/halfway through transition/recovering.
-- If done=false: next_subtask continues or finishes the current active step.
-- If done=true: next_subtask becomes the promoted pending step, or "stop" if none.
+
+Step 1: memory_end
+- Must be exactly three short semicolon-separated fragments: [traj summary]; [current physical state]; [neutral status].
+- Update the memory_start with the new progress.
+- Keep it concise and state exactly where the robot is in the final frame.
+
+Step 2: done
+- Set to true ONLY IF your internal reasoning confirms the active step's goal is fully reached AND the robot is in a stable position to begin the next step.
+- Set to false if the robot is still moving toward the goal, still turning, halfway through a door, or recovering from a mistake.
+- NEVER set to true just because the robot is "close" to the goal.
+
+Step 3: next_subtask
+- If done=false: Write an imperative command to continue or finish the current active step (e.g., "finish turning left").
+- If done=true: Write the imperative command for the NEW active step (promoted from pending), or "stop" if no steps remain.
+
+Examples:
+{"memory_end":"Reached the hallway entrance; mid-turn facing the wall; step ongoing","done":false,"next_subtask":"finish turning right to face down the hallway"}
+
+{"memory_end":"Cleared the dining area and entered bathroom; standing inside facing the sink; ready for next step","done":true,"next_subtask":"approach the sink"}
 """
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Watcher annotation deploy tool (standalone + parallel).")
-    parser.add_argument("--gt_image_root", type=Path, required=True)
+    parser.add_argument("--gt_video_root", type=Path, required=True)
     parser.add_argument("--bundle_root", type=Path, required=True)
     parser.add_argument("--manifest_file", type=Path, required=True)
     parser.add_argument("--output_file", type=Path, required=True)
     parser.add_argument("--summary_full_path", type=Path, default=None)
     parser.add_argument("--image_stride", type=int, default=3)
     parser.add_argument("--max_samples", type=int, default=None)
-    parser.add_argument("--debug_html_dir", type=Path, default=None)
     parser.add_argument("--request_timeout", type=float, default=180.0)
     parser.add_argument("--max_retries", type=int, default=4)
     parser.add_argument("--max_workers", type=int, default=4)
@@ -221,8 +244,8 @@ def enrich_record_from_summary(record: Dict[str, Any], summary_lookup: Dict[str,
 def build_reasoning_config(reasoning_effort: str) -> Dict[str, Any]:
     effort = str(reasoning_effort or DEFAULT_REASONING_EFFORT).strip().lower()
     if effort == "none":
-        return {"effort": "none"}
-    return {"effort": effort, "exclude": True}
+        return {"reasoning_effort": "none"}
+    return {"reasoning_effort": effort} # fixed by qianli
 
 
 def encode_image_content(image_path: Path) -> Dict[str, Any]:
@@ -247,21 +270,83 @@ def build_gt_rgb_dir_path(gt_image_root: Path, record: Dict[str, Any]) -> Path:
     return gt_image_root / f"{scene_id}_r2r_{episode_id:06d}"
 
 
-def extract_gt_history_image_contents(gt_image_root: Path, record: Dict[str, Any], stride: int) -> List[Dict[str, Any]]:
+def build_gt_video_path(gt_video_root: Path, record: Dict[str, Any]) -> Path:
+    return build_gt_rgb_dir_path(gt_video_root, record) / "trajectory.mp4"
+
+
+def build_tmp_rgb_cache_dir(record: Dict[str, Any]) -> Path:
+    return Path(tempfile.gettempdir()) / "thinkvln_watcher_frames" / f"{str(record.get('scene_id', '')).strip()}_r2r_{int(record['episode_id']):06d}"
+
+
+def split_r2r_frame(frame, fixed_rgb_width: int = 640, map_left_crop: int = 0) -> Tuple[Any, Any]:
+    _, width = frame.shape[:2]
+    if width < fixed_rgb_width + map_left_crop:
+        raise ValueError(
+            f"frame width {width} is less than fixed RGB width {fixed_rgb_width} + map left crop {map_left_crop}"
+        )
+    rgb_frame = frame[:, :fixed_rgb_width]
+    map_frame = frame[:, fixed_rgb_width + map_left_crop :]
+    return rgb_frame, map_frame
+
+
+def ensure_episode_frames_from_video(gt_video_root: Path, record: Dict[str, Any]) -> Path:
+    rgb_dir = build_tmp_rgb_cache_dir(record)
+    rgb_dir.mkdir(parents=True, exist_ok=True)
+
+    video_path = build_gt_video_path(gt_video_root, record)
+    if not video_path.exists():
+        raise FileNotFoundError(f"GT video not found: {video_path}")
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Cannot open GT video: {video_path}")
+    frames_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    if frames_total > 0:
+        complete = True
+        for frame_idx in range(frames_total):
+            if not (rgb_dir / f"{frame_idx:06d}_rgb.jpg").exists() or not (rgb_dir / f"{frame_idx:06d}_map.jpg").exists():
+                complete = False
+                break
+        if complete:
+            cap.release()
+            return rgb_dir
+
+    try:
+        frame_idx = 0
+        while True:
+            success, frame = cap.read()
+            if not success or frame is None:
+                break
+            rgb_path = rgb_dir / f"{frame_idx:06d}_rgb.jpg"
+            map_path = rgb_dir / f"{frame_idx:06d}_map.jpg"
+            rgb_frame, map_frame = split_r2r_frame(frame)
+            if not cv2.imwrite(str(rgb_path), rgb_frame):
+                raise RuntimeError(f"Failed to write RGB frame: {rgb_path}")
+            if not cv2.imwrite(str(map_path), map_frame):
+                raise RuntimeError(f"Failed to write map frame: {map_path}")
+            frame_idx += 1
+    finally:
+        cap.release()
+    return rgb_dir
+
+
+def extract_gt_history_rgb_paths(gt_video_root: Path, record: Dict[str, Any], stride: int) -> List[Path]:
     pivot_frame = max(0, int(record.get("pivot_frame", 0)))
     frame_indices = select_stride_paths([str(i) for i in range(pivot_frame + 1)], stride)
-    rgb_dir = build_gt_rgb_dir_path(gt_image_root, record)
-    if not rgb_dir.exists():
-        raise FileNotFoundError(f"GT RGB directory not found: {rgb_dir}")
-    encoded_images: List[Dict[str, Any]] = []
+    rgb_dir = ensure_episode_frames_from_video(gt_video_root, record)
+    rgb_paths: List[Path] = []
     for frame_idx in (int(x) for x in frame_indices):
         rgb_path = rgb_dir / f"{frame_idx:06d}_rgb.jpg"
         if not rgb_path.exists():
-            raise FileNotFoundError(f"GT RGB frame not found: {rgb_path}")
-        encoded_images.append(encode_image_content(rgb_path))
-    if not encoded_images:
-        raise ValueError(f"No GT history RGB frames extracted from: {rgb_dir}")
-    return encoded_images
+            raise FileNotFoundError(f"GT RGB frame not found after extraction: {rgb_path}")
+        rgb_paths.append(rgb_path)
+    if not rgb_paths:
+        raise ValueError(f"No GT history RGB frames extracted from video: {build_gt_video_path(gt_video_root, record)}")
+    return rgb_paths
+
+
+def extract_gt_history_image_contents(gt_video_root: Path, record: Dict[str, Any], stride: int) -> List[Dict[str, Any]]:
+    return [encode_image_content(path) for path in extract_gt_history_rgb_paths(gt_video_root, record, stride)]
 
 
 def request_json_completion(
@@ -281,7 +366,7 @@ def request_json_completion(
                 messages=messages,
                 response_format={"type": "json_object"},
                 timeout=float(request_timeout),
-                extra_body={"reasoning": build_reasoning_config(reasoning_effort)},
+                extra_body=build_reasoning_config(reasoning_effort), # fixed by qianli
             )
             content = response.choices[0].message.content or ""
             return extract_json_object(content)
@@ -314,7 +399,14 @@ def build_memory_start_messages(record: Dict[str, Any], history_images: List[Dic
         "- Images are sampled from episode start to the pivot in time order.\n"
         "- First image = episode start. Last image = pivot.\n"
         "- Write memory_start as exactly three short semicolon-separated fragments.\n"
-        "- Use order: traj summary; current state; neutral status.\n"
+        "- Use this exact order: traj summary; current state; neutral status.\n"
+        "- The first fragment must summarize the path already traveled before the pivot state.\n"
+        "- The third fragment must stay neutral, such as active step in progress, still on current step, or approach still ongoing.\n"
+        "- Do not use ready for next step or task complete.\n"
+        "- Make it the same format that memory_end will update later.\n"
+        "- Keep only useful progress that still matters.\n"
+        "- Make the current pivot state explicit.\n"
+        "- Do not narrate frame by frame."
     )
     return [
         {"role": "system", "content": MEMORY_START_SYSTEM_PROMPT},
@@ -336,6 +428,26 @@ def build_rollout_messages(record: Dict[str, Any], memory_start: str, image_path
         "State\n"
         f"- Memory start: {memory_start}\n"
         f"- Rollout actions: {record['actions']}\n"
+        "Decision\n"
+        "- Set done=true only if the active step reaches a natural handoff by rollout end.\n"
+        "- The rollout end must also be a good starting point for the next subtask.\n"
+        "- Do not hand off early just because the active step looks mostly complete.\n"
+        "- If the next pending step is a turn, judge whether the robot has actually reached the turning point.\n"
+        "- If the active step is a turn, judge it together with the next pending step and only hand off once the robot is aligned for that next movement.\n"
+        "- If the active step is still the right step, set done=false.\n"
+        "- With done=false, next_subtask should continue the active step or give a short recovery step.\n"
+        "- With done=true, next_subtask should describe the promoted pending step, or stop if pending is empty.\n"
+        "Memory\n"
+        "- Rewrite memory_start into a new cumulative watcher memory.\n"
+        "- Keep only the still-relevant part of memory_start.\n"
+        "- Write memory_end as a direct update of memory_start.\n"
+        "- Prefer extending memory_start forward with the new observation and then compressing if needed.\n"
+        "- Do not reduce memory_end to only the final frame.\n"
+        "- Write memory_end as exactly three short semicolon-separated fragments.\n"
+        "- Use this exact order: traj summary; current state; task status.\n"
+        "- The first fragment must summarize the path already traveled before the final state.\n"
+        "- The third fragment must say whether the step is ongoing, ready for next step, or task complete.\n"
+        "- Sentence fragments are allowed."
     )
     content: List[Dict[str, Any]] = [{"type": "text", "text": user_text}]
     content.extend(encode_image_content(path) for path in image_paths)
@@ -348,7 +460,7 @@ def build_rollout_messages(record: Dict[str, Any], memory_start: str, image_path
 def annotate_sample(
     client: OpenAI,
     model: str,
-    gt_image_root: Path,
+    gt_video_root: Path,
     bundle_root: Path,
     record: Dict[str, Any],
     image_stride: int,
@@ -358,7 +470,8 @@ def annotate_sample(
 ) -> Dict[str, Any]:
     sample_id = str(record.get("sample_id", ""))
     print(f"[annotate] sample={sample_id} stage=prepare_history")
-    history_images = extract_gt_history_image_contents(gt_image_root, record, image_stride)
+    history_rgb_paths = extract_gt_history_rgb_paths(gt_video_root, record, image_stride)
+    history_images = [encode_image_content(path) for path in history_rgb_paths]
     print(f"[annotate] sample={sample_id} stage=memory_start images={len(history_images)} timeout={request_timeout}s")
     memory_payload = request_json_completion(
         client=client,
@@ -415,60 +528,6 @@ def build_persisted_annotation(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "next_subtask": str(annotation["next_subtask"]),
         "memory_end": str(annotation["memory_end"]),
     }
-
-
-def write_debug_html(debug_html_dir: Path, records: List[Dict[str, Any]]) -> None:
-    debug_html_dir.mkdir(parents=True, exist_ok=True)
-    sections: List[str] = []
-    for record in records:
-        plan_steps = normalize_plan_steps(record.get("plan", []))
-        done_steps, active_steps, pending_steps = split_plan_state(record, plan_steps)
-        gt_images = "".join(
-            f'<img src="{html.escape(item["image_url"]["url"])}" alt="gt" loading="lazy" />'
-            for item in record.get("gt_history_images", [])
-        )
-        rollout_images = "".join(
-            f'<img src="{html.escape(item["image_url"]["url"])}" alt="rollout" loading="lazy" />'
-            for item in record.get("rollout_images", [])
-        )
-        sections.append(
-            f"""
-<section class="sample">
-  <h2>{html.escape(str(record.get("sample_id", "")))}</h2>
-  <p><strong>Instruction:</strong> {html.escape(str(record.get("instruction", "")))}</p>
-  <p><strong>Actions:</strong> {html.escape(str(record.get("actions", [])))}</p>
-  <p><strong>Done Plan:</strong> {html.escape(str(done_steps))}</p>
-  <p><strong>Active Plan:</strong> {html.escape(str(active_steps))}</p>
-  <p><strong>Pending Plan:</strong> {html.escape(str(pending_steps))}</p>
-  <p><strong>Memory Start:</strong> {html.escape(str(record.get("memory_start", "")))}</p>
-  <p><strong>Done:</strong> {html.escape(str(record.get("done", "")))}</p>
-  <p><strong>Next Subtask:</strong> {html.escape(str(record.get("next_subtask", "")))}</p>
-  <p><strong>Memory End:</strong> {html.escape(str(record.get("memory_end", "")))}</p>
-  <div class="strip">{gt_images}</div>
-  <div class="strip">{rollout_images}</div>
-</section>
-""".strip()
-        )
-    html_text = f"""<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Watcher Annotation Debug</title>
-  <style>
-    body {{ font-family: sans-serif; margin: 24px; line-height: 1.4; }}
-    .sample {{ border-top: 1px solid #ccc; padding: 16px 0; }}
-    .strip {{ display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 16px; }}
-    img {{ width: 180px; height: auto; border: 1px solid #ddd; }}
-    p {{ margin: 6px 0; }}
-  </style>
-</head>
-<body>
-  <h1>Watcher Annotation Debug</h1>
-  {''.join(sections)}
-</body>
-</html>
-"""
-    (debug_html_dir / "index.html").write_text(html_text, encoding="utf-8")
 
 
 def run_text_ping(client: OpenAI, model: str) -> None:
@@ -553,7 +612,7 @@ def annotate_manifest(args: argparse.Namespace) -> int:
         print("[annotate] sanity_check=multimodal")
         run_multimodal_ping(client, args.model_name, first_pivot)
 
-    results: List[Tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
+    results: List[Tuple[int, Dict[str, Any]]] = []
     skipped_missing_gt = 0
 
     max_workers = max(1, int(args.max_workers))
@@ -565,7 +624,7 @@ def annotate_manifest(args: argparse.Namespace) -> int:
                 annotate_sample,
                 client,
                 args.model_name,
-                args.gt_image_root,
+                args.gt_video_root,
                 args.bundle_root,
                 enriched_row,
                 max(1, int(args.image_stride)),
@@ -592,38 +651,15 @@ def annotate_manifest(args: argparse.Namespace) -> int:
                 continue
 
             persisted = build_persisted_annotation(annotation)
-            debug_record = {
-                "sample_id": str(enriched_row.get("sample_id", "")),
-                "instruction": str(enriched_row.get("instruction", "")),
-                "plan": enriched_row.get("plan", []),
-                "subtask_id": enriched_row.get("subtask_id"),
-                "subtask_text": str(enriched_row.get("subtask_text", "")),
-                "actions": enriched_row.get("actions", []),
-                "memory_start": annotation["memory_start"],
-                "done": annotation["done"],
-                "next_subtask": annotation["next_subtask"],
-                "memory_end": annotation["memory_end"],
-                "gt_history_images": annotation.get("gt_history_images", []),
-                "rollout_images": annotation.get("rollout_images", []),
-            }
-            results.append((idx, row, persisted, debug_record))
+            append_jsonl(args.output_file, persisted)
+            written = len(results) + 1
+            print(f"[annotate] sample={row.get('sample_id', '')} status=written total_written={written}")
+            results.append((idx, row))
 
     results.sort(key=lambda item: item[0])
-    written = 0
-    debug_records: List[Dict[str, Any]] = []
-    for _, row, persisted, debug_record in results:
-        append_jsonl(args.output_file, persisted)
-        written += 1
-        print(f"[annotate] sample={row.get('sample_id', '')} status=written total_written={written}")
-        if args.debug_html_dir is not None:
-            debug_records.append(debug_record)
-
     if skipped_missing_gt:
         print(f"watcher annotations skipped_missing_gt: {skipped_missing_gt}")
-    if args.debug_html_dir is not None and debug_records:
-        write_debug_html(args.debug_html_dir, debug_records)
-        print(f"[annotate] debug_html={args.debug_html_dir / 'index.html'}")
-    return written
+    return len(results)
 
 
 def main() -> None:

@@ -28,6 +28,7 @@ env:
 rollout:
   max_steps_per_wakeup: 10
   progress_threshold: 0.85
+  max_watcher_wakeups: 10
   episode_step_cap: 80
   forbidden_actions: []
 

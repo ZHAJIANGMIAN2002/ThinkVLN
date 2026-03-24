@@ -1,0 +1,16 @@
+[Unit]
+Description=Watcher Manual Switch Web
+After=network.target
+
+[Service]
+Type=simple
+User=swx
+WorkingDirectory=/mnt/swx/ThinkVLN
+Environment=BIND_HOST=127.0.0.1
+Environment=PORT=8010
+ExecStart=/home/swx/miniforge3/bin/conda run -n vln bash /mnt/swx/ThinkVLN/scripts/run_watcher_manual_switch_web.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
