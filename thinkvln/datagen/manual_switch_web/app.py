@@ -395,7 +395,7 @@ class ManualSwitchStore:
             conn.commit()
             return {"sample": sample_payload, "status": self._base_status_row(conn)}
 
-    def submit_annotation(self, user: Dict[str, Any], sample_id: str, should_switch: bool | None) -> Dict[str, Any]:
+    def submit_annotation(self, user: Dict[str, Any], sample_id: str, should_switch: bool) -> Dict[str, Any]:
         now = int(time.time())
         with self.lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -405,10 +405,16 @@ class ManualSwitchStore:
             ).fetchone()
             if task is None:
                 raise HTTPException(status_code=404, detail=f"sample not found: {sample_id}")
+            annotation_row = conn.execute(
+                "SELECT user_id FROM annotations WHERE sample_id = ?",
+                (sample_id,),
+            ).fetchone()
             assigned = task["assigned_user_id"]
-            if task["status"] != "claimed" or assigned is None or int(assigned) != int(user["id"]):
+            claimed_by_user = task["status"] == "claimed" and assigned is not None and int(assigned) == int(user["id"])
+            owned_by_user = annotation_row is not None and int(annotation_row["user_id"]) == int(user["id"])
+            if not claimed_by_user and not owned_by_user:
                 raise HTTPException(status_code=409, detail="task is not currently assigned to this user")
-            value = None if should_switch is None else (1 if bool(should_switch) else 0)
+            value = 1 if bool(should_switch) else 0
             conn.execute(
                 """
                 INSERT INTO annotations(sample_id, user_id, should_switch, updated_at)
@@ -440,13 +446,75 @@ class ManualSwitchStore:
                 "instruction": sample["instruction"],
                 "active_subtask": sample["active_subtask"],
                 "next_subtask": sample["next_subtask"],
-                "should_switch": should_switch,
+                "should_switch": bool(should_switch),
                 "annotator": user["username"],
                 "annotated_at": now,
             }
             append_jsonl(self.config.output_file, output_payload)
             conn.commit()
             return {"annotation": output_payload, "status": self._base_status_row(conn)}
+
+    def list_user_annotations(self, user_id: int, limit: int = 200) -> List[Dict[str, Any]]:
+        capped = max(1, min(int(limit), 1000))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT sample_id, should_switch, updated_at
+                FROM annotations
+                WHERE user_id = ?
+                ORDER BY updated_at DESC, sample_id ASC
+                LIMIT ?
+                """,
+                (int(user_id), capped),
+            ).fetchall()
+        return [
+            {
+                "sample_id": str(row["sample_id"]),
+                "should_switch": None if row["should_switch"] is None else bool(int(row["should_switch"])),
+                "updated_at": int(row["updated_at"]),
+            }
+            for row in rows
+        ]
+
+    def get_user_sample(self, user_id: int, sample_id: str) -> Dict[str, Any]:
+        now = int(time.time())
+        with self.lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            task = conn.execute(
+                """
+                SELECT status, assigned_user_id
+                FROM tasks
+                WHERE sample_id=?
+                """,
+                (sample_id,),
+            ).fetchone()
+            if task is None:
+                raise HTTPException(status_code=404, detail=f"sample not found: {sample_id}")
+            mine_annotation = conn.execute(
+                "SELECT user_id FROM annotations WHERE sample_id=?",
+                (sample_id,),
+            ).fetchone()
+            owned_by_user = mine_annotation is not None and int(mine_annotation["user_id"]) == int(user_id)
+            is_my_claimed = (
+                task["status"] == "claimed"
+                and task["assigned_user_id"] is not None
+                and int(task["assigned_user_id"]) == int(user_id)
+            )
+            if not owned_by_user and not is_my_claimed:
+                raise HTTPException(status_code=403, detail="sample not visible to this user")
+            if owned_by_user and task["status"] == "pending":
+                conn.execute(
+                    """
+                    UPDATE tasks
+                    SET status='done', assigned_user_id=?, lease_until=NULL, updated_at=?
+                    WHERE sample_id=?
+                    """,
+                    (int(user_id), now, sample_id),
+                )
+            sample_payload = self._sample_with_annotation(conn, sample_id)
+            status = self._base_status_row(conn)
+            conn.commit()
+            return {"sample": sample_payload, "status": status}
 
     def create_invite(self, created_by: int, remaining_uses: int, expires_in_days: int | None) -> Dict[str, Any]:
         if remaining_uses <= 0:
@@ -697,16 +765,24 @@ def create_app(config: ManualSwitchConfig) -> FastAPI:
         user = store.auth_user(request)
         return store.claim_next(user_id=int(user["id"]))
 
+    @app.get("/api/tasks/mine")
+    async def list_my_tasks(request: Request, limit: int = 200) -> Dict[str, Any]:
+        user = store.auth_user(request)
+        return {"samples": store.list_user_annotations(user_id=int(user["id"]), limit=limit)}
+
+    @app.get("/api/tasks/{sample_id}")
+    async def get_task(sample_id: str, request: Request) -> Dict[str, Any]:
+        user = store.auth_user(request)
+        return store.get_user_sample(user_id=int(user["id"]), sample_id=str(sample_id))
+
     @app.post("/api/tasks/{sample_id}/annotate")
     async def annotate_task(sample_id: str, payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
         user = store.auth_user(request)
         raw = payload.get("should_switch")
-        if raw is None:
-            should_switch = None
-        elif isinstance(raw, bool):
+        if isinstance(raw, bool):
             should_switch = raw
         else:
-            raise HTTPException(status_code=400, detail="should_switch must be boolean or null")
+            raise HTTPException(status_code=400, detail="should_switch must be boolean")
         return store.submit_annotation(user=user, sample_id=str(sample_id), should_switch=should_switch)
 
     @app.post("/api/admin/invites")

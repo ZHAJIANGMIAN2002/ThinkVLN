@@ -63,6 +63,10 @@ body {
   align-items: center;
 }
 
+#mine-select {
+  min-width: 220px;
+}
+
 .toolbar-item span,
 .status-line,
 .summary,

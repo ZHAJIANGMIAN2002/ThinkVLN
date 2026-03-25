@@ -3,6 +3,8 @@ const state = {
   token: localStorage.getItem("manualSwitchToken") || "",
   user: null,
   sample: null,
+  mineSampleIds: [],
+  currentSampleId: "",
 };
 
 function escapeHtml(value) {
@@ -26,9 +28,9 @@ function setFlash(message) {
 }
 
 function renderStatus(status = {}) {
-  document.getElementById("total-count").textContent = String(status.total);
-  document.getElementById("labeled-count").textContent = String(status.labeled);
-  document.getElementById("remaining-count").textContent = String(status.remaining);
+  document.getElementById("total-count").textContent = String(status.total || 0);
+  document.getElementById("labeled-count").textContent = String(status.labeled || 0);
+  document.getElementById("remaining-count").textContent = String(status.remaining || 0);
   document.getElementById("mine-done-count").textContent = String(status.mine_done || 0);
 }
 
@@ -92,6 +94,32 @@ function applyAuthState() {
   document.getElementById("admin-panel").hidden = !authed || state.user.role !== "admin";
   document.getElementById("current-user").textContent = authed ? state.user.username : "guest";
   document.getElementById("current-role").textContent = authed ? state.user.role : "-";
+}
+
+function pushMineSampleId(sampleId) {
+  if (!sampleId) {
+    return;
+  }
+  state.mineSampleIds = [sampleId, ...state.mineSampleIds.filter((item) => item !== sampleId)];
+}
+
+function renderMineSelector() {
+  const select = document.getElementById("mine-select");
+  const options = ['<option value="">My labeled samples</option>'];
+  options.push(...state.mineSampleIds.map((sampleId) => `<option value="${escapeHtml(sampleId)}">${escapeHtml(sampleId)}</option>`));
+  select.innerHTML = options.join("");
+  if (state.currentSampleId && state.mineSampleIds.includes(state.currentSampleId)) {
+    select.value = state.currentSampleId;
+  }
+}
+
+function setCurrentSample(sample) {
+  state.sample = sample;
+  state.currentSampleId = sample ? sample.sample_id : "";
+  if (sample && sample.annotation && typeof sample.annotation.should_switch === "boolean") {
+    pushMineSampleId(sample.sample_id);
+  }
+  renderMineSelector();
 }
 
 function loadImageFrame(url) {
@@ -202,7 +230,6 @@ function buildSampleCard(sample) {
         <div class="decision-group">
           <button class="decision-btn" data-value="true" type="button">Switch</button>
           <button class="decision-btn" data-value="false" type="button">Stay</button>
-          <button class="decision-btn" data-value="clear" type="button">Clear</button>
         </div>
       </div>
       <div class="context-grid">
@@ -240,15 +267,21 @@ function bindSampleCard(card, sample) {
   renderDecision(card, sample.annotation);
   card.querySelectorAll(".decision-btn").forEach((button) => {
     button.addEventListener("click", async () => {
-      const rawValue = button.dataset.value;
-      const shouldSwitch = rawValue === "clear" ? null : rawValue === "true";
+      const shouldSwitch = button.dataset.value === "true";
       try {
         state.loading = true;
         setFlash("Saving...");
-        const payload = await postJson(`/api/tasks/${encodeURIComponent(sample.sample_id)}/annotate`, { should_switch: shouldSwitch }, true);
-        renderStatus(payload.status);
-        await claimNext();
-        setFlash("");
+        const payload = await postJson(
+          `/api/tasks/${encodeURIComponent(sample.sample_id)}/annotate`,
+          { should_switch: shouldSwitch },
+          true,
+        );
+        sample.annotation = { sample_id: sample.sample_id, should_switch: shouldSwitch, user_id: state.user.id };
+        renderDecision(card, sample.annotation);
+        renderStatus(payload.status || {});
+        pushMineSampleId(sample.sample_id);
+        renderMineSelector();
+        setFlash("Saved");
       } catch (error) {
         setFlash(error.message);
       } finally {
@@ -259,10 +292,9 @@ function bindSampleCard(card, sample) {
 }
 
 function renderSample(sample) {
-  state.loading = true;
   const list = document.getElementById("sample-list");
   if (!sample) {
-    list.innerHTML = "<p class=\"muted\">No pending tasks in queue.</p>";
+    list.innerHTML = '<p class="muted">No sample selected.</p>';
     return;
   }
   list.innerHTML = buildSampleCard(sample);
@@ -272,30 +304,74 @@ function renderSample(sample) {
   }
 }
 
+async function refreshMineList() {
+  if (!state.token) {
+    state.mineSampleIds = [];
+    renderMineSelector();
+    return;
+  }
+  const payload = await getJson("/api/tasks/mine?limit=500", true);
+  const rows = payload.samples || [];
+  state.mineSampleIds = rows.map((row) => row.sample_id);
+  renderMineSelector();
+}
+
+async function loadSampleById(sampleId) {
+  if (!sampleId) {
+    setCurrentSample(null);
+    renderSample(null);
+    return;
+  }
+  const payload = await getJson(`/api/tasks/${encodeURIComponent(sampleId)}`, true);
+  renderStatus(payload.status || {});
+  setCurrentSample(payload.sample || null);
+  renderSample(payload.sample || null);
+}
+
 async function claimNext() {
   const list = document.getElementById("sample-list");
   try {
-    list.innerHTML = "<p class=\"muted\">Claiming next task...</p>";
+    list.innerHTML = '<p class="muted">Claiming next task...</p>';
     const payload = await postJson("/api/tasks/claim", {}, true);
-    renderStatus(payload.status);
-    state.sample = payload.sample;
+    renderStatus(payload.status || {});
+    if (!payload.sample) {
+      renderSample(null);
+      setFlash("No pending tasks in queue.");
+      return;
+    }
+    setCurrentSample(payload.sample);
     renderSample(payload.sample);
     setFlash("");
   } catch (error) {
     list.innerHTML = "";
     setFlash(error.message);
-  } finally {
-    state.loading = false;
   }
+}
+
+async function gotoRelativeSample(direction) {
+  if (!state.currentSampleId || !state.mineSampleIds.length) {
+    return;
+  }
+  const index = state.mineSampleIds.indexOf(state.currentSampleId);
+  if (index < 0) {
+    return;
+  }
+  const nextIndex = index + direction;
+  if (nextIndex < 0 || nextIndex >= state.mineSampleIds.length) {
+    return;
+  }
+  await loadSampleById(state.mineSampleIds[nextIndex]);
 }
 
 async function refreshMe() {
   if (!state.token) {
     state.user = null;
-    state.sample = null;
+    setCurrentSample(null);
+    state.mineSampleIds = [];
     applyAuthState();
     renderStatus({ total: 0, labeled: 0, remaining: 0, mine_done: 0 });
     renderSample(null);
+    renderMineSelector();
     return;
   }
   try {
@@ -303,6 +379,7 @@ async function refreshMe() {
     state.user = payload.user;
     applyAuthState();
     renderStatus(payload.status || {});
+    await refreshMineList();
     await claimNext();
     if (state.user.role === "admin") {
       await refreshAdminUsers();
@@ -311,7 +388,10 @@ async function refreshMe() {
     localStorage.removeItem("manualSwitchToken");
     state.token = "";
     state.user = null;
+    setCurrentSample(null);
+    state.mineSampleIds = [];
     applyAuthState();
+    renderMineSelector();
     setFlash(error.message);
   }
 }
@@ -325,7 +405,7 @@ async function refreshAdminUsers() {
     const payload = await getJson("/api/admin/users", true);
     const rows = payload.users || [];
     if (!rows.length) {
-      box.innerHTML = "<p class=\"muted\">No users.</p>";
+      box.innerHTML = '<p class="muted">No users.</p>';
       return;
     }
     box.innerHTML = `
@@ -384,29 +464,56 @@ document.getElementById("claim-btn").addEventListener("click", async () => {
   await claimNext();
 });
 
-document.getElementById("refresh-btn").addEventListener("click", async () => {
-  await refreshMe();
+document.getElementById("prev-btn").addEventListener("click", async () => {
+  await gotoRelativeSample(-1);
+});
+
+document.getElementById("next-btn").addEventListener("click", async () => {
+  await gotoRelativeSample(1);
+});
+
+document.getElementById("mine-select").addEventListener("change", async (event) => {
+  const sampleId = event.target.value;
+  if (!sampleId) {
+    return;
+  }
+  await loadSampleById(sampleId);
+});
+
+document.getElementById("reload-mine-btn").addEventListener("click", async () => {
+  try {
+    await refreshMineList();
+    setFlash("");
+  } catch (error) {
+    setFlash(error.message);
+  }
 });
 
 document.getElementById("logout-btn").addEventListener("click", () => {
   localStorage.removeItem("manualSwitchToken");
   state.token = "";
   state.user = null;
-  state.sample = null;
+  setCurrentSample(null);
+  state.mineSampleIds = [];
   applyAuthState();
   renderSample(null);
+  renderMineSelector();
   renderStatus({ total: 0, labeled: 0, remaining: 0, mine_done: 0 });
   setFlash("");
 });
 
 document.getElementById("create-invite-btn").addEventListener("click", async () => {
   try {
-    const payload = await postJson("/api/admin/invites", {
-      remaining_uses: Number(document.getElementById("invite-uses").value || 1),
-      expires_in_days: document.getElementById("invite-days").value
-        ? Number(document.getElementById("invite-days").value)
-        : null,
-    }, true);
+    const payload = await postJson(
+      "/api/admin/invites",
+      {
+        remaining_uses: Number(document.getElementById("invite-uses").value || 1),
+        expires_in_days: document.getElementById("invite-days").value
+          ? Number(document.getElementById("invite-days").value)
+          : null,
+      },
+      true,
+    );
     const invite = payload.invite;
     document.getElementById("invite-output").textContent = `Invite code: ${invite.code} (uses=${invite.remaining_uses})`;
     await refreshAdminUsers();

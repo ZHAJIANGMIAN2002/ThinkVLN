@@ -48,7 +48,14 @@
     <div id="workspace-panel" class="panel" hidden>
       <div class="toolbar">
         <button id="claim-btn" type="button">Claim Next Task</button>
-        <button id="refresh-btn" type="button">Refresh Status</button>
+        <div class="toolbar-item">
+          <button id="prev-btn" type="button">Prev</button>
+          <button id="next-btn" type="button">Next</button>
+          <select id="mine-select">
+            <option value="">My labeled samples</option>
+          </select>
+          <button id="reload-mine-btn" type="button">Reload Mine</button>
+        </div>
         <button id="logout-btn" type="button">Logout</button>
       </div>
       <div id="sample-list" class="sample-list"></div>

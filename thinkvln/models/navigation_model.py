@@ -97,6 +97,69 @@ class ThinkVLNNavigationModel(NavigationModel):
     def eval(self):
         """Set model to evaluation mode."""
         self.model.eval()
+
+    def reset_episode_state(self, episode_key: Optional[str] = None):
+        self.episode_key = episode_key
+        self.rgb_list = []
+        self.depth_list = []
+        self.pose_list = []
+        self.intrinsic_list = []
+        self.time_ids = []
+        self.action_seq = []
+        self.past_key_values = None
+        self.output_ids = None
+        self.step_count = 0
+        self.last_subtask_id = None
+        self.last_subgoal = None
+        self.prev_progress = 0.0
+        self._last_predicted_progress = 0.0
+        self._last_predicted_done = False
+        self._last_debug_snapshot: Optional[Dict[str, Any]] = None
+        if hasattr(self.model, "reset_for_env"):
+            self.model.reset_for_env(self.env_id)
+
+    def get_last_debug_snapshot(self) -> Optional[Dict[str, Any]]:
+        if self._last_debug_snapshot is None:
+            return None
+        return dict(self._last_debug_snapshot)
+
+    @staticmethod
+    def _augment_instruction(instruction: str, subgoal: Optional[str] = None, hint: Optional[str] = None) -> str:
+        text = str(instruction or "").strip()
+        if str(subgoal or "").strip():
+            text = f"{text}\nCurrent subtask: {str(subgoal).strip()}"
+        if str(hint or "").strip():
+            text = f"{text}\nWatcher hint: {str(hint).strip()}"
+        return text
+
+    def _infer_progress_done_from_aux_head(
+        self,
+        input_dict: Dict[str, Any],
+        fallback_action: int,
+    ) -> Tuple[float, bool]:
+        if not hasattr(self.model, "predict_progress_done"):
+            progress = 1.0 if int(fallback_action) == self.actions2idx["STOP"] else float(self.prev_progress)
+            done = bool(int(fallback_action) == self.actions2idx["STOP"] or progress > self.done_threshold)
+            return progress, done
+        try:
+            progress_preds, done_preds = self.model.predict_progress_done(
+                input_ids=input_dict["inputs"],
+                images=input_dict["images"],
+                depths=input_dict["depths"],
+                poses=input_dict["poses"],
+                intrinsics=input_dict["intrinsics"],
+                time_ids=input_dict.get("time_ids"),
+                task_type=input_dict.get("task_type"),
+            )
+            progress = float(progress_preds[0].detach().float().cpu().item())
+            done_prob = float(done_preds[0].detach().float().cpu().item())
+            progress = max(0.0, min(1.0, progress))
+            done = bool(done_prob > 0.5)
+            return progress, done
+        except Exception:
+            progress = 1.0 if int(fallback_action) == self.actions2idx["STOP"] else float(self.prev_progress)
+            done = bool(int(fallback_action) == self.actions2idx["STOP"] or progress > self.done_threshold)
+            return progress, done
     
     def _build_user_message(
         self,
@@ -801,7 +864,8 @@ class StreamVLNNavigationModel(NavigationModel):
         num_frames: int = 32,
         num_future_steps: int = 4,
         num_history: int = 8,
-        env_id: int = 0
+        env_id: int = 0,
+        done_threshold: float = 0.85,
     ):
         """
         Initialize StreamVLN navigation model wrapper.
@@ -822,6 +886,7 @@ class StreamVLNNavigationModel(NavigationModel):
         self.num_future_steps = num_future_steps
         self.num_history = num_history
         self.env_id = env_id
+        self.done_threshold = float(done_threshold)
         
         # StreamVLN action mapping (different from ThinkVLN)
         self.actions2idx = {
@@ -837,22 +902,10 @@ class StreamVLNNavigationModel(NavigationModel):
             {"from": "gpt", "value": ""}
         ]
         
-        # History management
-        self.rgb_list = []
-        self.depth_list = []
-        self.pose_list = []
-        self.intrinsic_list = []
-        self.time_ids = []
-        self.action_seq = []
-        self.past_key_values = None
-        self.output_ids = None
-        self.step_count = 0
-        
         # Get image processor
         self.image_processor = model.get_vision_tower().image_processor
-        
-        # Initialize model state
         self.model.reset(1)
+        self.reset_episode_state()
     
     def eval(self):
         """Set model to evaluation mode."""
@@ -1043,6 +1096,14 @@ class StreamVLNNavigationModel(NavigationModel):
             DEFAULT_VIDEO_TOKEN = "<video>"
             def dict_to_cuda(d, device):
                 return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in d.items()}
+
+        if kwargs.get("episode_key") is not None and kwargs.get("episode_key") != self.episode_key:
+            self.reset_episode_state(episode_key=kwargs.get("episode_key"))
+
+        subgoal = kwargs.get("subgoal")
+        hint = kwargs.get("hint")
+        need_progress_done = bool(kwargs.get("need_progress_done", False))
+        instruction_text = self._augment_instruction(instruction, subgoal=subgoal, hint=hint)
         
         # Handle observation input
         if isinstance(observation, dict):
@@ -1058,13 +1119,49 @@ class StreamVLNNavigationModel(NavigationModel):
             min_depth = observation.get('min_depth', 0.0)
             max_depth = observation.get('max_depth', 10.0)
         else:
-            # Fallback: single frame (not ideal for StreamVLN)
-            print("Warning: StreamVLN works best with full observations dict")
+            rgb = np.array(observation, copy=False) if not isinstance(observation, Image.Image) else np.array(observation)
+            depth = None
+            gps = [0.0, 0.0]
+            compass = [0.0]
+            env = None
+            sensor_config = None
+            initial_height = 0.0
+            camera_height = 1.25
+            min_depth = 0.0
+            max_depth = 10.0
+
+        if rgb is None:
             return self.actions2idx['STOP'], None
-        
+        rgb = np.asarray(rgb)
+        if rgb.ndim == 2:
+            rgb = np.stack([rgb, rgb, rgb], axis=-1)
+        if rgb.ndim == 3 and rgb.shape[-1] == 4:
+            rgb = rgb[..., :3]
+        if rgb.ndim != 3 or rgb.shape[-1] != 3:
+            return self.actions2idx['STOP'], None
+
+        if depth is None:
+            depth = np.zeros((rgb.shape[0], rgb.shape[1], 1), dtype=np.float32)
+        else:
+            depth = np.asarray(depth)
+            if depth.ndim == 2:
+                depth = depth[:, :, None]
+            if depth.ndim != 3:
+                depth = np.zeros((rgb.shape[0], rgb.shape[1], 1), dtype=np.float32)
+
         # If we have action sequence, return next action
         if len(self.action_seq) > 0:
             action = self.action_seq.pop(0)
+            if need_progress_done:
+                done = bool(action == self.actions2idx["STOP"] or self._last_predicted_done)
+                self._last_predicted_done = done
+            self._last_debug_snapshot = {
+                "instruction_text": instruction_text,
+                "predicted_progress": float(self._last_predicted_progress),
+                "predicted_done": bool(self._last_predicted_done),
+                "used_cached_action_seq": True,
+                "returned_action": int(action),
+            }
             return action, None
         
         # Process depth
@@ -1121,7 +1218,7 @@ class StreamVLNNavigationModel(NavigationModel):
         if self.step_count != 0:
             sources[0]["value"] += f' These are your historical observations {DEFAULT_MEMORY_TOKEN}.'
         sources[0]["value"] = sources[0]["value"].replace(DEFAULT_VIDEO_TOKEN+'\n', '')
-        sources[0]["value"] = sources[0]["value"].replace('<instruction>.', instruction)
+        sources[0]["value"] = sources[0]["value"].replace('<instruction>.', instruction_text)
         add_system = True
         
         input_ids, conversations = self._preprocess_qwen([sources], True, add_system=add_system)
@@ -1212,6 +1309,15 @@ class StreamVLNNavigationModel(NavigationModel):
             self.action_seq = [0]
             self.output_ids = None
             self.past_key_values = None
+
+        if need_progress_done:
+            fallback_action = self.action_seq[0] if self.action_seq else self.actions2idx["STOP"]
+            progress, done = self._infer_progress_done_from_aux_head(
+                input_dict=input_dict,
+                fallback_action=int(fallback_action),
+            )
+            self._last_predicted_progress = progress
+            self._last_predicted_done = done
         
         # Reset if needed (after processing current step)
         if self.step_count % self.num_frames == 0:
@@ -1230,6 +1336,90 @@ class StreamVLNNavigationModel(NavigationModel):
         # Return first action from sequence
         if len(self.action_seq) > 0:
             action = self.action_seq.pop(0)
+            self._last_debug_snapshot = {
+                "instruction_text": instruction_text,
+                "predicted_progress": float(self._last_predicted_progress),
+                "predicted_done": bool(self._last_predicted_done),
+                "used_cached_action_seq": False,
+                "returned_action": int(action),
+            }
             return action, None
         else:
+            self._last_debug_snapshot = {
+                "instruction_text": instruction_text,
+                "predicted_progress": float(self._last_predicted_progress),
+                "predicted_done": bool(self._last_predicted_done),
+                "used_cached_action_seq": False,
+                "returned_action": int(self.actions2idx['STOP']),
+            }
             return self.actions2idx['STOP'], None
+
+    def predict_action_with_progress_and_done(
+        self,
+        observation: Any,
+        instruction: str,
+        subgoal: str,
+        episode_key: Optional[str] = None,
+        subtask_id: Optional[int] = None,
+        hint: Optional[str] = None,
+        sample_action: bool = False,
+        action_generator: Optional[torch.Generator] = None,
+        forbidden_actions: Optional[List[int]] = None,
+    ) -> Tuple[int, float, bool]:
+        del sample_action, action_generator
+        if episode_key is not None and episode_key != self.episode_key:
+            self.reset_episode_state(episode_key=episode_key)
+
+        if subtask_id is not None:
+            resolved_subtask_id = max(1, int(subtask_id))
+            if self.last_subtask_id is None or resolved_subtask_id != self.last_subtask_id:
+                self.prev_progress = 0.0
+            self.last_subtask_id = resolved_subtask_id
+        else:
+            if self.last_subgoal is None or str(subgoal) != str(self.last_subgoal):
+                self.prev_progress = 0.0
+        self.last_subgoal = str(subgoal)
+
+        action, _ = self.predict_action(
+            observation=observation,
+            instruction=instruction,
+            subgoal=subgoal,
+            hint=hint,
+            episode_key=episode_key,
+            need_progress_done=True,
+        )
+
+        progress = float(self._last_predicted_progress)
+        done = bool(self._last_predicted_done or int(action) == self.actions2idx["STOP"])
+        if forbidden_actions and int(action) in [int(x) for x in forbidden_actions]:
+            action = self.actions2idx["STOP"]
+            done = True
+            progress = max(progress, self.done_threshold)
+
+        progress = max(0.0, min(1.0, float(progress)))
+        self.prev_progress = progress
+        if self._last_debug_snapshot is not None:
+            self._last_debug_snapshot["predicted_progress"] = progress
+            self._last_debug_snapshot["predicted_done"] = done
+            self._last_debug_snapshot["watcher_subgoal"] = str(subgoal)
+            self._last_debug_snapshot["watcher_hint"] = str(hint or "")
+        return int(action), progress, bool(done)
+
+    def predict_action_with_progress(
+        self,
+        observation: Any,
+        instruction: str,
+        subgoal: str,
+        episode_key: Optional[str] = None,
+        subtask_id: Optional[int] = None,
+        hint: Optional[str] = None,
+    ) -> Tuple[int, float]:
+        action, progress, _ = self.predict_action_with_progress_and_done(
+            observation=observation,
+            instruction=instruction,
+            subgoal=subgoal,
+            episode_key=episode_key,
+            subtask_id=subtask_id,
+            hint=hint,
+        )
+        return action, progress

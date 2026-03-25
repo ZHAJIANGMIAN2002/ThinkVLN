@@ -75,7 +75,7 @@ class TestWatcherManualSwitchAnnotation:
             "/assets/images/rollout/ep/pivot_000010/rollout_01/000002_rgb.jpg",
         ]
 
-    def test_store_paginates_and_appends_annotations(self, tmp_path: Path):
+    def test_store_supports_revisit_and_edit_own_annotations(self, tmp_path: Path):
         bundle_root = tmp_path / "bundle"
         image_root = bundle_root / "images"
         manifest_file = tmp_path / "manifest.jsonl"
@@ -116,28 +116,37 @@ class TestWatcherManualSwitchAnnotation:
         assert store.status()["labeled"] == 1
         assert store.status()["remaining"] == 1
 
-        pending = store.list_samples(page=1, page_size=1, view="pending")
-        assert pending["page"] == 1
-        assert pending["total_pages"] == 1
-        assert [sample["sample_id"] for sample in pending["samples"]] == ["todo_p000011_r01"]
+        claimed = store.claim_next(user_id=11)
+        assert claimed["sample"]["sample_id"] == "todo_p000011_r01"
 
-        saved = store.save_annotation("todo_p000011_r01", False)
-        assert saved["should_switch"] is False
+        saved = store.submit_annotation(
+            user={"id": 11, "username": "alice"},
+            sample_id="todo_p000011_r01",
+            should_switch=False,
+        )
+        assert saved["annotation"]["should_switch"] is False
         assert store.status()["labeled"] == 2
         assert store.status()["remaining"] == 0
 
+        edited = store.submit_annotation(
+            user={"id": 11, "username": "alice"},
+            sample_id="todo_p000011_r01",
+            should_switch=True,
+        )
+        assert edited["annotation"]["should_switch"] is True
+
+        mine = store.list_user_annotations(user_id=11, limit=50)
+        assert [row["sample_id"] for row in mine] == ["todo_p000011_r01"]
+        assert mine[0]["should_switch"] is True
+
+        loaded = store.get_user_sample(user_id=11, sample_id="todo_p000011_r01")
+        assert loaded["sample"]["sample_id"] == "todo_p000011_r01"
+        assert loaded["sample"]["annotation"]["should_switch"] is True
+
         rows = [json.loads(line) for line in output_file.read_text(encoding="utf-8").splitlines() if line.strip()]
-        assert len(rows) == 2
+        assert len(rows) == 3
         assert rows[-1]["sample_id"] == "todo_p000011_r01"
-        assert rows[-1]["should_switch"] is False
-
-        pending_after = store.list_samples(page=1, page_size=1, view="pending")
-        assert pending_after["samples"] == []
-
-        all_samples = store.list_samples(page=1, page_size=10, view="all")["samples"]
-        assert len(all_samples) == 2
-        todo_sample = next(sample for sample in all_samples if sample["sample_id"] == "todo_p000011_r01")
-        assert todo_sample["annotation"]["should_switch"] is False
+        assert rows[-1]["should_switch"] is True
 
     def test_build_store_defaults_to_seeded_random_ten_percent_sample(self, tmp_path: Path):
         bundle_root = tmp_path / "bundle"
@@ -249,13 +258,13 @@ class TestWatcherManualSwitchAnnotation:
 
         assert "Download JSONL" not in page
         assert "{{ title }}" in page
-        assert "Watch the rollout video and decide whether the current task should switch to the next one." in page
+        assert "Claim Next Task" in page
+        assert "Refresh Status" not in page
+        assert "Reload Mine" in page
         assert "Download JSONL" not in script
-        assert "async function fetchSamples" in script
-        assert 'fetch("/api/annotations"' in script
-        assert "Instruction" not in script
-        assert "Done Plan" not in script
-        assert "Pending Plan" not in script
+        assert "/api/tasks/mine" in script
+        assert "async function loadSampleById" in script
+        assert "data-value=\"clear\"" not in script
         assert "Current Task" in script
         assert "Next Task If Switched" in script
         assert "if (frameIndex >= frames.length - 1)" in script

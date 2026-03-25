@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 from math import ceil
+from dataclasses import dataclass
 from typing import List, Optional, Union, Tuple
 
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -10,6 +11,15 @@ from transformers import Qwen2ForCausalLM
 from llava.model.language_model.llava_qwen import LlavaQwenModel
 from llava.model.llava_arch import LlavaMetaForCausalLM
 from streamvln.utils.utils import IGNORE_INDEX, IMAGE_TOKEN_INDEX, MEMORY_TOKEN_INDEX
+
+
+@dataclass
+class StreamVLNCausalLMOutputWithAux(CausalLMOutputWithPast):
+    progress_preds: Optional[torch.FloatTensor] = None
+    done_preds: Optional[torch.FloatTensor] = None
+    progress_loss: Optional[torch.FloatTensor] = None
+    done_loss: Optional[torch.FloatTensor] = None
+
 
 class StreamVLNModel(LlavaQwenModel):
     def __init__(
@@ -43,6 +53,22 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         self.model = StreamVLNModel(config, **kwargs)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        aux_hidden_size = int(getattr(config, "aux_hidden_size", config.hidden_size))
+        aux_dropout = float(getattr(config, "aux_dropout", 0.1))
+        self.progress_head = nn.Sequential(
+            nn.Linear(config.hidden_size, aux_hidden_size),
+            nn.GELU(),
+            nn.Dropout(aux_dropout),
+            nn.Linear(aux_hidden_size, 1),
+        )
+        self.done_head = nn.Sequential(
+            nn.Linear(config.hidden_size, aux_hidden_size),
+            nn.GELU(),
+            nn.Dropout(aux_dropout),
+            nn.Linear(aux_hidden_size, 1),
+        )
+        self.progress_loss_weight = float(getattr(config, "progress_loss_weight", 1.0))
+        self.done_loss_weight = float(getattr(config, "done_loss_weight", 1.0))
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -327,6 +353,10 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         modalities: Optional[List[str]] = ["image"],
         **kwargs
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        progress_labels = kwargs.pop("progress_labels", None)
+        done_labels = kwargs.pop("done_labels", None)
+        output_aux = bool(kwargs.pop("output_aux", False))
+        needs_aux = output_aux or progress_labels is not None or done_labels is not None
         tokenizer = kwargs.get("tokenizer", None)
         input_ids_ = input_ids
         time_ids = kwargs.get("time_ids", None)
@@ -354,7 +384,7 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 task_ids
             )
     
-        return super().forward(
+        outputs = super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -363,9 +393,87 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             labels=labels,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict
+            output_hidden_states=True if needs_aux else output_hidden_states,
+            return_dict=True if needs_aux else return_dict
         )
+        if not needs_aux:
+            return outputs
+
+        hidden_states = outputs.hidden_states[-1]
+        if attention_mask is None:
+            pooled_hidden = hidden_states[:, -1, :]
+        else:
+            valid_lengths = attention_mask.long().sum(dim=1).clamp(min=1)
+            last_indices = (valid_lengths - 1).to(hidden_states.device)
+            batch_indices = torch.arange(hidden_states.shape[0], device=hidden_states.device)
+            pooled_hidden = hidden_states[batch_indices, last_indices]
+
+        progress_logits = self.progress_head(pooled_hidden).squeeze(-1)
+        done_logits = self.done_head(pooled_hidden).squeeze(-1)
+        progress_preds = torch.sigmoid(progress_logits)
+        done_preds = torch.sigmoid(done_logits)
+
+        progress_loss = None
+        if progress_labels is not None:
+            progress_labels = progress_labels.to(progress_preds.device).float().reshape(-1)
+            valid_progress = progress_labels != -100.0
+            if valid_progress.any():
+                progress_loss = nn.functional.mse_loss(progress_preds[valid_progress], progress_labels[valid_progress])
+
+        done_loss = None
+        if done_labels is not None:
+            done_labels = done_labels.to(done_logits.device).float().reshape(-1)
+            valid_done = done_labels != -100.0
+            if valid_done.any():
+                done_loss = nn.functional.binary_cross_entropy_with_logits(done_logits[valid_done], done_labels[valid_done])
+
+        total_loss = outputs.loss
+        if progress_loss is not None or done_loss is not None:
+            if total_loss is None:
+                total_loss = torch.tensor(0.0, device=hidden_states.device, dtype=hidden_states.dtype)
+            if progress_loss is not None:
+                total_loss = total_loss + self.progress_loss_weight * progress_loss
+            if done_loss is not None:
+                total_loss = total_loss + self.done_loss_weight * done_loss
+
+        aux_outputs = StreamVLNCausalLMOutputWithAux(
+            loss=total_loss,
+            logits=outputs.logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            progress_preds=progress_preds,
+            done_preds=done_preds,
+            progress_loss=progress_loss,
+            done_loss=done_loss,
+        )
+        if return_dict is False:
+            return aux_outputs.to_tuple()
+        return aux_outputs
+
+    @torch.no_grad()
+    def predict_progress_done(
+        self,
+        input_ids: torch.LongTensor,
+        images: torch.FloatTensor,
+        depths: torch.FloatTensor,
+        poses: torch.FloatTensor,
+        intrinsics: torch.FloatTensor,
+        time_ids: Optional[List[List[int]]] = None,
+        task_type: Optional[List[int]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        outputs = self.forward(
+            input_ids=input_ids,
+            images=images,
+            depths=depths,
+            poses=poses,
+            intrinsics=intrinsics,
+            time_ids=time_ids,
+            task_type=task_type,
+            output_aux=True,
+            return_dict=True,
+        )
+        return outputs.progress_preds, outputs.done_preds
     
     @torch.no_grad()
     def generate(
