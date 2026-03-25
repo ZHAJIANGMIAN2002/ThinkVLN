@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -54,17 +55,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_rollouts", type=int, default=1)
     parser.add_argument("--min_rollout_steps", type=int, default=6)
     parser.add_argument("--max_rollout_steps", type=int, default=12)
+    parser.add_argument("--episode_sample_rate", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--rank", type=int, default=int(os.environ.get("RANK", "0")))
+    parser.add_argument("--local_rank", type=int, default=int(os.environ.get("LOCAL_RANK", "0")))
+    parser.add_argument("--world_size", type=int, default=int(os.environ.get("WORLD_SIZE", "1")))
     return parser.parse_args()
 
 
 def build_nav_args(args: argparse.Namespace, device: str) -> SimpleNamespace:
     return SimpleNamespace(
-        model_type="thinkvln_actor",
+        model_type="streamvln",
         model_path=args.model_path,
         base_model_path=args.base_model_path,
         model_max_length=4096,
+        num_frames=32,
+        num_future_steps=4,
+        num_history=8,
         memory_num_history_images=6,
         done_threshold=0.85,
         device=device,
@@ -87,6 +95,18 @@ def resolve_manifest_file(bundle_root: Path, manifest_file: Optional[Path]) -> P
     if manifest_file is not None:
         return manifest_file
     return bundle_root / "manifest" / "watcher_rollout_manifest.jsonl"
+
+
+def resolve_manifest_file_for_rank(
+    bundle_root: Path,
+    manifest_file: Optional[Path],
+    rank: int,
+    world_size: int,
+) -> Path:
+    base_manifest = resolve_manifest_file(bundle_root, manifest_file)
+    if int(world_size) <= 1:
+        return base_manifest
+    return base_manifest.with_name(f"{base_manifest.stem}.rank{int(rank)}{base_manifest.suffix}")
 
 
 def build_episode_lookup(env: Any) -> Dict[str, Any]:
@@ -116,6 +136,32 @@ def load_existing_episode_keys(manifest_file: Path) -> set[str]:
         for row in load_jsonl(manifest_file)
         if isinstance(row, dict) and isinstance(row.get("episode_key"), str)
     }
+
+
+def sample_episode_records(
+    records: List[Dict[str, Any]],
+    episode_sample_rate: float,
+    seed: int,
+) -> List[Dict[str, Any]]:
+    rate = float(episode_sample_rate)
+    if not records or rate >= 1.0:
+        return list(records)
+    if rate <= 0.0:
+        raise ValueError("--episode_sample_rate must be in (0, 1].")
+    sample_count = max(1, min(len(records), int(round(len(records) * rate))))
+    sampled_keys = {
+        str(row.get("episode_key", ""))
+        for row in Random(int(seed)).sample(list(records), sample_count)
+    }
+    return [row for row in records if str(row.get("episode_key", "")) in sampled_keys]
+
+
+def shard_episode_records(records: List[Dict[str, Any]], rank: int, world_size: int) -> List[Dict[str, Any]]:
+    if int(world_size) <= 1:
+        return list(records)
+    shard_rank = max(0, int(rank))
+    shard_world = max(1, int(world_size))
+    return [row for idx, row in enumerate(records) if idx % shard_world == shard_rank]
 
 
 def strip_leading_sentinel(actions: List[Any]) -> List[int]:
@@ -312,22 +358,32 @@ def run_rollout(
     action_names: List[str] = []
     rollout_rgbs: List[Any] = []
     rollout_positions: List[np.ndarray] = [evaluator._current_position(env)]
+    nav_model = evaluator.nav_model
+    use_actor_interface = callable(getattr(nav_model, "predict_action_with_progress_and_done", None))
 
-    for step_idx in range(max_rollout_steps):
+    for _ in range(max_rollout_steps):
         if env.episode_over:
             break
 
         info = env.get_metrics()
-        model_observation = evaluator.prepare_model_image(observations["rgb"], info)
-        action, _, _ = evaluator.nav_model.predict_action_with_progress_and_done(
-            observation=model_observation,
-            instruction=instruction,
-            subgoal=subtask_text,
-            episode_key=episode_key,
-            subtask_id=subtask_id,
-            sample_action=True,
-            action_generator=action_generator,
-        )
+        if use_actor_interface:
+            model_observation = evaluator.prepare_model_image(observations["rgb"], info)
+            action, _, _ = nav_model.predict_action_with_progress_and_done(
+                observation=model_observation,
+                instruction=instruction,
+                subgoal=subtask_text,
+                episode_key=episode_key,
+                subtask_id=subtask_id,
+                sample_action=True,
+                action_generator=action_generator,
+            )
+        else:
+            model_observation = evaluator.prepare_model_image(observations["rgb"], info)
+            action, _ = nav_model.predict_action(
+                observation=model_observation,
+                instruction=instruction,
+            )
+        action = normalize_action(action)
 
         action_names.append(action_id_to_name(action))
         observations = env.step(int(action))
@@ -341,13 +397,25 @@ def run_rollout(
 
 
 def generate_bundle(args: argparse.Namespace) -> int:
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    rank = max(0, int(getattr(args, "rank", 0)))
+    local_rank = max(0, int(getattr(args, "local_rank", 0)))
+    world_size = max(1, int(getattr(args, "world_size", 1)))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = f"cuda:{local_rank}"
+    else:
+        device = "cpu"
     bundle_root = args.bundle_root.resolve()
-    manifest_file = resolve_manifest_file(bundle_root, args.manifest_file)
+    manifest_file = resolve_manifest_file_for_rank(
+        bundle_root=bundle_root,
+        manifest_file=args.manifest_file,
+        rank=rank,
+        world_size=world_size,
+    )
     summary_root = args.summary_full_path.resolve().parent
     completed_episode_keys = load_existing_episode_keys(manifest_file) if args.resume else set()
 
-    nav_model = build_nav_model(build_nav_args(args, device), device, rank=0, world_size=1)
+    nav_model = build_nav_model(build_nav_args(args, device), device, rank=rank, world_size=world_size)
     evaluator = VLNEvaluator(
         config_path=args.habitat_config_path,
         split="train",
@@ -365,6 +433,16 @@ def generate_bundle(args: argparse.Namespace) -> int:
         if str(meta.get("episode_key", "")).strip()
         and str(meta.get("episode_key", "")).strip() not in completed_episode_keys
     ]
+    pending_records = sample_episode_records(
+        pending_records,
+        episode_sample_rate=float(getattr(args, "episode_sample_rate", 1.0)),
+        seed=int(args.seed),
+    )
+    pending_records = shard_episode_records(
+        pending_records,
+        rank=rank,
+        world_size=world_size,
+    )
 
     bundle_root.mkdir(parents=True, exist_ok=True)
     processed_samples = 0
@@ -372,16 +450,19 @@ def generate_bundle(args: argparse.Namespace) -> int:
     total_records = len(summary_records)
     total_pending_records = len(pending_records)
     logger.info(
-        "watcher rollout generation start: records=%d pending=%d num_pivots=%d num_rollouts=%d steps=%d..%d",
+        "watcher rollout generation start: rank=%d/%d records=%d pending=%d num_pivots=%d num_rollouts=%d steps=%d..%d manifest=%s",
+        rank,
+        world_size,
         total_records,
         total_pending_records,
         args.num_pivots,
         args.num_rollouts,
         args.min_rollout_steps,
         args.max_rollout_steps,
+        manifest_file,
     )
 
-    for meta in summary_records:
+    for meta in pending_records:
         episode_start = time.perf_counter()
         episode_rows: List[Dict[str, Any]] = []
         episode_images: List[Tuple[Any, Path]] = []

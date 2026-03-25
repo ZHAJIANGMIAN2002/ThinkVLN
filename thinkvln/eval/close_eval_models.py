@@ -212,6 +212,7 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
             num_future_steps=args.num_future_steps,
             num_history=args.num_history,
             env_id=rank,
+            done_threshold=getattr(args, "done_threshold", 0.85),
         )
 
     raise ValueError(f"Unknown model type: {args.model_type}")

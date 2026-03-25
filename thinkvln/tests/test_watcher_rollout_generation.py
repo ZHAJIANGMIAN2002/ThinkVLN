@@ -13,6 +13,7 @@ from thinkvln.datagen.generation.watcher_rollout_generation import (
     flush_episode_outputs,
     generate_bundle,
     load_existing_episode_keys,
+    run_rollout,
     restore_episode_frame,
 )
 from thinkvln.datagen.generation.watcher_utils import (
@@ -24,6 +25,99 @@ from thinkvln.models.navigation_model import ThinkVLNActorNavigationModel
 
 
 class TestWatcherRolloutGeneration:
+    def test_run_rollout_uses_predict_action_for_streamvln_style_models(self):
+        class _NavModel:
+            def __init__(self):
+                self.calls = 0
+
+            def predict_action(self, observation, instruction, plan=None, prev_subtask=None, **kwargs):
+                del instruction, plan, prev_subtask, kwargs
+                assert isinstance(observation, np.ndarray)
+                assert observation.shape == (4, 4, 3)
+                self.calls += 1
+                if self.calls == 1:
+                    return 1, None
+                return 0, None
+
+        class _Evaluator:
+            def __init__(self):
+                self.nav_model = _NavModel()
+
+            @staticmethod
+            def _current_position(env):
+                return np.array([float(env._step_idx), 0.0, 0.0], dtype=np.float32)
+
+            @staticmethod
+            def prepare_model_image(rgb, info):
+                del info
+                return rgb
+
+        class _Env:
+            def __init__(self):
+                self._step_idx = 0
+                self.episode_over = False
+                self.current_episode = None
+                self.sim = SimpleNamespace(
+                    get_agent_state=lambda: SimpleNamespace(
+                        position=np.array([0.0, 1.0, 0.0], dtype=np.float32),
+                        rotation=np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+                    )
+                )
+
+            def reset(self):
+                self._step_idx = 0
+                self.episode_over = False
+                return {
+                    "rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+                    "depth": np.zeros((4, 4, 1), dtype=np.float32),
+                    "gps": np.array([0.0, 0.0], dtype=np.float32),
+                    "compass": np.array([0.0], dtype=np.float32),
+                }
+
+            def get_metrics(self):
+                return {}
+
+            def step(self, action):
+                self._step_idx += 1
+                if int(action) == 0:
+                    self.episode_over = True
+                return {
+                    "rgb": np.full((4, 4, 3), self._step_idx, dtype=np.uint8),
+                    "depth": np.zeros((4, 4, 1), dtype=np.float32),
+                    "gps": np.array([0.0, 0.0], dtype=np.float32),
+                    "compass": np.array([0.0], dtype=np.float32),
+                }
+
+        evaluator = _Evaluator()
+        env = _Env()
+        episode = SimpleNamespace(episode_id="ep-1")
+        episode_cache = {
+            "positions": [np.array([0.0, 1.0, 0.0], dtype=np.float32)],
+            "rotations": [np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)],
+            "rgb_frames": [np.zeros((4, 4, 3), dtype=np.uint8)],
+        }
+
+        action_names, rollout_rgbs, rollout_positions = run_rollout(
+            evaluator=evaluator,
+            env=env,
+            episode=episode,
+            episode_cache=episode_cache,
+            replay_actions=[1],
+            episode_key="scene_1",
+            pivot_frame=0,
+            instruction="go",
+            subtask_id=1,
+            subtask_text="go straight",
+            rollout_id=1,
+            max_rollout_steps=4,
+            seed=0,
+        )
+
+        assert action_names == ["forward", "stop"]
+        assert len(rollout_rgbs) == 2
+        assert len(rollout_positions) == 3
+        assert evaluator.nav_model.calls == 2
+
     def test_select_pivots_uses_fixed_sample_count(self):
         spans = [(1, 0, 4), (2, 5, 27), (3, 28, 36)]
 
@@ -512,3 +606,95 @@ class TestWatcherRolloutGeneration:
 
         episode_logs = [record.message for record in caplog.records if record.message.startswith("episode ")]
         assert "episode 1/1 key=scene_2 pivots=1" in episode_logs
+
+    def test_generate_bundle_samples_episodes_before_generation(self, tmp_path, monkeypatch):
+        rows = []
+        for idx in range(10):
+            rows.append(
+                json.dumps(
+                    {
+                        "episode_key": f"scene_{idx}",
+                        "episode_id": idx,
+                        "scene_id": "scene",
+                        "instruction": "go",
+                        "plan": ["step"],
+                        "subtask_sequence": [1],
+                        "actions": [1],
+                    }
+                )
+            )
+        summary_full_path = tmp_path / "summary_full.jsonl"
+        summary_full_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+        episodes = [
+            SimpleNamespace(episode_id=str(idx), scene_id="root/scene/glb")
+            for idx in range(10)
+        ]
+        rollout_calls = []
+
+        class _Env:
+            def __init__(self):
+                self.episodes = episodes
+                self.current_episode = None
+
+            def close(self):
+                return None
+
+        class _Evaluator:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+                self.nav_model = object()
+
+            def config_env(self):
+                return _Env()
+
+            def prepare_model_image(self, rgb, info):
+                del info
+                return rgb
+
+            def _current_position(self, env):
+                del env
+                return np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+        monkeypatch.setattr(watcher_rollout_generation.torch.cuda, "is_available", lambda: False)
+        monkeypatch.setattr(watcher_rollout_generation, "build_nav_model", lambda *args, **kwargs: object())
+        monkeypatch.setattr(watcher_rollout_generation, "VLNEvaluator", _Evaluator)
+        monkeypatch.setattr(
+            watcher_rollout_generation,
+            "collect_episode_cache",
+            lambda env, episode, actions: {
+                "positions": [np.array([0.0, 0.0, 0.0], dtype=np.float32)],
+                "rgb_frames": [np.zeros((2, 2, 3), dtype=np.uint8)],
+            },
+        )
+        monkeypatch.setattr(
+            watcher_rollout_generation,
+            "run_rollout",
+            lambda **kwargs: (
+                rollout_calls.append(kwargs["episode_key"]) or (["stop"], [], [np.array([0.0, 0.0, 0.0], dtype=np.float32)])
+            ),
+        )
+        monkeypatch.setattr(watcher_rollout_generation, "copy_pivot_rgb", lambda **kwargs: "pivot.jpg")
+        monkeypatch.setattr(watcher_rollout_generation, "classify_sim_label", lambda **kwargs: "PROCEED")
+
+        args = SimpleNamespace(
+            summary_full_path=summary_full_path,
+            habitat_config_path="config/vln_r2r.yaml",
+            model_path="model",
+            base_model_path=None,
+            bundle_root=tmp_path / "bundle",
+            manifest_file=None,
+            max_episodes=None,
+            num_pivots=1,
+            num_rollouts=1,
+            min_rollout_steps=1,
+            max_rollout_steps=1,
+            episode_sample_rate=0.3,
+            seed=7,
+            resume=False,
+        )
+
+        processed_samples = generate_bundle(args)
+
+        assert processed_samples == 3
+        assert rollout_calls == ["scene_2", "scene_5", "scene_6"]
