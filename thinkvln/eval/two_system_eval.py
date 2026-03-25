@@ -378,6 +378,16 @@ def _sanitize_episode_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _episode_nav_success(episode_result: Dict[str, Any]) -> bool:
+    if "nav_success" in episode_result:
+        return bool(episode_result.get("nav_success", False))
+    metrics = dict(episode_result.get("metrics", {}) or {})
+    try:
+        return bool(float(metrics.get("success", 0.0)) > 0.0)
+    except Exception:
+        return False
+
+
 def _trace_without_images(trace: Dict[str, Any]) -> Dict[str, Any]:
     sanitized = dict(trace or {})
     sanitized["steps"] = [
@@ -417,6 +427,7 @@ def _debug_summary(episode_result: Dict[str, Any]) -> Dict[str, Any]:
         "episode_key": episode_result["episode_key"],
         "episodes_total": 1,
         "episodes_evaluated": 1,
+        "nav_success": _episode_nav_success(episode_result),
         "watcher_complete": bool(episode_result["watcher_complete"]),
         "failed": bool(episode_result.get("failed", False)),
         "failure_reason": str(episode_result.get("failure_reason", "") or ""),
@@ -439,6 +450,7 @@ def _debug_episode_payload(
         "episode_key": episode_result["episode_key"],
         "instruction": instruction,
         "plan_steps": list(plan_steps),
+        "nav_success": _episode_nav_success(episode_result),
         "watcher_complete": episode_result["watcher_complete"],
         "failed": episode_result.get("failed", False),
         "failure_reason": episode_result.get("failure_reason", ""),
@@ -478,6 +490,7 @@ def _debug_batch_summary(episode_results: Sequence[Dict[str, Any]]) -> Dict[str,
     return {
         "episodes_total": evaluated,
         "episodes_evaluated": evaluated,
+        "nav_success_rate": sum(float(bool(item.get("nav_success", False))) for item in episode_results) / denom,
         "watcher_complete_rate": sum(float(bool(item["watcher_complete"])) for item in episode_results) / denom,
         "avg_steps_total": sum(float(item["steps_total"]) for item in episode_results) / denom,
         "avg_watcher_wakeups": sum(float(item["watcher_wakeups"]) for item in episode_results) / denom,
@@ -844,6 +857,7 @@ class TwoSystemEpisodeRunner:
         if hasattr(self.nav_model, "get_last_debug_snapshot"):
             debug_snapshot = self.nav_model.get_last_debug_snapshot()
         state = self._agent_state(env)
+        map_agent_coord = self._current_map_agent_coord(env)
         return {
             "step_index": int(step_index),
             "env_step_index": None if env_step_index is None else int(env_step_index),
@@ -859,6 +873,7 @@ class TwoSystemEpisodeRunner:
             "active_plan_step": active_step,
             "watcher_hint": watcher_hint,
             "watcher_subtask": watcher_subtask,
+            "map_agent_coord": map_agent_coord,
             "rollout_index": int(rollout_index),
             "step_in_rollout": int(step_in_rollout),
             "is_rollout_start": bool(step_in_rollout == 0),
@@ -999,6 +1014,70 @@ class TwoSystemEpisodeRunner:
         )
 
     @staticmethod
+    def _current_top_down_map_info(env: Any) -> Optional[Dict[str, Any]]:
+        if not hasattr(env, "get_metrics"):
+            return None
+        try:
+            payload = dict(env.get_metrics()).get("top_down_map")
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        map_data = payload.get("map")
+        if map_data is None:
+            return None
+        copied = {
+            "map": np.array(map_data, copy=True),
+        }
+        fog = payload.get("fog_of_war_mask")
+        if fog is not None:
+            copied["fog_of_war_mask"] = np.array(fog, copy=True)
+        if "agent_map_coord" in payload:
+            copied["agent_map_coord"] = [list(item) for item in payload.get("agent_map_coord", [])]
+        if "agent_angle" in payload:
+            copied["agent_angle"] = [float(item) for item in payload.get("agent_angle", [])]
+        return copied
+
+    @staticmethod
+    def _current_map_agent_coord(env: Any) -> List[int]:
+        top_down_map = TwoSystemEpisodeRunner._current_top_down_map_info(env)
+        if not isinstance(top_down_map, dict):
+            return []
+        coords = top_down_map.get("agent_map_coord") or []
+        if not coords:
+            return []
+        coord = coords[0]
+        if not isinstance(coord, (list, tuple)) or len(coord) < 2:
+            return []
+        return [int(coord[0]), int(coord[1])]
+
+    @staticmethod
+    def _reference_path_map_coords(env: Any) -> List[List[int]]:
+        episode = getattr(env, "current_episode", None)
+        top_down_map = TwoSystemEpisodeRunner._current_top_down_map_info(env)
+        if episode is None or not isinstance(top_down_map, dict):
+            return []
+        reference_path = getattr(episode, "reference_path", None)
+        map_data = top_down_map.get("map")
+        if not isinstance(reference_path, list) or map_data is None:
+            return []
+        from habitat.utils.visualizations import maps as habitat_maps
+
+        map_shape = np.asarray(map_data).shape[0:2]
+        coords: List[List[int]] = []
+        for point in reference_path:
+            if not isinstance(point, (list, tuple)) or len(point) < 3:
+                continue
+            grid_x, grid_y = habitat_maps.to_grid(
+                point[2],
+                point[0],
+                map_shape,
+                sim=env.sim,
+            )
+            coords.append([int(grid_x), int(grid_y)])
+        return coords
+
+    @staticmethod
     def _current_metrics(env: Any) -> Dict[str, Any]:
         if hasattr(env, "get_metrics"):
             try:
@@ -1006,6 +1085,14 @@ class TwoSystemEpisodeRunner:
             except Exception:
                 return {}
         return {}
+
+    @staticmethod
+    def _current_nav_success(env: Any) -> bool:
+        metrics = TwoSystemEpisodeRunner._current_metrics(env)
+        try:
+            return bool(float(metrics.get("success", 0.0)) > 0.0)
+        except Exception:
+            return False
 
     def _failure_result(
         self,
@@ -1019,8 +1106,10 @@ class TwoSystemEpisodeRunner:
         failure_reason: str,
         error: str,
     ) -> Dict[str, Any]:
+        nav_success = self._current_nav_success(env)
         return {
             "episode_key": episode_key,
+            "nav_success": nav_success,
             "watcher_complete": False,
             "failed": True,
             "failure_reason": failure_reason,
@@ -1030,6 +1119,8 @@ class TwoSystemEpisodeRunner:
             "done_steps": list(done_steps),
             "final_memory": final_memory,
             "trace": trace,
+            "debug_top_down_map": self._current_top_down_map_info(env),
+            "debug_reference_path_map_coords": self._reference_path_map_coords(env),
             "metrics": _sanitize_episode_metrics(self._current_metrics(env)),
         }
 
@@ -1112,15 +1203,16 @@ class TwoSystemEpisodeRunner:
         decision_index = 0
         watcher_complete = False
         episode_over = bool(getattr(env, "episode_over", False))
+        nav_success = self._current_nav_success(env)
         rollout_index = 0
         last_active_step_end_position: Optional[np.ndarray] = None
         actor_calls_total = 0
         actor_subtask_id = 1
         actor_subtask_signature = self._actor_subtask_signature(todo_state, current_decision)
 
-        while steps_total < self.episode_step_cap and not watcher_complete and not episode_over:
+        while steps_total < self.episode_step_cap and not watcher_complete and not episode_over and not nav_success:
             rollout_slice: List[Dict[str, Any]] = []
-            while steps_total < self.episode_step_cap and not watcher_complete and not episode_over:
+            while steps_total < self.episode_step_cap and not watcher_complete and not episode_over and not nav_success:
                 if actor_calls_total >= self.max_actor_calls_per_episode:
                     trace["watcher_events"].append(
                         {
@@ -1285,6 +1377,10 @@ class TwoSystemEpisodeRunner:
                 self._log_actor_decision(episode_key=episode_key, step_record=step_record)
                 decision_index += 1
                 steps_total += 1
+                nav_success = self._current_nav_success(env)
+                if nav_success:
+                    rollout_slice[-1]["is_rollout_end"] = True
+                    break
 
                 wakeup_reason = self._wakeup_reason(
                     action=int(action),
@@ -1406,11 +1502,13 @@ class TwoSystemEpisodeRunner:
                     rollout_index += 1
                     break
 
-            if watcher_complete:
+            if watcher_complete or nav_success:
                 break
 
+        final_metrics = _sanitize_episode_metrics(self._current_metrics(env))
         return {
             "episode_key": episode_key,
+            "nav_success": bool(float(final_metrics.get("success", 0.0)) > 0.0),
             "watcher_complete": watcher_complete,
             "failed": False,
             "failure_reason": "",
@@ -1420,7 +1518,9 @@ class TwoSystemEpisodeRunner:
             "done_steps": list(done_steps),
             "final_memory": current_decision.memory,
             "trace": trace,
-            "metrics": _sanitize_episode_metrics(self._current_metrics(env)),
+            "debug_top_down_map": self._current_top_down_map_info(env),
+            "debug_reference_path_map_coords": self._reference_path_map_coords(env),
+            "metrics": final_metrics,
         }
 
 
@@ -1471,13 +1571,9 @@ def _write_debug_html(path: Path, episode_result: Dict[str, Any]) -> None:
             "<tr>"
             f"<td>{int(step.get('step_index', 0))}</td>"
             f"<td>{'' if step.get('env_step_index') is None else int(step['env_step_index'])}</td>"
-            f"<td><pre>{html_lib.escape(str(step.get('instruction', '')))}</pre></td>"
             f"<td>{html_lib.escape(str(step.get('action', '')))}</td>"
             f"<td>{float(step.get('actor_progress', 0.0)):.3f}</td>"
             f"<td>{html_lib.escape(str(step.get('actor_done', False)))}</td>"
-            f"<td>{html_lib.escape(str(step.get('active_plan_step', '')))}</td>"
-            f"<td>{html_lib.escape(str(step.get('watcher_subtask', '')))}</td>"
-            f"<td><pre>{html_lib.escape(str(step.get('watcher_hint', '')))}</pre></td>"
             f"<td><pre>{html_lib.escape(str(step.get('actor_prompt', '')))}</pre></td>"
             "</tr>"
         )
@@ -1500,7 +1596,7 @@ def _write_debug_html(path: Path, episode_result: Dict[str, Any]) -> None:
         f"<h1>{html_lib.escape(str(episode_result['episode_key']))}</h1>"
         "<h2>Actor Steps</h2>"
         "<table border='1'>"
-        "<tr><th>Decision</th><th>Env Step</th><th>Instruction</th><th>Action</th><th>Progress</th><th>Done</th><th>Active Step</th><th>Watcher Subtask</th><th>Watcher Hint</th><th>Actor Prompt</th></tr>"
+        "<tr><th>Decision</th><th>Env Step</th><th>Action</th><th>Progress</th><th>Done</th><th>Actor Prompt</th></tr>"
         f"{''.join(step_rows)}"
         "</table>"
         "<h2>Watcher Events</h2>"
@@ -1558,10 +1654,6 @@ def _build_debug_video_sections(
         (
             "Actor Input",
             [
-                ("Instruction", step.get("instruction", "")),
-                ("Active Step", step.get("active_plan_step", "")),
-                ("Subtask", step.get("watcher_subtask", "")),
-                ("Hint", step.get("watcher_hint", "")),
                 ("Prompt", step.get("actor_prompt", "")),
             ],
         ),
@@ -1612,6 +1704,7 @@ def _render_debug_video_frame(
     episode_key: str,
     step: Dict[str, Any],
     watcher_event: Optional[Dict[str, Any]] = None,
+    top_down_map_panel: Optional[Image.Image] = None,
 ) -> Image.Image:
     base_image = step.get("image")
     if not isinstance(base_image, Image.Image):
@@ -1620,12 +1713,15 @@ def _render_debug_video_frame(
     panel_width = 480
     sections = _build_debug_video_sections(episode_key, step, watcher_event)
     canvas_height = max(int(rgb.height), _estimate_debug_video_height(sections), 360)
-    canvas = Image.new("RGB", (int(rgb.width) + panel_width, canvas_height), color=(248, 248, 248))
+    map_width = int(top_down_map_panel.width) if isinstance(top_down_map_panel, Image.Image) else 0
+    canvas = Image.new("RGB", (int(rgb.width) + map_width + panel_width, canvas_height), color=(248, 248, 248))
     canvas.paste(rgb, (0, 0))
+    if isinstance(top_down_map_panel, Image.Image):
+        canvas.paste(top_down_map_panel, (int(rgb.width), 0))
 
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.load_default()
-    panel_x0 = int(rgb.width)
+    panel_x0 = int(rgb.width) + map_width
     draw.rectangle((panel_x0, 0, canvas.width, canvas.height), fill=(250, 250, 250))
     draw.line((panel_x0, 0, panel_x0, canvas.height), fill=(180, 180, 180), width=1)
 
@@ -1668,6 +1764,64 @@ def _pad_debug_video_frame(frame: Image.Image, width: int, height: int) -> Image
     return padded
 
 
+def _draw_debug_map_path(
+    draw: ImageDraw.ImageDraw,
+    coords: Sequence[Sequence[int]],
+    color: tuple[int, int, int],
+    width: int = 3,
+) -> None:
+    points = [
+        (int(coord[1]), int(coord[0]))
+        for coord in coords
+        if isinstance(coord, (list, tuple)) and len(coord) >= 2
+    ]
+    if len(points) >= 2:
+        draw.line(points, fill=color, width=int(width))
+    for x, y in points:
+        radius = max(2, int(width))
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
+
+
+def _render_debug_top_down_map_panel(
+    episode_result: Dict[str, Any],
+    step_index: int,
+    output_height: int,
+) -> Optional[Image.Image]:
+    top_down_map = episode_result.get("debug_top_down_map")
+    if not isinstance(top_down_map, dict):
+        return None
+    raw_map = top_down_map.get("map")
+    if not isinstance(raw_map, np.ndarray):
+        return None
+    from habitat.utils.visualizations import maps as habitat_maps
+
+    fog_mask = top_down_map.get("fog_of_war_mask")
+    map_rgb = habitat_maps.colorize_topdown_map(
+        raw_map,
+        fog_mask if isinstance(fog_mask, np.ndarray) else None,
+    )
+    map_image = Image.fromarray(np.asarray(map_rgb, dtype=np.uint8), mode="RGB")
+    draw = ImageDraw.Draw(map_image)
+    _draw_debug_map_path(
+        draw,
+        episode_result.get("debug_reference_path_map_coords", []),
+        color=(72, 176, 88),
+        width=3,
+    )
+    agent_coords = [
+        step.get("map_agent_coord", [])
+        for step in episode_result.get("trace", {}).get("steps", [])
+        if int(step.get("step_index", -1)) <= int(step_index)
+    ]
+    _draw_debug_map_path(draw, agent_coords, color=(220, 76, 70), width=4)
+
+    if map_image.height > map_image.width:
+        map_image = map_image.transpose(Image.Transpose.ROTATE_90)
+    target_height = max(1, int(output_height))
+    target_width = max(1, int(round(map_image.width * (target_height / max(map_image.height, 1)))))
+    return map_image.resize((target_width, target_height), Image.Resampling.BICUBIC)
+
+
 def _write_debug_video(path: Path, episode_result: Dict[str, Any], fps: int = 2) -> None:
     import cv2
 
@@ -1686,6 +1840,11 @@ def _write_debug_video(path: Path, episode_result: Dict[str, Any], fps: int = 2)
             episode_key=str(episode_result.get("episode_key", "")),
             step=step,
             watcher_event=watcher_event_lookup.get(int(step.get("step_index", -1))),
+            top_down_map_panel=_render_debug_top_down_map_panel(
+                episode_result,
+                step_index=int(step.get("step_index", -1)),
+                output_height=int(step.get("image").height) if isinstance(step.get("image"), Image.Image) else 360,
+            ),
         )
         for step in steps
     ]
@@ -1800,6 +1959,7 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
             if trace_handle is not None:
                 payload = _json_safe({
                     "episode_key": episode_result["episode_key"],
+                    "nav_success": _episode_nav_success(episode_result),
                     "watcher_complete": episode_result["watcher_complete"],
                     "steps_total": episode_result["steps_total"],
                     "watcher_wakeups": episode_result["watcher_wakeups"],
@@ -1827,6 +1987,7 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
         "episodes_total": int(reduced.get("episodes_total", 0.0)),
         "episodes_evaluated": int(reduced.get("episodes_evaluated", 0.0)),
         "episodes_missing_meta": int(reduced.get("episodes_missing_meta", 0.0)),
+        "nav_success_rate": float(reduced.get("success_sum", 0.0)) / episodes_eval,
         "watcher_complete_rate": float(reduced.get("watcher_complete", 0.0)) / episodes_eval,
         "avg_steps_total": float(reduced.get("steps_total", 0.0)) / episodes_eval,
         "avg_watcher_wakeups": float(reduced.get("watcher_wakeups", 0.0)) / episodes_eval,

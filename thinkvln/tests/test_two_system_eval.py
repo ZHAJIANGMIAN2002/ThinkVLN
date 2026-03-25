@@ -405,6 +405,45 @@ class _NoStepEnv:
         return {"success": 0.0, "distance_to_goal": 1.0}
 
 
+class _SuccessBeforeEpisodeOverEnv:
+    def __init__(self):
+        self.current_episode = None
+        self.episode_over = False
+        self.step_count = 0
+        self._frame = np.zeros((8, 8, 3), dtype=np.uint8)
+        self.sim = SimpleNamespace(get_agent_state=self._get_agent_state)
+
+    def _get_agent_state(self):
+        return SimpleNamespace(
+            position=np.array([float(self.step_count), 0.0, 0.0], dtype=np.float32),
+            rotation=np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+        )
+
+    def reset(self):
+        self.step_count = 0
+        self.episode_over = False
+        return {"rgb": self._frame}
+
+    def step(self, action):
+        del action
+        self.step_count += 1
+        return {"rgb": self._frame}
+
+    def get_metrics(self):
+        return {
+            "success": 1.0 if self.step_count >= 1 else 0.0,
+            "distance_to_goal": 0.0 if self.step_count >= 1 else 1.0,
+        }
+
+
+class _NoEarlySuccessEnv(_FakeEnv):
+    def get_metrics(self):
+        return {
+            "success": 0.0,
+            "distance_to_goal": float(max(0, 3 - self.step_count)),
+        }
+
+
 def _write_config(path: Path) -> None:
     payload = {
         "actor": {
@@ -720,7 +759,7 @@ class TestTwoSystemEval:
         )
 
         result = runner.run_episode(
-            env=_FakeEnv(),
+            env=_NoEarlySuccessEnv(),
             episode_key="scene_1",
             instruction="go to the sink",
             plan_steps=["reach the doorway", "approach the sink"],
@@ -854,6 +893,44 @@ class TestTwoSystemEval:
         assert result["steps_total"] == 1
         assert result["watcher_wakeups"] == 1
         assert result["trace"]["watcher_events"][-1]["wakeup_reason"] == "env_episode_over"
+
+    def test_episode_runner_stops_immediately_on_navigation_success(self):
+        class _ShouldNotWakeWatcher:
+            def initialize(self, instruction, plan_steps, first_observation, episode_key):
+                del instruction, plan_steps, first_observation, episode_key
+                return WatcherDecision(
+                    memory="start memory",
+                    done=False,
+                    subtask="move forward",
+                    raw_response={"memory": "start memory", "done": False, "subtask": "move forward"},
+                    wakeup_reason="init",
+                )
+
+            def update(self, instruction, todo_state, memory_text, rollout_slice, episode_key):
+                raise AssertionError("watcher.update should not be called after navigation success")
+
+        runner = TwoSystemEpisodeRunner(
+            nav_model=_FakeNavModel([(1, 0.2, False), (1, 0.2, False)]),
+            watcher_backend=_ShouldNotWakeWatcher(),
+            max_steps_per_wakeup=5,
+            progress_threshold=0.95,
+            episode_step_cap=10,
+            forbidden_actions=[],
+        )
+
+        result = runner.run_episode(
+            env=_SuccessBeforeEpisodeOverEnv(),
+            episode_key="scene_nav_success",
+            instruction="go ahead",
+            plan_steps=["move forward"],
+        )
+
+        assert result["failed"] is False
+        assert result["nav_success"] is True
+        assert result["metrics"]["success"] == 1.0
+        assert result["steps_total"] == 1
+        assert result["watcher_wakeups"] == 0
+        assert result["watcher_complete"] is False
 
     def test_episode_runner_ignores_actor_done_for_wakeup(self):
         class _WakeupReasonWatcher:
@@ -1114,6 +1191,8 @@ class TestTwoSystemEval:
         assert "reach door" in html
         assert "go to the sink" in html
         assert "Hint from watcher: hint" in html
+        assert "Active Step</th>" not in html
+        assert "Watcher Hint</th>" not in html
 
         sections = two_system_eval._build_debug_video_sections(
             episode_key="scene_1",
@@ -1137,10 +1216,10 @@ class TestTwoSystemEval:
             },
         )
         flat_lines = "\n".join(f"{title}: {label}: {value}" for title, fields in sections for label, value in fields)
-        assert "Actor Input: Instruction: go to the sink" in flat_lines
-        assert "Actor Input: Subtask: reach door" in flat_lines
-        assert "Actor Input: Hint: hint" in flat_lines
         assert "Actor Input: Prompt: Instruction: go to the sink" in flat_lines
+        assert "Actor Input: Instruction: go to the sink" not in flat_lines
+        assert "Actor Input: Subtask: reach door" not in flat_lines
+        assert "Actor Input: Hint: hint" not in flat_lines
 
         captured = {}
 
@@ -1300,6 +1379,77 @@ class TestTwoSystemEval:
         assert captured["fps"] == 3
         assert len(captured["frames"]) == 2
         assert captured["frames"][0] == captured["frames"][1]
+        assert captured["released"] is True
+
+    def test_write_debug_video_appends_top_down_map_panel(self, tmp_path: Path, monkeypatch):
+        captured = {}
+
+        class _FakeWriter:
+            def __init__(self, path, fourcc, fps, size):
+                captured["path"] = path
+                captured["fourcc"] = fourcc
+                captured["fps"] = fps
+                captured["size"] = size
+                captured["frames"] = []
+
+            def write(self, frame):
+                captured["frames"].append(frame.shape[:2])
+
+            def release(self):
+                captured["released"] = True
+
+        fake_cv2 = SimpleNamespace(
+            VideoWriter=lambda path, fourcc, fps, size: _FakeWriter(path, fourcc, fps, size),
+            VideoWriter_fourcc=lambda *args: 1234,
+            COLOR_RGB2BGR=1,
+            cvtColor=lambda frame, code: frame,
+        )
+        monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+
+        video_path = tmp_path / "debug" / "with_map.mp4"
+        two_system_eval._write_debug_video(
+            video_path,
+            {
+                "episode_key": "scene_with_map",
+                "debug_top_down_map": {
+                    "map": np.ones((16, 12), dtype=np.uint8),
+                    "fog_of_war_mask": np.ones((16, 12), dtype=np.uint8),
+                },
+                "debug_reference_path_map_coords": [[1, 1], [5, 4], [10, 8]],
+                "trace": {
+                    "steps": [
+                        {
+                            "step_index": 0,
+                            "env_step_index": 0,
+                            "image": Image.new("RGB", (32, 24), color=(10, 20, 30)),
+                            "instruction": "go to the sink",
+                            "action": "forward",
+                            "actor_progress": 0.2,
+                            "actor_done": False,
+                            "actor_prompt": "short prompt",
+                            "map_agent_coord": [1, 1],
+                        },
+                        {
+                            "step_index": 1,
+                            "env_step_index": 1,
+                            "image": Image.new("RGB", (32, 24), color=(30, 20, 10)),
+                            "instruction": "go to the sink",
+                            "action": "forward",
+                            "actor_progress": 0.9,
+                            "actor_done": True,
+                            "actor_prompt": "long prompt " * 10,
+                            "map_agent_coord": [4, 3],
+                        },
+                    ],
+                    "watcher_events": [],
+                },
+            },
+            fps=3,
+        )
+
+        assert captured["fps"] == 3
+        assert len(captured["frames"]) == 2
+        assert captured["size"][0] > 32 + 480
         assert captured["released"] is True
 
         config_path = tmp_path / "two_system_eval.yaml"
@@ -1499,6 +1649,7 @@ class TestTwoSystemEval:
         payload = json.loads(trace_path.read_text(encoding="utf-8").strip())
 
         assert summary["episodes_evaluated"] == 1
+        assert payload["nav_success"] is True
         assert payload["trace"]["steps"][0]["predicted_waypoint"] == [1.0, 2.0]
         assert payload["metrics"]["success"] == 1.0
         assert "top_down_map" not in payload["metrics"]
