@@ -148,7 +148,7 @@ class TestWatcherManualSwitchAnnotation:
         assert rows[-1]["sample_id"] == "todo_p000011_r01"
         assert rows[-1]["should_switch"] is True
 
-    def test_build_store_defaults_to_seeded_random_ten_percent_sample(self, tmp_path: Path):
+    def test_build_store_defaults_to_full_manifest(self, tmp_path: Path):
         bundle_root = tmp_path / "bundle"
         image_root = bundle_root / "images"
         manifest_file = tmp_path / "manifest.jsonl"
@@ -185,13 +185,12 @@ class TestWatcherManualSwitchAnnotation:
                 bundle_root=bundle_root,
                 manifest_file=manifest_file,
                 output_file=output_file,
-                seed=42,
                 bootstrap_admin_password="secret",
             )
         )
 
-        assert len(store.samples) == 2
-        assert [sample["sample_id"] for sample in store.samples] == ["sample_19", "sample_05"]
+        assert len(store.samples) == 20
+        assert [sample["sample_id"] for sample in store.samples] == [f"sample_{idx:02d}" for idx in range(20)]
 
     def test_build_store_reconciles_stale_tasks_when_sample_set_changes(self, tmp_path: Path):
         bundle_root = tmp_path / "bundle"
@@ -269,3 +268,4 @@ class TestWatcherManualSwitchAnnotation:
         assert "Next Task If Switched" in script
         assert "if (frameIndex >= frames.length - 1)" in script
         assert "renderFrame(0);" in script
+        assert 'pushMineSampleId(sample.sample_id);\n        renderMineSelector();\n        await claimNext();' in script

@@ -161,6 +161,10 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         default=None,
         metadata={"help": "Path to CoT data JSONL file (absolute path)"}
     )
+    extra_action_data: Optional[str] = field(
+        default=None,
+        metadata={"help": "JSON string: list of {data_path, image_root} dicts for additional action data sources (e.g. ScaleVLN)"}
+    )
 
     val_split_ratio: float = field(
         default=0.1,
@@ -204,8 +208,8 @@ class ThinkVLNTrainingArguments(TrainingArguments):
         super().__post_init__()
         
         # Validate data paths
-        if self.action_data_path is None and self.cot_data_path is None:
-            raise ValueError("At least one of action_data_path or cot_data_path must be provided")
+        if self.action_data_path is None and self.cot_data_path is None and not self.extra_action_data:
+            raise ValueError("At least one of action_data_path, cot_data_path, or extra_action_data must be provided")
         
         # Validate validation split
         if not 0.0 <= self.val_split_ratio < 1.0:
@@ -988,13 +992,21 @@ def create_datasets(args: ThinkVLNTrainingArguments, processor, model):
     logger.info(f"Image root: {args.image_root}")
     logger.info(f"Action data: {args.action_data_path}")
     logger.info(f"CoT data: {args.cot_data_path}")
+    logger.info(f"Extra action sources: {args.extra_action_data}")
     logger.info(f"Sample ratio: {args.sample_ratio}, Val split ratio: {args.val_split_ratio}")
-    
+
+    import json as _json
+    extra_action_sources = None
+    if args.extra_action_data:
+        extra_action_sources = _json.loads(args.extra_action_data)
+        logger.info(f"Loaded {len(extra_action_sources)} extra action source(s)")
+
     full_dataset = ThinkVLNDataset(
         action_data_path=args.action_data_path,
         cot_data_path=args.cot_data_path,
         image_root=args.image_root,
         skip_missing_images=True,
+        extra_action_sources=extra_action_sources,
     )
     logger.info(f"Full dataset created with {len(full_dataset)} samples")
     
@@ -1114,6 +1126,11 @@ def create_training_args_from_config(config: Dict[str, Any]) -> ThinkVLNTraining
         flat_config['image_root'] = data_cfg.get('image_root', 'data')
         flat_config['action_data_path'] = data_cfg.get('action_data_path')
         flat_config['cot_data_path'] = data_cfg.get('cot_data_path')
+
+        extra = data_cfg.get('extra_action_data')
+        if extra:
+            import json as _json
+            flat_config['extra_action_data'] = _json.dumps(extra)
 
         flat_config['val_split_ratio'] = data_cfg.get('val_split_ratio', 0.1)
         flat_config['sample_ratio'] = data_cfg.get('sample_ratio', 1.0)

@@ -115,7 +115,7 @@ class ThinkVLNNavigationModel(NavigationModel):
         self._last_predicted_progress = 0.0
         self._last_predicted_done = False
         self._last_debug_snapshot: Optional[Dict[str, Any]] = None
-        if hasattr(self.model, "reset_for_env"):
+        if hasattr(self.model, "reset_for_env") and hasattr(self, "env_id"):
             self.model.reset_for_env(self.env_id)
 
     def get_last_debug_snapshot(self) -> Optional[Dict[str, Any]]:
@@ -910,6 +910,69 @@ class StreamVLNNavigationModel(NavigationModel):
     def eval(self):
         """Set model to evaluation mode."""
         self.model.eval()
+
+    def reset_episode_state(self, episode_key: Optional[str] = None):
+        self.episode_key = episode_key
+        self.rgb_list = []
+        self.depth_list = []
+        self.pose_list = []
+        self.intrinsic_list = []
+        self.time_ids = []
+        self.action_seq = []
+        self.past_key_values = None
+        self.output_ids = None
+        self.step_count = 0
+        self.last_subtask_id = None
+        self.last_subgoal = None
+        self.prev_progress = 0.0
+        self._last_predicted_progress = 0.0
+        self._last_predicted_done = False
+        self._last_debug_snapshot: Optional[Dict[str, Any]] = None
+        if hasattr(self.model, "reset_for_env"):
+            self.model.reset_for_env(self.env_id)
+
+    def get_last_debug_snapshot(self) -> Optional[Dict[str, Any]]:
+        if self._last_debug_snapshot is None:
+            return None
+        return dict(self._last_debug_snapshot)
+
+    @staticmethod
+    def _augment_instruction(instruction: str, subgoal: Optional[str] = None, hint: Optional[str] = None) -> str:
+        text = str(instruction or "").strip()
+        if str(subgoal or "").strip():
+            text = f"{text}\nCurrent subtask: {str(subgoal).strip()}"
+        if str(hint or "").strip():
+            text = f"{text}\nWatcher hint: {str(hint).strip()}"
+        return text
+
+    def _infer_progress_done_from_aux_head(
+        self,
+        input_dict: Dict[str, Any],
+        fallback_action: int,
+    ) -> Tuple[float, bool]:
+        if not hasattr(self.model, "predict_progress_done"):
+            progress = 1.0 if int(fallback_action) == self.actions2idx["STOP"] else float(self.prev_progress)
+            done = bool(int(fallback_action) == self.actions2idx["STOP"] or progress > self.done_threshold)
+            return progress, done
+        try:
+            progress_preds, done_preds = self.model.predict_progress_done(
+                input_ids=input_dict["inputs"],
+                images=input_dict["images"],
+                depths=input_dict["depths"],
+                poses=input_dict["poses"],
+                intrinsics=input_dict["intrinsics"],
+                time_ids=input_dict.get("time_ids"),
+                task_type=input_dict.get("task_type"),
+            )
+            progress = float(progress_preds[0].detach().float().cpu().item())
+            done_prob = float(done_preds[0].detach().float().cpu().item())
+            progress = max(0.0, min(1.0, progress))
+            done = bool(done_prob > 0.5)
+            return progress, done
+        except Exception:
+            progress = 1.0 if int(fallback_action) == self.actions2idx["STOP"] else float(self.prev_progress)
+            done = bool(int(fallback_action) == self.actions2idx["STOP"] or progress > self.done_threshold)
+            return progress, done
     
     def _preprocess_depth_image(self, depth_image, do_depth_scale=True, depth_scale=1000):
         """Preprocess depth image to match model input size."""

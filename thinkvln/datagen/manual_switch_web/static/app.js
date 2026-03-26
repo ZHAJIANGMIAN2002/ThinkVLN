@@ -281,7 +281,7 @@ function bindSampleCard(card, sample) {
         renderStatus(payload.status || {});
         pushMineSampleId(sample.sample_id);
         renderMineSelector();
-        setFlash("Saved");
+        await claimNext();
       } catch (error) {
         setFlash(error.message);
       } finally {

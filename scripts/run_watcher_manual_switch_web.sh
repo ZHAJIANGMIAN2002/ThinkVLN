@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BUNDLE_ROOT="${BUNDLE_ROOT:-results/watcher_rollout_train_full_v2}"
+BUNDLE_ROOT="${BUNDLE_ROOT:-results/watcher_rollout_train_full_streamvln_rgb}"
 MANIFEST_FILE="${MANIFEST_FILE:-${BUNDLE_ROOT}/manifest/watcher_rollout_manifest.jsonl}"
 OUTPUT_FILE="${OUTPUT_FILE:-${BUNDLE_ROOT}/watcher_manual_switch_annotations.jsonl}"
 DB_FILE="${DB_FILE:-${BUNDLE_ROOT}/watcher_manual_switch_web.sqlite3}"

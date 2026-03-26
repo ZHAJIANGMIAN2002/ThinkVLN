@@ -1,0 +1,68 @@
+model:
+  model_name_or_path: "/mnt/swx/ThinkVLN/model_weights/qwen3vl-2"
+  num_query_tokens: 4
+  num_action_classes: 4
+  action_loss_weight: 0.1
+  progress_loss_weight: 1.0
+  done_loss_weight: 1.0
+  use_huber_loss_for_progress: true
+  use_lora: true
+  lora_r: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  freeze_vision_tower: true
+  freeze_llm: false
+  use_flash_attention_2: true
+
+data:
+  # Primary dataset: R2R
+  image_root: "data/trajectory_data/R2R_back/r2r"
+  action_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/R2R_back/summary_full.jsonl"
+  cot_data_path: null
+
+  # Additional dataset: ScaleVLN
+  # NOTE: ScaleVLN images are stored as mp4 videos in ScaleVLN_back/images/.
+  # Extract frames first: python thinkvln/tools/extract_scalevln_frames.py
+  extra_action_data:
+    - data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/ScaleVLN_back/summary_full_fixed.jsonl"
+      image_root: "/mnt/swx/ThinkVLN/data/trajectory_data/ScaleVLN_back"
+
+  sample_ratio: 1.0
+  val_split_ratio: 0.02
+  memory_num_history_images: 6
+  done_threshold: 0.85
+
+training:
+  output_dir: "outputs/actor/lora/cotrain-r2r-scalevln"
+  num_train_epochs: 1
+  max_steps: -1
+  per_device_train_batch_size: 16
+  gradient_accumulation_steps: 1
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_steps: 100
+  max_grad_norm: 1.0
+  lr_scheduler_type: "cosine"
+  bf16: true
+  fp16: false
+  gradient_checkpointing: true
+  logging_steps: 10
+  logging_first_step: true
+  save_steps: 1000
+  save_total_limit: 3
+  eval_strategy: "steps"
+  eval_steps: 1000
+  per_device_eval_batch_size: 16
+  eval_accumulation_steps: 1
+  deepspeed: "config/zero2.json"
+  dataloader_num_workers: 4
+  dataloader_pin_memory: true
+  seed: 42
+  ddp_find_unused_parameters: false
+  ddp_backend: "nccl"
+
+logging:
+  report_to: ["wandb"]
+  run_name: "thinkvln-cotrain-r2r-scalevln"
+  logging_dir: null

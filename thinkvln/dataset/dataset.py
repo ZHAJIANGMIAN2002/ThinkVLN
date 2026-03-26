@@ -45,7 +45,7 @@ def _episode_key_to_dir_key(episode_key: str) -> str:
 
 class ThinkVLNDataset(Dataset):
     """Mixed action and CoT dataset for ThinkVLN training."""
-    
+
     def __init__(
         self,
         action_data_path: Optional[str] = None,
@@ -54,6 +54,7 @@ class ThinkVLNDataset(Dataset):
         skip_missing_images: bool = False,
         seed: int = 42,
         enable_cot: bool = False,
+        extra_action_sources: Optional[List[Dict[str, str]]] = None,
     ):
         self.action_data_path = action_data_path
         self.cot_data_path = cot_data_path
@@ -61,20 +62,27 @@ class ThinkVLNDataset(Dataset):
         self.skip_missing_images = skip_missing_images
         self.seed = seed
         self.enable_cot = bool(enable_cot)
-        
+        # List of dicts with keys: data_path, image_root
+        self.extra_action_sources = extra_action_sources or []
+
         self.action_samples = []
         self.cot_samples = []
         self.samples = []
         self.missing_action_images = 0
         self.missing_cot_images = 0
-        
+
         self._load_action_data()
+        for src in self.extra_action_sources:
+            self._load_action_data(
+                data_path=src["data_path"],
+                image_root=src.get("image_root", self.image_root),
+            )
         if self.enable_cot:
             self._load_cot_data()
         elif self.cot_data_path:
             logger.info("ThinkVLNDataset: cot_data_path is provided but CoT is disabled; ignoring CoT samples.")
         self._mix_samples()
-        
+
         if self.skip_missing_images and (self.missing_action_images or self.missing_cot_images):
             logger.warning(
                 "Dataset skipped missing images: action=%d, cot=%d",
@@ -82,7 +90,7 @@ class ThinkVLNDataset(Dataset):
                 self.missing_cot_images,
             )
 
-        if (self.action_data_path or self.cot_data_path) and not self.samples:
+        if (self.action_data_path or self.cot_data_path or self.extra_action_sources) and not self.samples:
             raise ValueError(
                 "No valid samples loaded. Check image_root/data paths; all candidate samples were filtered."
             )
@@ -90,30 +98,34 @@ class ThinkVLNDataset(Dataset):
         print(f"Dataset: {len(self.action_samples)} action, "
               f"{len(self.cot_samples)} CoT, {len(self.samples)} total")
     
-    def _load_action_data(self):
+    def _load_action_data(self, data_path: Optional[str] = None, image_root: Optional[str] = None):
         """Load action trajectories and create frame-level samples."""
-        if not self.action_data_path or not os.path.exists(self.action_data_path):
+        data_path = data_path if data_path is not None else self.action_data_path
+        image_root = image_root if image_root is not None else self.image_root
+        if not data_path or not os.path.exists(data_path):
             return
-        
-        with open(self.action_data_path, 'r') as f:
+
+        with open(data_path, 'r') as f:
             for line in f:
                 traj = json.loads(line.strip())
-                dir_episode_key = _episode_key_to_dir_key(traj['episode_key'])
+                # Use 'video' field as image subdir if present, else derive from episode_key
+                video_subdir = traj.get('video')
+                if video_subdir:
+                    image_dir = os.path.join(image_root, video_subdir) if image_root else video_subdir
+                else:
+                    image_dir = os.path.join(image_root, _episode_key_to_dir_key(traj['episode_key'])) if image_root else None
+
                 for frame_idx in range(traj['num_frames']):
-                    if self.skip_missing_images and self.image_root:
-                        image_path = os.path.join(
-                            self.image_root,
-                            dir_episode_key,
-                            f"{frame_idx:06d}_rgb.jpg",
-                        )
+                    if self.skip_missing_images and image_dir:
+                        image_path = os.path.join(image_dir, f"{frame_idx:06d}_rgb.jpg")
                         if not os.path.exists(image_path):
                             self.missing_action_images += 1
                             continue
 
                     subtask_idx = traj['subtask_sequence'][frame_idx]
                     plan_step = traj['plan'][subtask_idx - 1] if subtask_idx > 0 else traj['plan'][0]
-                    
-                    self.action_samples.append({
+
+                    sample = {
                         'data_type': 'action',
                         'episode_key': traj['episode_key'],
                         'frame_idx': frame_idx,
@@ -122,7 +134,10 @@ class ThinkVLNDataset(Dataset):
                         'current_subtask_idx': subtask_idx,
                         'actions': traj['actions'],
                         'subtask_sequence': traj['subtask_sequence'],
-                    })
+                    }
+                    if image_dir:
+                        sample['image_dir'] = image_dir
+                    self.action_samples.append(sample)
     
     def _load_cot_data(self):
         """Load CoT reasoning samples."""
@@ -328,9 +343,11 @@ class ThinkVLNDataCollator:
     
     def _process_action(self, sample: Dict[str, Any]) -> Dict[str, Any]:
         """Process action sample with query tokens, memory context and scalar progress/done labels."""
-        dir_episode_key = _episode_key_to_dir_key(sample["episode_key"])
         frame_idx = int(sample["frame_idx"])
         subtask_sequence = sample["subtask_sequence"]
+        image_dir = sample.get("image_dir") or os.path.join(
+            self.image_root, _episode_key_to_dir_key(sample["episode_key"])
+        )
 
         history_indices = select_memory_frame_indices(
             frame_idx=frame_idx,
@@ -340,7 +357,7 @@ class ThinkVLNDataCollator:
         selected_indices = history_indices + [frame_idx]
         images = []
         for idx in selected_indices:
-            image_path = os.path.join(self.image_root, dir_episode_key, f"{idx:06d}_rgb.jpg")
+            image_path = os.path.join(image_dir, f"{idx:06d}_rgb.jpg")
             images.append(load_image(image_path))
 
         prev_progress = compute_previous_step_progress(frame_idx, subtask_sequence)

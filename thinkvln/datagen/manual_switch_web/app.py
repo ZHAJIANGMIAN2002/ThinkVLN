@@ -716,13 +716,10 @@ def build_store(config: ManualSwitchConfig) -> ManualSwitchStore:
     manifest_rows = load_jsonl(config.manifest_file)
     summary_lookup = load_summary_full(config.summary_full_path)
     rows = [enrich_record_from_summary(row, summary_lookup) for row in manifest_rows]
-    default_sample = config.max_samples is None
-    if config.shuffle or default_sample:
+    if config.shuffle:
         rng = random.Random(config.seed)
         rng.shuffle(rows)
-    if default_sample:
-        rows = rows[: max(1, int(len(rows) * 0.1))] if rows else []
-    else:
+    if config.max_samples is not None:
         rows = rows[: max(0, int(config.max_samples))]
     samples = [prepare_sample(config.bundle_root, row, config.image_stride) for row in rows]
     return ManualSwitchStore(config=config, samples=samples)
