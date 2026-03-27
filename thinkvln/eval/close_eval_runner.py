@@ -48,6 +48,16 @@ from thinkvln.eval.close_eval_utils import (
 logger = logging.getLogger(__name__)
 
 
+def supports_progress_done_actor_model(nav_model: NavigationModel) -> bool:
+    return callable(getattr(nav_model, "predict_action_with_progress_and_done", None))
+
+
+def supports_memory_bank_replay(nav_model: NavigationModel) -> bool:
+    if isinstance(nav_model, ThinkVLNActorNavigationModel):
+        return True
+    return bool(getattr(nav_model, "supports_memory_bank_replay", False))
+
+
 class VLNEvaluator:
     """Closed-loop evaluator for the memory-model subtask pipeline."""
 
@@ -261,7 +271,7 @@ class VLNEvaluator:
         episode_key: str,
     ):
         """Replay to target frame and prime model memory with frames [0, target_frame)."""
-        if not isinstance(self.nav_model, ThinkVLNActorNavigationModel):
+        if not supports_memory_bank_replay(self.nav_model):
             return self._replay_to_frame(env, episode, actions, target_frame)
 
         self.nav_model.reset_episode_state(episode_key=episode_key)
@@ -290,7 +300,7 @@ class VLNEvaluator:
     ):
         env.current_episode = episode
         observations = env.reset()
-        if not isinstance(self.nav_model, ThinkVLNActorNavigationModel) or int(subtask_id) != 1:
+        if not supports_memory_bank_replay(self.nav_model) or int(subtask_id) != 1:
             return observations
 
         self.nav_model.reset_episode_state(episode_key=episode_key)
@@ -311,7 +321,7 @@ class VLNEvaluator:
         return observations
 
     def eval_subtask_closed_loop(self, idx: int, summary_full: Dict[str, Dict[str, Any]]) -> Dict[str, float]:
-        """Evaluate subtask-by-subtask closed-loop success for ThinkVLNActor.
+        """Evaluate subtask-by-subtask closed-loop success for actor-capable nav models.
 
         Workflow per episode:
         1. Read episode metadata from `summary_full` (actions, subtask sequence, plan).
@@ -323,8 +333,11 @@ class VLNEvaluator:
         Returns:
             Scalar stats dict suitable for distributed `all_reduce`.
         """
-        if not isinstance(self.nav_model, ThinkVLNActorNavigationModel):
-            raise ValueError("Subtask ladder mode currently supports ThinkVLNActorNavigationModel only.")
+        if not supports_progress_done_actor_model(self.nav_model):
+            raise ValueError(
+                "Subtask ladder mode requires a navigation model that implements "
+                "predict_action_with_progress_and_done(...)."
+            )
 
         env = self.config_env()
         log_interval = max(0, int(getattr(self.args, "debug_log_interval", 0)))
@@ -432,7 +445,7 @@ class VLNEvaluator:
                                 target_frame=start_frame,
                                 episode_key=episode_key,
                             )
-                        replay_memory_count = len(self.nav_model.memory_bank_images)
+                        replay_memory_count = len(getattr(self.nav_model, "memory_bank_images", []))
                         goal_pos = gt_positions[min(end_frame, len(gt_positions) - 1)]
                         plan_idx = min(max(subtask_idx - 1, 0), len(plan_steps) - 1)
                         subgoal_text = plan_steps[plan_idx]
@@ -489,16 +502,16 @@ class VLNEvaluator:
 
                             expected_memory_bank_size = replay_memory_count + rollout_steps + 1
                             memory_bank_size = int(
-                                snapshot.get("memory_bank_size", len(self.nav_model.memory_bank_images))
+                                snapshot.get("memory_bank_size", len(getattr(self.nav_model, "memory_bank_images", [])))
                                 if snapshot is not None
-                                else len(self.nav_model.memory_bank_images)
+                                else len(getattr(self.nav_model, "memory_bank_images", []))
                             )
                             memory_frame_count_ok = memory_bank_size == expected_memory_bank_size
 
                             if snapshot is not None:
                                 memory_bank_subtasks = snapshot.get("memory_bank_subtasks", [])
                             else:
-                                memory_bank_subtasks = list(self.nav_model.memory_bank_subtasks)
+                                memory_bank_subtasks = list(getattr(self.nav_model, "memory_bank_subtasks", []))
                             if subtask_idx > 1:
                                 memory_includes_past_subtask = any(
                                     int(bank_subtask) < int(subtask_idx)
@@ -643,4 +656,4 @@ class VLNEvaluator:
         )
         return stats
 
-__all__ = ["VLNEvaluator"]
+__all__ = ["VLNEvaluator", "supports_progress_done_actor_model", "supports_memory_bank_replay"]

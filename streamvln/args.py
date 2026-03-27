@@ -8,6 +8,9 @@ import transformers
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default="facebook/opt-125m")
     model_class_name: Optional[str] = field(default=None, metadata={"help": "Used to init model class, format is XXXXForCausalLM. e.g. currently XXXX is chosen from LlavaLlama, LlavaMixtral, LlavaMistral, Llama"})
+    model_type: Optional[str] = field(default="streamvln")
+    progress_loss_weight: float = field(default=1.0)
+    done_loss_weight: float = field(default=1.0)
 
     mm_tunable_parts: Optional[str] = field(
         default=None, metadata={"help": 'Could be "mm_mlp_adapter", "mm_vision_resampler", "mm_vision_tower,mm_mlp_adapter,mm_language_model", "mm_vision_tower,mm_mlp_adapter,mm_language_model", "mm_mlp_adapter,mm_language_model"'}
@@ -93,6 +96,12 @@ class DataArguments:
     transform_train: Optional[str] = field(default=None)
     image_size: Optional[int] = field(default=384)
     remove_init_turns: Optional[bool] = field(default=False)
+    summary_data_path: Optional[str] = field(default=None)
+    image_root: Optional[str] = field(default=None)
+    watcher_memory_path: Optional[str] = field(default=None)
+    watcher_memory_ratio: float = field(default=1.0)
+    watcher_memory_seed: int = field(default=42)
+    done_threshold: float = field(default=0.85)
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):

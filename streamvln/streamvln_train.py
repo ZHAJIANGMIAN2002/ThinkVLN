@@ -17,6 +17,9 @@ import sys
 import os
 import io
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from streamvln.utils.hf_local import bootstrap_local_only_env_from_argv
+
+bootstrap_local_only_env_from_argv(sys.argv)
 import ast
 from hmac import trans_36
 import os
@@ -53,9 +56,14 @@ from llava.mm_utils import process_highres_image, process_anyres_image, process_
 from llava.utils import rank0_print, process_video_with_pyav, process_video_with_decord
 
 from streamvln.model.stream_video_vln import StreamVLNForCausalLM
+from streamvln.dataset.streamvln_actor_dataset import (
+    StreamVLNActorDataset,
+    streamvln_actor_collate_fn,
+)
 from streamvln.dataset.vln_action_dataset import collate_fn, VLNActionDataset
 from streamvln.dataset.mmc4_dataset import LazyMMC4Dataset
 
+from streamvln.utils.hf_local import apply_local_only_env, prepare_local_only_pretrained_kwargs
 from streamvln.utils.utils import ANSWER_LIST, DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_MEMORY_TOKEN, MEMORY_TOKEN_INDEX, DEFAULT_VIDEO_TOKEN
 torch.multiprocessing.set_sharing_strategy("file_system")
 
@@ -71,6 +79,22 @@ try:
     client = Client('~/petreloss.conf')
 except ImportError:
     print("Please install petrel_client to Client.")
+
+
+def _ensure_layer_types(config):
+    if hasattr(config, "layer_types") and getattr(config, "layer_types") is not None:
+        return config
+    num_layers = int(getattr(config, "num_hidden_layers", 0) or 0)
+    sliding_window = getattr(config, "sliding_window", None)
+    max_window_layers = int(getattr(config, "max_window_layers", num_layers) or num_layers)
+    if sliding_window is not None:
+        config.layer_types = [
+            "sliding_attention" if i >= max_window_layers else "full_attention"
+            for i in range(num_layers)
+        ]
+    else:
+        config.layer_types = ["full_attention"] * num_layers
+    return config
 
 def maybe_zero_3(param, ignore_status=False, name=None):
     from deepspeed import zero
@@ -1434,9 +1458,16 @@ class DataCollatorForSupervisedDataset(object):
         
 
 
-def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,vision_tower, data_args) -> Dict:
+def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, vision_tower, data_args, model_args) -> Dict:
     """Make dataset and collator for supervised fine-tuning."""
-    
+
+    if getattr(model_args, "model_type", "streamvln") == "streamvln_actor":
+        nav_dataset = StreamVLNActorDataset(tokenizer=tokenizer, data_args=data_args, task_id=0)
+        train_dataset = nav_dataset
+        rank0_print('len train_dataset ', len(train_dataset))
+        data_collator = partial(streamvln_actor_collate_fn, tokenizer=tokenizer)
+        return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
+
     nav_dataset = VLNActionDataset(tokenizer=tokenizer, data_args=data_args, task_id=0)
     dataset =[nav_dataset]
     
@@ -1472,6 +1503,8 @@ def get_model(model_args, training_args, data_args, bnb_model_from_pretrained_ar
     customized_kwargs = dict()
     customized_kwargs.update(bnb_model_from_pretrained_args)
     cfg_pretrained = None
+    local_env_updates, local_pretrained_kwargs = prepare_local_only_pretrained_kwargs(model_args.model_name_or_path)
+    apply_local_only_env(local_env_updates)
 
     overwrite_config = {}
     if any(
@@ -1484,7 +1517,7 @@ def get_model(model_args, training_args, data_args, bnb_model_from_pretrained_ar
             model_args.mm_resampler_type is not None,
         ]
     ):
-        cfg_pretrained = AutoConfig.from_pretrained(model_args.model_name_or_path)
+        cfg_pretrained = AutoConfig.from_pretrained(model_args.model_name_or_path, **local_pretrained_kwargs)
 
     # import ipdb; ipdb.set_trace()
     if model_args.use_pos_skipping is not None and model_args.pos_skipping_range is not None:
@@ -1518,6 +1551,8 @@ def get_model(model_args, training_args, data_args, bnb_model_from_pretrained_ar
         overwrite_config["num_future_steps"] = data_args.num_future_steps
     if data_args.num_history:
         overwrite_config["num_history"] = data_args.num_history
+    overwrite_config["progress_loss_weight"] = float(getattr(model_args, "progress_loss_weight", 1.0))
+    overwrite_config["done_loss_weight"] = float(getattr(model_args, "done_loss_weight", 1.0))
         
     if model_args.mm_tunable_parts:
         overwrite_config["mm_tunable_parts"] = model_args.mm_tunable_parts
@@ -1526,13 +1561,17 @@ def get_model(model_args, training_args, data_args, bnb_model_from_pretrained_ar
     overwrite_config["mm_patch_merge_type"] = model_args.mm_patch_merge_type
    
     if overwrite_config:
-        assert cfg_pretrained is not None, "cfg_pretrained is None"
+        if cfg_pretrained is None:
+            cfg_pretrained = AutoConfig.from_pretrained(model_args.model_name_or_path, **local_pretrained_kwargs)
+        cfg_pretrained = _ensure_layer_types(cfg_pretrained)
 
         rank0_print(f"Overwriting config with {overwrite_config}")
         for k, v in overwrite_config.items():
             setattr(cfg_pretrained, k, v)
 
         customized_kwargs["config"] = cfg_pretrained
+    elif cfg_pretrained is not None:
+        customized_kwargs["config"] = _ensure_layer_types(cfg_pretrained)
 
     model = StreamVLNForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
@@ -1540,6 +1579,7 @@ def get_model(model_args, training_args, data_args, bnb_model_from_pretrained_ar
                 attn_implementation=training_args.attn_implementation,
                 dtype=(torch.bfloat16 if training_args.bf16 else None),
                 low_cpu_mem_usage=False,
+                **local_pretrained_kwargs,
                 **customized_kwargs,
                 )
     
@@ -1551,6 +1591,8 @@ def train(attn_implementation=None):
     
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    local_env_updates, local_pretrained_kwargs = prepare_local_only_pretrained_kwargs(model_args.model_name_or_path)
+    apply_local_only_env(local_env_updates)
 
     if training_args.verbose_logging:
         rank0_print(f"Inspecting experiment hyperparameters:\n")
@@ -1621,6 +1663,7 @@ def train(attn_implementation=None):
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias,
             task_type="CAUSAL_LM",
+            modules_to_save=["progress_head", "done_head"],
         )
         if training_args.bits == 16:
             if training_args.bf16:
@@ -1632,9 +1675,9 @@ def train(attn_implementation=None):
         # import ipdb; ipdb.set_trace()
 
     if "mistral" in model_args.model_name_or_path.lower() or "mixtral" in model_args.model_name_or_path.lower() or "zephyr" in model_args.model_name_or_path.lower():
-        tokenizer = transformers.AutoTokenizer.from_pretrained(model_args.model_name_or_path, cache_dir=training_args.cache_dir, model_max_length=training_args.model_max_length, padding_side="left")
+        tokenizer = transformers.AutoTokenizer.from_pretrained(model_args.model_name_or_path, cache_dir=training_args.cache_dir, model_max_length=training_args.model_max_length, padding_side="left", **local_pretrained_kwargs)
     elif "qwen" in model_args.model_name_or_path.lower():
-        tokenizer = transformers.AutoTokenizer.from_pretrained(model_args.model_name_or_path, cache_dir=training_args.cache_dir, model_max_length=training_args.model_max_length, padding_side="right")
+        tokenizer = transformers.AutoTokenizer.from_pretrained(model_args.model_name_or_path, cache_dir=training_args.cache_dir, model_max_length=training_args.model_max_length, padding_side="right", **local_pretrained_kwargs)
     elif (
         "wizardlm-2" in model_args.model_name_or_path.lower()
         or "vicuna" in model_args.model_name_or_path.lower()
@@ -1649,6 +1692,7 @@ def train(attn_implementation=None):
             model_max_length=training_args.model_max_length,
             padding_side="right",
             use_fast=False,
+            **local_pretrained_kwargs,
         )
 
     rank0_print(f"Prompt version: {model_args.version}")
@@ -1669,7 +1713,7 @@ def train(attn_implementation=None):
         else:
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
-    
+    vision_tower = None
     if model_args.vision_tower is not None:
         model.get_model().initialize_vision_modules(model_args=model_args, fsdp=None)
 
@@ -1813,7 +1857,12 @@ def train(attn_implementation=None):
         data_args.transform_train = None
 
     # import ipdb; ipdb.set_trace()
-    data_module = make_supervised_data_module(tokenizer=tokenizer,vision_tower=vision_tower, data_args=data_args)
+    data_module = make_supervised_data_module(
+        tokenizer=tokenizer,
+        vision_tower=vision_tower,
+        data_args=data_args,
+        model_args=model_args,
+    )
     
     params_no_grad = [
         n for n, p in model.named_parameters() if not p.requires_grad

@@ -58,6 +58,7 @@ class CloseEvalCompatibilityTest(unittest.TestCase):
         args = parser.parse_args([])
         self.assertEqual(args.model_type, "thinkvln")
         self.assertEqual(args.ladder_mode, "subtask")
+        self.assertIn("streamvln_actor", parser._option_string_actions["--model_type"].choices)
         self.assertEqual(
             parser._option_string_actions["--ladder_mode"].choices,
             ["subtask"],

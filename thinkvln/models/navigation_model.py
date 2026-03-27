@@ -125,7 +125,7 @@ class ThinkVLNNavigationModel(NavigationModel):
 
     @staticmethod
     def _augment_instruction(instruction: str, subgoal: Optional[str] = None, hint: Optional[str] = None) -> str:
-        text = str(instruction or "").strip()
+        text = f"Instruction: {str(instruction or '').strip()}"
         if str(subgoal or "").strip():
             text = f"{text}\nCurrent subtask: {str(subgoal).strip()}"
         if str(hint or "").strip():
@@ -928,6 +928,8 @@ class StreamVLNNavigationModel(NavigationModel):
         self._last_predicted_progress = 0.0
         self._last_predicted_done = False
         self._last_debug_snapshot: Optional[Dict[str, Any]] = None
+        self.memory_bank_images = []
+        self.memory_bank_subtasks = []
         if hasattr(self.model, "reset_for_env"):
             self.model.reset_for_env(self.env_id)
 
@@ -938,12 +940,24 @@ class StreamVLNNavigationModel(NavigationModel):
 
     @staticmethod
     def _augment_instruction(instruction: str, subgoal: Optional[str] = None, hint: Optional[str] = None) -> str:
-        text = str(instruction or "").strip()
+        text = f"Instruction: {str(instruction or '').strip()}"
         if str(subgoal or "").strip():
             text = f"{text}\nCurrent subtask: {str(subgoal).strip()}"
         if str(hint or "").strip():
             text = f"{text}\nWatcher hint: {str(hint).strip()}"
         return text
+
+    def record_memory_observation(
+        self,
+        observation: Any,
+        subtask_id: Optional[int] = None,
+        episode_key: Optional[str] = None,
+    ) -> None:
+        del observation
+        if episode_key is not None and episode_key != self.episode_key:
+            self.reset_episode_state(episode_key=episode_key)
+        self.memory_bank_images.append(None)
+        self.memory_bank_subtasks.append(int(subtask_id) if subtask_id is not None else 0)
 
     def _infer_progress_done_from_aux_head(
         self,

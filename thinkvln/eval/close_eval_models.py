@@ -142,7 +142,7 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
             use_memory=getattr(args, "use_memory", True),
         )
 
-    if args.model_type == "streamvln":
+    if args.model_type in {"streamvln", "streamvln_actor"}:
         thinkvln_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
         possible_llava_paths = [
             os.path.join(thinkvln_root, "third_party", "LLaVA-NeXT"),
@@ -171,13 +171,31 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
 
         import transformers
         from streamvln.model.stream_video_vln import StreamVLNForCausalLM
+        adapter_config_path = os.path.join(args.model_path, "adapter_config.json")
+        is_lora = os.path.exists(adapter_config_path)
+
+        if is_lora:
+            with open(adapter_config_path, "r", encoding="utf-8") as f:
+                adapter_config = json.load(f)
+            actual_base_model = args.base_model_path or adapter_config.get("base_model_name_or_path")
+            if not actual_base_model:
+                raise ValueError(
+                    "Base model path is required for LoRA StreamVLN checkpoint. "
+                    "Use --base_model_path or provide base_model_name_or_path in adapter_config.json."
+                )
+            tokenizer_source = actual_base_model
+            config_source = actual_base_model
+        else:
+            actual_base_model = args.model_path
+            tokenizer_source = args.model_path
+            config_source = args.model_path
 
         tokenizer = transformers.AutoTokenizer.from_pretrained(
-            args.model_path,
+            tokenizer_source,
             model_max_length=args.model_max_length,
             padding_side="right",
         )
-        config = transformers.AutoConfig.from_pretrained(args.model_path)
+        config = transformers.AutoConfig.from_pretrained(config_source)
 
         if not hasattr(config, "layer_types") or config.layer_types is None:
             num_layers = getattr(config, "num_hidden_layers", 32)
@@ -192,13 +210,22 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
                 config.layer_types = ["full_attention"] * num_layers
 
         model = StreamVLNForCausalLM.from_pretrained(
-            args.model_path,
+            actual_base_model,
             attn_implementation="flash_attention_2",
             dtype=torch.bfloat16,
             config=config,
             low_cpu_mem_usage=False,
         )
-        model.model.num_history = args.num_history
+        if is_lora:
+            from peft import PeftModel
+
+            model = PeftModel.from_pretrained(model, args.model_path)
+            non_lora_path = os.path.join(args.model_path, "non_lora_trainables.bin")
+            if os.path.exists(non_lora_path):
+                non_lora_state = torch.load(non_lora_path, map_location="cpu")
+                model.load_state_dict(non_lora_state, strict=False)
+        core_model = model.get_base_model() if hasattr(model, "get_base_model") else model
+        core_model.model.num_history = args.num_history
         model.requires_grad_(False)
         model.to(device)
         model.eval()

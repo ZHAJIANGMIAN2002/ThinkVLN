@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model_type",
         type=str,
         default="thinkvln",
-        choices=["thinkvln", "streamvln", "thinkvln_actor", "thinkvln_fm_actor"],
+        choices=["thinkvln", "streamvln", "streamvln_actor", "thinkvln_actor", "thinkvln_fm_actor"],
         help="Model type",
     )
     parser.add_argument(
@@ -174,11 +174,6 @@ def eval():
     args.device = device
     logger.info("Distributed initialized: rank=%d world_size=%d gpu=%d device=%s", rank, world_size, gpu, device)
 
-    if args.model_type not in {"thinkvln_actor", "thinkvln_fm_actor"}:
-        raise ValueError(
-            "Subtask closed-loop evaluation currently supports model_type in "
-            "{thinkvln_actor, thinkvln_fm_actor} only."
-        )
     if not args.summary_full_path:
         raise ValueError("--summary_full_path is required.")
     logger.info("Loading summary_full from %s", args.summary_full_path)
@@ -187,6 +182,11 @@ def eval():
 
     logger.info("Building navigation model...")
     nav_model = build_nav_model(args, str(device), rank, world_size)
+    if not callable(getattr(nav_model, "predict_action_with_progress_and_done", None)):
+        raise ValueError(
+            "Subtask closed-loop evaluation requires a navigation model that "
+            "implements predict_action_with_progress_and_done(...)."
+        )
     logger.info("Navigation model ready: %s", type(nav_model).__name__)
 
     os.makedirs(args.output_path, exist_ok=True)

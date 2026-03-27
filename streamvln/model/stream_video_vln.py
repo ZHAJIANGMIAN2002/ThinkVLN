@@ -72,6 +72,29 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    @staticmethod
+    def _ensure_rgbd_modalities(
+        images: torch.FloatTensor,
+        depths: Optional[torch.FloatTensor],
+        poses: Optional[torch.FloatTensor],
+        intrinsics: Optional[torch.FloatTensor],
+    ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
+        if images is None:
+            raise ValueError("images must be provided for multimodal StreamVLN forward")
+        if images.ndim != 5:
+            raise ValueError(f"expected images with shape [B, V, C, H, W], got {tuple(images.shape)}")
+        batch_size, num_view, _, height, width = images.shape
+        device = images.device
+        dtype = images.dtype
+
+        if depths is None:
+            depths = torch.zeros((batch_size, num_view, height, width), dtype=dtype, device=device)
+        if poses is None:
+            poses = torch.eye(4, dtype=dtype, device=device).view(1, 1, 4, 4).repeat(batch_size, num_view, 1, 1)
+        if intrinsics is None:
+            intrinsics = torch.eye(4, dtype=dtype, device=device).view(1, 1, 4, 4).repeat(batch_size, num_view, 1, 1)
+        return depths, poses, intrinsics
     
     def get_model(self):
         return self.model
@@ -174,6 +197,8 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
+
+        depths, poses, intrinsics = self._ensure_rgbd_modalities(images, depths, poses, intrinsics)
 
         image_features, memory_features = self.encode_rgbd(images, depths, poses, intrinsics, time_ids, task_ids)
 
