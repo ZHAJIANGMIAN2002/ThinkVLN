@@ -23,6 +23,8 @@
       </div>
     </div>
 
+    <div id="flash" class="flash" role="status" aria-live="polite" hidden></div>
+
     <div id="auth-panel" class="panel">
       <div class="auth-columns">
         <section class="auth-card">
@@ -51,8 +53,9 @@
         <div class="toolbar-item">
           <button id="prev-btn" type="button">Prev</button>
           <button id="next-btn" type="button">Next</button>
+          <span id="nav-hint" class="muted nav-hint"></span>
           <select id="mine-select">
-            <option value="">My labeled samples</option>
+            <option value="">My labels (this account)</option>
           </select>
           <button id="reload-mine-btn" type="button">Reload Mine</button>
         </div>
@@ -76,8 +79,6 @@
         <div id="admin-users"></div>
       </section>
     </div>
-
-    <div id="flash" class="flash" hidden></div>
   </div>
   <script src="/static/app.js"></script>
 </body>

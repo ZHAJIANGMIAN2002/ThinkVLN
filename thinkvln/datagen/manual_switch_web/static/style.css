@@ -67,12 +67,16 @@ body {
   min-width: 220px;
 }
 
+.nav-hint {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .toolbar-item span,
 .status-line,
 .summary,
 .muted,
-.decision-state,
-.flash {
+.decision-state {
   color: var(--muted);
 }
 
@@ -252,7 +256,16 @@ select {
 }
 
 .flash {
-  margin-bottom: 12px;
+  margin: 0 20px 14px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #fff8e6;
+  color: var(--ink);
+  font-size: 14px;
+  max-width: 1200px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .user-table {

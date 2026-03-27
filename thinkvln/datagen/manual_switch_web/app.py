@@ -379,7 +379,7 @@ class ManualSwitchStore:
                 ).fetchone()
                 if next_row is None:
                     conn.commit()
-                    return {"sample": None, "status": self._base_status_row(conn)}
+                    return {"sample": None, "status": self.status(user_id=int(user_id))}
                 sample_id = str(next_row["sample_id"])
                 conn.execute(
                     """
@@ -393,7 +393,7 @@ class ManualSwitchStore:
                 sample_id = str(current["sample_id"])
             sample_payload = self._sample_with_annotation(conn, sample_id)
             conn.commit()
-            return {"sample": sample_payload, "status": self._base_status_row(conn)}
+            return {"sample": sample_payload, "status": self.status(user_id=int(user_id))}
 
     def submit_annotation(self, user: Dict[str, Any], sample_id: str, should_switch: bool) -> Dict[str, Any]:
         now = int(time.time())
@@ -452,21 +452,32 @@ class ManualSwitchStore:
             }
             append_jsonl(self.config.output_file, output_payload)
             conn.commit()
-            return {"annotation": output_payload, "status": self._base_status_row(conn)}
+            return {"annotation": output_payload, "status": self.status(user_id=int(user["id"]))}
 
-    def list_user_annotations(self, user_id: int, limit: int = 200) -> List[Dict[str, Any]]:
+    def list_user_annotations(self, user_id: int, limit: int = 200, *, scope: str = "mine") -> List[Dict[str, Any]]:
         capped = max(1, min(int(limit), 1000))
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT sample_id, should_switch, updated_at
-                FROM annotations
-                WHERE user_id = ?
-                ORDER BY updated_at DESC, sample_id ASC
-                LIMIT ?
-                """,
-                (int(user_id), capped),
-            ).fetchall()
+            if scope == "all":
+                rows = conn.execute(
+                    """
+                    SELECT sample_id, should_switch, updated_at
+                    FROM annotations
+                    ORDER BY updated_at DESC, sample_id ASC
+                    LIMIT ?
+                    """,
+                    (capped,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT sample_id, should_switch, updated_at
+                    FROM annotations
+                    WHERE user_id = ?
+                    ORDER BY updated_at DESC, sample_id ASC
+                    LIMIT ?
+                    """,
+                    (int(user_id), capped),
+                ).fetchall()
         return [
             {
                 "sample_id": str(row["sample_id"]),
@@ -495,12 +506,13 @@ class ManualSwitchStore:
                 (sample_id,),
             ).fetchone()
             owned_by_user = mine_annotation is not None and int(mine_annotation["user_id"]) == int(user_id)
+            has_any_annotation = mine_annotation is not None
             is_my_claimed = (
                 task["status"] == "claimed"
                 and task["assigned_user_id"] is not None
                 and int(task["assigned_user_id"]) == int(user_id)
             )
-            if not owned_by_user and not is_my_claimed:
+            if not owned_by_user and not has_any_annotation and not is_my_claimed:
                 raise HTTPException(status_code=403, detail="sample not visible to this user")
             if owned_by_user and task["status"] == "pending":
                 conn.execute(
@@ -512,9 +524,8 @@ class ManualSwitchStore:
                     (int(user_id), now, sample_id),
                 )
             sample_payload = self._sample_with_annotation(conn, sample_id)
-            status = self._base_status_row(conn)
             conn.commit()
-            return {"sample": sample_payload, "status": status}
+            return {"sample": sample_payload, "status": self.status(user_id=int(user_id))}
 
     def create_invite(self, created_by: int, remaining_uses: int, expires_in_days: int | None) -> Dict[str, Any]:
         if remaining_uses <= 0:
@@ -732,6 +743,14 @@ def create_app(config: ManualSwitchConfig) -> FastAPI:
     app.state.config = config
     app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 
+    @app.middleware("http")
+    async def disable_static_cache(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path.startswith("/static/") or path == "/":
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+        return response
+
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
         return TEMPLATES.TemplateResponse(
@@ -765,7 +784,7 @@ def create_app(config: ManualSwitchConfig) -> FastAPI:
     @app.get("/api/tasks/mine")
     async def list_my_tasks(request: Request, limit: int = 200) -> Dict[str, Any]:
         user = store.auth_user(request)
-        return {"samples": store.list_user_annotations(user_id=int(user["id"]), limit=limit)}
+        return {"samples": store.list_user_annotations(user_id=int(user["id"]), limit=limit, scope="mine")}
 
     @app.get("/api/tasks/{sample_id}")
     async def get_task(sample_id: str, request: Request) -> Dict[str, Any]:

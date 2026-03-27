@@ -3,8 +3,11 @@ const state = {
   token: localStorage.getItem("manualSwitchToken") || "",
   user: null,
   sample: null,
-  mineSampleIds: [],
+  /** @type {{ sample_id: string, updated_at: number, should_switch?: boolean }[]} */
+  mineRows: [],
   currentSampleId: "",
+  /** Current unlabeled claim from last claim/claimNext; appended to nav strip end */
+  claimedAnchorId: "",
 };
 
 function escapeHtml(value) {
@@ -96,30 +99,106 @@ function applyAuthState() {
   document.getElementById("current-role").textContent = authed ? state.user.role : "-";
 }
 
-function pushMineSampleId(sampleId) {
-  if (!sampleId) {
-    return;
+function dedupeMineRows(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    const id = String(row.sample_id);
+    const prev = map.get(id);
+    const ts = Number(row.updated_at) || 0;
+    if (!prev || ts > (Number(prev.updated_at) || 0)) {
+      map.set(id, { ...row, sample_id: id, updated_at: ts });
+    }
   }
-  state.mineSampleIds = [sampleId, ...state.mineSampleIds.filter((item) => item !== sampleId)];
+  return Array.from(map.values());
 }
 
 function renderMineSelector() {
   const select = document.getElementById("mine-select");
-  const options = ['<option value="">My labeled samples</option>'];
-  options.push(...state.mineSampleIds.map((sampleId) => `<option value="${escapeHtml(sampleId)}">${escapeHtml(sampleId)}</option>`));
-  select.innerHTML = options.join("");
-  if (state.currentSampleId && state.mineSampleIds.includes(state.currentSampleId)) {
-    select.value = state.currentSampleId;
+  const parts = ['<option value="">My labels (this account)</option>'];
+  if (state.claimedAnchorId && !state.mineRows.some((row) => String(row.sample_id) === String(state.claimedAnchorId))) {
+    parts.push(
+      `<option value="${escapeHtml(state.claimedAnchorId)}">[Active claim] ${escapeHtml(state.claimedAnchorId)}</option>`,
+    );
+  }
+  parts.push(
+    ...state.mineRows.map(
+      (row) => `<option value="${escapeHtml(row.sample_id)}">${escapeHtml(row.sample_id)}</option>`,
+    ),
+  );
+  select.innerHTML = parts.join("");
+  if (state.currentSampleId) {
+    const inMine = state.mineRows.some((row) => String(row.sample_id) === state.currentSampleId);
+    if (inMine || state.currentSampleId === String(state.claimedAnchorId || "")) {
+      select.value = state.currentSampleId;
+    }
   }
 }
 
 function setCurrentSample(sample) {
   state.sample = sample;
-  state.currentSampleId = sample ? sample.sample_id : "";
-  if (sample && sample.annotation && typeof sample.annotation.should_switch === "boolean") {
-    pushMineSampleId(sample.sample_id);
-  }
+  state.currentSampleId = sample ? String(sample.sample_id) : "";
   renderMineSelector();
+  renderNavHint();
+}
+
+function buildMineNavIds() {
+  return state.mineRows.map((row) => String(row.sample_id));
+}
+
+function renderNavHint() {
+  const el = document.getElementById("nav-hint");
+  if (!el) {
+    return;
+  }
+  const strip = buildMineNavIds();
+  if (!strip.length) {
+    el.textContent = "";
+    return;
+  }
+  const cur = String(state.currentSampleId || "");
+  const idx = strip.indexOf(cur);
+  const pos = idx >= 0 ? idx + 1 : "—";
+  el.textContent = `${pos} / ${strip.length}`;
+}
+
+async function navigateStrip(delta) {
+  // Do not hard-block navigation by stale loading state.
+  if (state.loading) {
+    state.loading = false;
+  }
+  const strip = buildMineNavIds();
+  if (!strip.length) {
+    setFlash("No labeled samples to navigate.");
+    return;
+  }
+  const cur = String(state.currentSampleId || "");
+  const idx = strip.indexOf(cur);
+  if (idx < 0) {
+    try {
+      state.loading = true;
+      await loadSampleById(strip[0]);
+      setFlash("");
+    } catch (error) {
+      setFlash(error.message || String(error));
+    } finally {
+      state.loading = false;
+    }
+    return;
+  }
+  const nextIdx = idx + delta;
+  if (nextIdx < 0 || nextIdx >= strip.length) {
+    setFlash(delta < 0 ? "Already at newest label." : "Already at oldest label.");
+    return;
+  }
+  try {
+    state.loading = true;
+    await loadSampleById(strip[nextIdx]);
+    setFlash("");
+  } catch (error) {
+    setFlash(error.message || String(error));
+  } finally {
+    state.loading = false;
+  }
 }
 
 function loadImageFrame(url) {
@@ -268,6 +347,7 @@ function bindSampleCard(card, sample) {
   card.querySelectorAll(".decision-btn").forEach((button) => {
     button.addEventListener("click", async () => {
       const shouldSwitch = button.dataset.value === "true";
+      const wasInMine = state.mineRows.some((row) => String(row.sample_id) === String(sample.sample_id));
       try {
         state.loading = true;
         setFlash("Saving...");
@@ -279,8 +359,12 @@ function bindSampleCard(card, sample) {
         sample.annotation = { sample_id: sample.sample_id, should_switch: shouldSwitch, user_id: state.user.id };
         renderDecision(card, sample.annotation);
         renderStatus(payload.status || {});
-        pushMineSampleId(sample.sample_id);
-        renderMineSelector();
+        await refreshMineList();
+        if (wasInMine) {
+          setCurrentSample(sample);
+          setFlash("");
+          return;
+        }
         await claimNext();
       } catch (error) {
         setFlash(error.message);
@@ -306,14 +390,15 @@ function renderSample(sample) {
 
 async function refreshMineList() {
   if (!state.token) {
-    state.mineSampleIds = [];
+    state.mineRows = [];
     renderMineSelector();
+    renderNavHint();
     return;
   }
   const payload = await getJson("/api/tasks/mine?limit=500", true);
-  const rows = payload.samples || [];
-  state.mineSampleIds = rows.map((row) => row.sample_id);
+  state.mineRows = dedupeMineRows(payload.samples || []);
   renderMineSelector();
+  renderNavHint();
 }
 
 async function loadSampleById(sampleId) {
@@ -335,12 +420,17 @@ async function claimNext() {
     const payload = await postJson("/api/tasks/claim", {}, true);
     renderStatus(payload.status || {});
     if (!payload.sample) {
+      state.claimedAnchorId = "";
+      setCurrentSample(null);
       renderSample(null);
+      renderNavHint();
       setFlash("No pending tasks in queue.");
       return;
     }
+    state.claimedAnchorId = String(payload.sample.sample_id);
     setCurrentSample(payload.sample);
     renderSample(payload.sample);
+    renderNavHint();
     setFlash("");
   } catch (error) {
     list.innerHTML = "";
@@ -348,30 +438,17 @@ async function claimNext() {
   }
 }
 
-async function gotoRelativeSample(direction) {
-  if (!state.currentSampleId || !state.mineSampleIds.length) {
-    return;
-  }
-  const index = state.mineSampleIds.indexOf(state.currentSampleId);
-  if (index < 0) {
-    return;
-  }
-  const nextIndex = index + direction;
-  if (nextIndex < 0 || nextIndex >= state.mineSampleIds.length) {
-    return;
-  }
-  await loadSampleById(state.mineSampleIds[nextIndex]);
-}
-
 async function refreshMe() {
   if (!state.token) {
     state.user = null;
     setCurrentSample(null);
-    state.mineSampleIds = [];
+    state.mineRows = [];
+    state.claimedAnchorId = "";
     applyAuthState();
     renderStatus({ total: 0, labeled: 0, remaining: 0, mine_done: 0 });
     renderSample(null);
     renderMineSelector();
+    renderNavHint();
     return;
   }
   try {
@@ -389,9 +466,11 @@ async function refreshMe() {
     state.token = "";
     state.user = null;
     setCurrentSample(null);
-    state.mineSampleIds = [];
+    state.mineRows = [];
+    state.claimedAnchorId = "";
     applyAuthState();
     renderMineSelector();
+    renderNavHint();
     setFlash(error.message);
   }
 }
@@ -465,11 +544,11 @@ document.getElementById("claim-btn").addEventListener("click", async () => {
 });
 
 document.getElementById("prev-btn").addEventListener("click", async () => {
-  await gotoRelativeSample(-1);
+  await navigateStrip(-1);
 });
 
 document.getElementById("next-btn").addEventListener("click", async () => {
-  await gotoRelativeSample(1);
+  await navigateStrip(1);
 });
 
 document.getElementById("mine-select").addEventListener("change", async (event) => {
@@ -494,10 +573,12 @@ document.getElementById("logout-btn").addEventListener("click", () => {
   state.token = "";
   state.user = null;
   setCurrentSample(null);
-  state.mineSampleIds = [];
+  state.mineRows = [];
+  state.claimedAnchorId = "";
   applyAuthState();
   renderSample(null);
   renderMineSelector();
+  renderNavHint();
   renderStatus({ total: 0, labeled: 0, remaining: 0, mine_done: 0 });
   setFlash("");
 });

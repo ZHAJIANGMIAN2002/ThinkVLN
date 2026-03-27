@@ -1,4 +1,6 @@
 import json
+import subprocess
+import textwrap
 from pathlib import Path
 
 from PIL import Image
@@ -268,4 +270,166 @@ class TestWatcherManualSwitchAnnotation:
         assert "Next Task If Switched" in script
         assert "if (frameIndex >= frames.length - 1)" in script
         assert "renderFrame(0);" in script
-        assert 'pushMineSampleId(sample.sample_id);\n        renderMineSelector();\n        await claimNext();' in script
+        assert "const wasInMine = state.mineRows.some((row) => String(row.sample_id) === String(sample.sample_id));" in script
+        assert "if (wasInMine) {" in script
+        assert "setCurrentSample(sample);" in script
+        assert "await claimNext();" in script
+
+    def test_frontend_prev_next_follows_my_labels_dropdown_order(self):
+        script_path = APP_DIR / "static" / "app.js"
+        node_script = textwrap.dedent(
+            f"""
+            (async () => {{
+            const fs = require("node:fs");
+            const vm = require("node:vm");
+            const assert = require("node:assert/strict");
+
+            function createElement(id) {{
+              return {{
+                id,
+                hidden: false,
+                textContent: "",
+                innerHTML: "",
+                value: "",
+                disabled: false,
+                dataset: {{}},
+                classList: {{ add() {{}}, remove() {{}} }},
+                addEventListener() {{}},
+                querySelector() {{ return null; }},
+                querySelectorAll() {{ return []; }},
+              }};
+            }}
+
+            const elements = new Proxy({{}}, {{
+              get(target, key) {{
+                if (!target[key]) {{
+                  target[key] = createElement(String(key));
+                }}
+                return target[key];
+              }},
+            }});
+
+            function samplePayload(sampleId) {{
+              return {{
+                sample: {{
+                  sample_id: sampleId,
+                  episode_id: 1,
+                  pivot_frame: 1,
+                  rollout_id: 1,
+                  active_subtask: "current",
+                  next_subtask: "next",
+                  pivot_image_url: "/assets/pivot.jpg",
+                  rollout_frame_urls: ["/assets/frame.jpg"],
+                  annotation: {{ sample_id: sampleId, should_switch: true }},
+                }},
+                status: {{}},
+              }};
+            }}
+
+            const fetchCalls = [];
+            const payloads = new Map([
+              ["/api/me", {{ user: {{ id: 7, username: "alice", role: "annotator" }}, status: {{ total: 4, labeled: 3, remaining: 1, mine_done: 3 }} }}],
+              ["/api/tasks/mine?limit=500", {{
+                samples: [
+                  {{ sample_id: "sample_03", updated_at: 300, should_switch: true }},
+                  {{ sample_id: "sample_02", updated_at: 200, should_switch: false }},
+                  {{ sample_id: "sample_01", updated_at: 100, should_switch: true }},
+                ],
+              }}],
+              ["/api/tasks/claim", {{ sample: {{
+                sample_id: "claim_99",
+                episode_id: 99,
+                pivot_frame: 99,
+                rollout_id: 1,
+                active_subtask: "claim current",
+                next_subtask: "claim next",
+                pivot_image_url: "/assets/pivot.jpg",
+                rollout_frame_urls: ["/assets/frame.jpg"],
+              }}, status: {{ total: 4, labeled: 3, remaining: 1, mine_done: 3 }} }}],
+              ["/api/tasks/sample_03", samplePayload("sample_03")],
+              ["/api/tasks/sample_02", samplePayload("sample_02")],
+              ["/api/tasks/sample_01", samplePayload("sample_01")],
+            ]);
+
+            async function fetch(url) {{
+              fetchCalls.push(url);
+              if (!payloads.has(url)) {{
+                throw new Error(`Unexpected fetch: ${{url}}`);
+              }}
+              const payload = payloads.get(url);
+              return {{
+                ok: true,
+                async json() {{ return payload; }},
+                async text() {{ return JSON.stringify(payload); }},
+              }};
+            }}
+
+            const context = {{
+              console,
+              fetch,
+              window: {{
+                setInterval() {{ return 1; }},
+                clearInterval() {{}},
+              }},
+              document: {{
+                getElementById(id) {{
+                  return elements[id];
+                }},
+              }},
+              CSS: {{
+                escape(value) {{
+                  return String(value);
+                }},
+              }},
+              localStorage: {{
+                getItem() {{ return "test-token"; }},
+                setItem() {{}},
+                removeItem() {{}},
+              }},
+              Image: function() {{
+                this.decode = async () => {{}};
+              }},
+              setTimeout,
+              clearTimeout,
+              Promise,
+            }};
+            vm.createContext(context);
+            const source = fs.readFileSync({json.dumps(str(script_path))}, "utf8");
+            vm.runInContext(
+              source + "\\nthis.__test__ = {{ navigateStrip, loadSampleById }};",
+              context,
+            );
+            await new Promise((resolve) => setTimeout(resolve, 0));
+
+            fetchCalls.length = 0;
+            await context.__test__.loadSampleById("sample_02");
+            fetchCalls.length = 0;
+            await context.__test__.navigateStrip(-1);
+            assert.deepStrictEqual(fetchCalls, ["/api/tasks/sample_03"]);
+
+            fetchCalls.length = 0;
+            await context.__test__.loadSampleById("sample_02");
+            fetchCalls.length = 0;
+            await context.__test__.navigateStrip(1);
+            assert.deepStrictEqual(fetchCalls, ["/api/tasks/sample_01"]);
+
+            fetchCalls.length = 0;
+            await context.__test__.loadSampleById("sample_01");
+            fetchCalls.length = 0;
+            await context.__test__.navigateStrip(1);
+            assert.deepStrictEqual(fetchCalls, []);
+            }})().catch((error) => {{
+              console.error(error);
+              process.exit(1);
+            }});
+            """
+        )
+
+        completed = subprocess.run(
+            ["node", "--eval", node_script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stderr or completed.stdout
