@@ -22,6 +22,7 @@ def test_build_streamvln_train_argv_from_yaml_sections():
             "progress_loss_weight": 1.0,
             "done_loss_weight": 1.0,
             "lora_enable": True,
+            "lora_target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
             "lora_r": 64,
         },
         "data": {
@@ -56,6 +57,9 @@ def test_build_streamvln_train_argv_from_yaml_sections():
     assert "4" in argv
     assert "--lora_enable" in argv
     assert "True" in argv
+    assert "--lora_target_modules" in argv
+    lora_idx = argv.index("--lora_target_modules")
+    assert argv[lora_idx + 1] == "q_proj,k_proj,v_proj,o_proj"
     assert "--deepspeed" in argv
     assert "config/zero2.json" in argv
     assert "--report_to" in argv

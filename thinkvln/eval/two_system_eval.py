@@ -1529,15 +1529,15 @@ def _build_actor_args(config: Dict[str, Any], device: str) -> SimpleNamespace:
     return SimpleNamespace(
         model_type=actor_cfg["model_type"],
         model_path=actor_cfg["model_path"],
-        base_model_path=actor_cfg["base_model_path"],
+        base_model_path=actor_cfg.get("base_model_path"),
         memory_num_history_images=actor_cfg["memory_num_history_images"],
         done_threshold=actor_cfg["done_threshold"],
         use_memory=False,
         device=device,
-        model_max_length=4096,
-        num_frames=32,
-        num_future_steps=4,
-        num_history=8,
+        model_max_length=int(actor_cfg.get("model_max_length", 4096)),
+        num_frames=int(actor_cfg.get("num_frames", 32)),
+        num_future_steps=int(actor_cfg.get("num_future_steps", 4)),
+        num_history=int(actor_cfg.get("num_history", 8)),
     )
 
 

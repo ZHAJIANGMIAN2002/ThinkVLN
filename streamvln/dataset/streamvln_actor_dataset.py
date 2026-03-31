@@ -15,6 +15,7 @@ from thinkvln.dataset.dataset import _episode_key_to_dir_key
 from thinkvln.tools.dataset_utils import (
     compute_current_step_progress,
     compute_done_label,
+    compute_previous_step_progress,
     extract_action_chunk,
     select_memory_frame_indices,
 )
@@ -80,12 +81,15 @@ def build_streamvln_actor_prompt(
     subtask: str,
     watcher_hint: Optional[str] = None,
     include_visual_memory: bool = False,
+    previous_progress: Optional[float] = None,
 ) -> str:
     lines = [
         "<image>",
         f"Instruction: {str(instruction or '').strip()}",
         f"Current subtask: {str(subtask or '').strip()}",
     ]
+    if previous_progress is not None:
+        lines.append(f"Previous progress: {float(previous_progress):.4f}")
     hint_text = str(watcher_hint or "").strip()
     if hint_text:
         lines.append(f"Watcher hint: {hint_text}")
@@ -208,6 +212,7 @@ def _build_actor_sample(
         num_steps=4,
     )
     progress_label = compute_current_step_progress(frame_idx, subtask_sequence)
+    previous_progress = compute_previous_step_progress(frame_idx, subtask_sequence)
     done_label = compute_done_label(progress_label, threshold=done_threshold)
     history_frame_indices = _resolve_sparse_history_indices(
         frame_idx=frame_idx,
@@ -222,6 +227,7 @@ def _build_actor_sample(
         "watcher_hint": str(watcher_hint).strip() if str(watcher_hint or "").strip() else None,
         "action_labels": list(action_labels),
         "progress_label": float(progress_label),
+        "previous_progress": float(previous_progress),
         "done_label": float(done_label),
         "history_frame_indices": list(history_frame_indices),
     }
@@ -432,11 +438,13 @@ class StreamVLNActorDataset(Dataset):
     def __getitem__(self, index: int) -> Dict:
         sample = self.samples[index]
         include_visual_memory = self.memory_num_history_images > 0
+        prev_prog = float(sample.get("previous_progress", 0.0))
         prompt = build_streamvln_actor_prompt(
             instruction=sample["instruction"],
             subtask=sample["subtask"],
             watcher_hint=sample.get("watcher_hint"),
             include_visual_memory=include_visual_memory,
+            previous_progress=prev_prog,
         )
         target_text = _actions_to_text(sample["action_labels"])
         input_ids, labels = _tokenize_actor_sample(self.tokenizer, prompt, target_text)

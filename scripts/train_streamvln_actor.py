@@ -122,6 +122,7 @@ def build_streamvln_train_argv(config: dict, data_path_override: Optional[str] =
         "lora_r": "lora_r",
         "lora_alpha": "lora_alpha",
         "lora_dropout": "lora_dropout",
+        "lora_target_modules": "lora_target_modules",
         "lora_bias": "lora_bias",
         "bits": "bits",
     }
@@ -172,7 +173,10 @@ def build_streamvln_train_argv(config: dict, data_path_override: Optional[str] =
     for source_key, arg_key in model_key_map.items():
         _append_arg(argv, f"--{arg_key}", model_cfg.get(source_key))
     for source_key, arg_key in model_alias_map.items():
-        _append_arg(argv, f"--{arg_key}", model_cfg.get(source_key))
+        value = model_cfg.get(source_key)
+        if source_key == "lora_target_modules" and isinstance(value, (list, tuple)):
+            value = ",".join(str(item) for item in value if str(item).strip())
+        _append_arg(argv, f"--{arg_key}", value)
 
     effective_summary_path = data_path_override or data_cfg.get("summary_data_path") or data_cfg.get("data_path")
     if effective_summary_path:

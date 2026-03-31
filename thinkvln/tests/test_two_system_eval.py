@@ -1127,7 +1127,15 @@ class TestTwoSystemEval:
 
         config = load_config("config/two_system_eval.yaml")
         assert isinstance(two_system_eval._build_watcher_backend(config, device="cpu"), ApiWatcherBackend)
-        assert two_system_eval._build_actor_args(config, device="cpu").use_memory is False
+        actor_ns = two_system_eval._build_actor_args(config, device="cpu")
+        assert actor_ns.use_memory is False
+        assert actor_ns.num_frames == 32
+        extended = json.loads(json.dumps(config))
+        extended["actor"]["num_frames"] = 16
+        extended["actor"]["num_history"] = 4
+        ext_args = two_system_eval._build_actor_args(extended, device="cpu")
+        assert ext_args.num_frames == 16
+        assert ext_args.num_history == 4
 
         local_config = json.loads(json.dumps(config))
         local_config["watcher"]["backend"] = "local"

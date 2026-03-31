@@ -77,3 +77,47 @@ def test_get_model_loads_config_when_actor_overrides_exist(monkeypatch, tmp_path
     assert calls["config_path"] == str(tmp_path)
     assert calls["config_kwargs"]["local_files_only"] is True
     assert isinstance(model.config, _DummyConfig)
+
+
+def test_find_all_linear_names_ignores_numeric_suffix_modules(monkeypatch, tmp_path):
+    import sys
+    import torch
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["streamvln_train.py", "--model_name_or_path", str(tmp_path)],
+    )
+
+    import streamvln.streamvln_train as train_mod
+
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.layers = torch.nn.ModuleList(
+                [
+                    torch.nn.ModuleDict(
+                        {
+                            "self_attn": torch.nn.ModuleDict(
+                                {
+                                    "q_proj": torch.nn.Linear(4, 4),
+                                    "k_proj": torch.nn.Linear(4, 4),
+                                }
+                            )
+                        }
+                    )
+                ]
+            )
+            self.progress_head = torch.nn.Sequential(
+                torch.nn.Linear(4, 4),
+                torch.nn.ReLU(),
+                torch.nn.Linear(4, 1),
+            )
+
+    names = train_mod.find_all_linear_names(_DummyModel())
+
+    assert "q_proj" in names
+    assert "k_proj" in names
+    assert "0" not in names
+    assert "2" not in names

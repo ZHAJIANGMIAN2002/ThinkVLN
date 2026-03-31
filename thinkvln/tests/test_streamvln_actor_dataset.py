@@ -148,20 +148,24 @@ def test_build_streamvln_actor_prompt_formats_optional_hint():
         subtask="Turn right into the bathroom.",
         watcher_hint="You already cleared the dining area.",
         include_visual_memory=True,
+        previous_progress=0.25,
     )
     assert "Instruction: Walk to the sink." in prompt
     assert "Current subtask: Turn right into the bathroom." in prompt
     assert "Watcher hint: You already cleared the dining area." in prompt
+    assert "Previous progress: 0.2500" in prompt
     assert "<memory>" in prompt
 
     prompt_without_hint = build_streamvln_actor_prompt(
         instruction="Walk to the sink.",
         subtask="Turn right into the bathroom.",
         watcher_hint=None,
+        previous_progress=0.0,
     )
     assert "Instruction: Walk to the sink." in prompt_without_hint
     assert "Current subtask: Turn right into the bathroom." in prompt_without_hint
     assert "Watcher hint:" not in prompt_without_hint
+    assert "Previous progress: 0.0000" in prompt_without_hint
     assert "<memory>" not in prompt_without_hint
 
 

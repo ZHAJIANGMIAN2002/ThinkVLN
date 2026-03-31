@@ -166,7 +166,10 @@ def find_all_linear_names(model):
             continue
         if isinstance(module, cls):
             names = name.split(".")
-            lora_module_names.add(names[0] if len(names) == 1 else names[-1])
+            target_name = names[0] if len(names) == 1 else names[-1]
+            if str(target_name).isdigit():
+                continue
+            lora_module_names.add(target_name)
 
     if "lm_head" in lora_module_names:  # needed for 16-bit
         lora_module_names.remove("lm_head")
@@ -1655,11 +1658,16 @@ def train(attn_implementation=None):
     if training_args.lora_enable:
         from peft import LoraConfig, get_peft_model
 
+        target_modules = training_args.lora_target_modules
+        if isinstance(target_modules, str):
+            target_modules = [item.strip() for item in target_modules.split(",") if item.strip()]
+        if not target_modules:
+            target_modules = find_all_linear_names(model)
+
         lora_config = LoraConfig(
             r=training_args.lora_r,
             lora_alpha=training_args.lora_alpha,
-            # target_modules=find_all_linear_names(model, training_args.lora_target_modules.split(",")),
-            target_modules=find_all_linear_names(model),
+            target_modules=target_modules,
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias,
             task_type="CAUSAL_LM",

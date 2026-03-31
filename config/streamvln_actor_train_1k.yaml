@@ -11,10 +11,14 @@ model:
   lora_r: 64
   lora_alpha: 16
   lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   bits: 16
 
 data:
   summary_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/streamvln_actor_train.jsonl"
+  watcher_memory_path: null
+  watcher_memory_ratio: 0.25
+  watcher_memory_seed: 42
   num_history: 8
   num_future_steps: 4
   done_threshold: 0.85

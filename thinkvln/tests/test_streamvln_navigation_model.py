@@ -42,11 +42,13 @@ def test_streamvln_navigation_model_formats_actor_text_lines():
         instruction="Walk to the sink.",
         subgoal="Turn right into the bathroom.",
         hint="You already cleared the dining area.",
+        previous_progress=0.5,
     )
 
     assert "Instruction: Walk to the sink." in text
     assert "Current subtask: Turn right into the bathroom." in text
     assert "Watcher hint: You already cleared the dining area." in text
+    assert "Previous progress: 0.5000" in text
 
 
 def test_supports_progress_done_actor_model_uses_capability_not_class():

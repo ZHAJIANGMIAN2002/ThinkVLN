@@ -939,12 +939,19 @@ class StreamVLNNavigationModel(NavigationModel):
         return dict(self._last_debug_snapshot)
 
     @staticmethod
-    def _augment_instruction(instruction: str, subgoal: Optional[str] = None, hint: Optional[str] = None) -> str:
+    def _augment_instruction(
+        instruction: str,
+        subgoal: Optional[str] = None,
+        hint: Optional[str] = None,
+        previous_progress: Optional[float] = None,
+    ) -> str:
         text = f"Instruction: {str(instruction or '').strip()}"
         if str(subgoal or "").strip():
             text = f"{text}\nCurrent subtask: {str(subgoal).strip()}"
         if str(hint or "").strip():
             text = f"{text}\nWatcher hint: {str(hint).strip()}"
+        if previous_progress is not None:
+            text = f"{text}\nPrevious progress: {float(previous_progress):.4f}"
         return text
 
     def record_memory_observation(
@@ -1180,7 +1187,12 @@ class StreamVLNNavigationModel(NavigationModel):
         subgoal = kwargs.get("subgoal")
         hint = kwargs.get("hint")
         need_progress_done = bool(kwargs.get("need_progress_done", False))
-        instruction_text = self._augment_instruction(instruction, subgoal=subgoal, hint=hint)
+        instruction_text = self._augment_instruction(
+            instruction,
+            subgoal=subgoal,
+            hint=hint,
+            previous_progress=float(self.prev_progress),
+        )
         
         # Handle observation input
         if isinstance(observation, dict):
