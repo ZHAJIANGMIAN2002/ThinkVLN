@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import os
 import sys
 import tempfile
@@ -89,11 +90,33 @@ def _append_arg(argv: List[str], flag: str, value) -> None:
     argv.extend([flag, str(value)])
 
 
+def _load_pretrained_model_defaults(model_name_or_path: Optional[str]) -> dict:
+    model_path = Path(str(model_name_or_path or "").strip())
+    if not model_path:
+        return {}
+    config_path = model_path / "config.json"
+    if not config_path.exists():
+        return {}
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            config = json.load(handle) or {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    defaults = {}
+    vision_tower = config.get("vision_tower") or config.get("mm_vision_tower")
+    if vision_tower:
+        defaults["vision_tower"] = vision_tower
+    return defaults
+
+
 def build_streamvln_train_argv(config: dict, data_path_override: Optional[str] = None) -> List[str]:
-    model_cfg = config.get("model") or {}
+    model_cfg = dict(config.get("model") or {})
     data_cfg = config.get("data") or {}
     training_cfg = config.get("training") or {}
     logging_cfg = config.get("logging") or {}
+    pretrained_defaults = _load_pretrained_model_defaults(model_cfg.get("model_name_or_path"))
+    for key, value in pretrained_defaults.items():
+        model_cfg.setdefault(key, value)
 
     argv: List[str] = []
 

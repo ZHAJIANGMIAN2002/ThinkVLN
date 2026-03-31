@@ -377,3 +377,19 @@ def test_streamvln_actor_dataset_falls_back_from_r2r_images_dir_to_frame_dir(tmp
     item = dataset[0]
 
     assert tuple(item["images"].shape) == (2, 3, 2, 2)
+
+
+def test_resolve_existing_image_path_clamps_to_latest_available_frame(tmp_path: Path):
+    from streamvln.dataset.streamvln_actor_dataset import _resolve_existing_image_path
+
+    base = tmp_path / "data" / "trajectory_data" / "R2R_back"
+    image_dir = base / "images" / "scene_r2r_000001"
+    frame_dir = base / "r2r" / "scene_r2r_000001"
+    image_dir.mkdir(parents=True)
+    frame_dir.mkdir(parents=True)
+    for idx in range(24):
+        Image.new("RGB", (4, 4), color=(idx, idx, idx)).save(frame_dir / f"{idx:06d}_rgb.jpg")
+
+    resolved = _resolve_existing_image_path(str(image_dir / "000026_rgb.jpg"))
+
+    assert resolved == str(frame_dir / "000023_rgb.jpg")

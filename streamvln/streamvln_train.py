@@ -176,6 +176,33 @@ def find_all_linear_names(model):
     return list(lora_module_names)
 
 
+def get_parameter_count_summary(model):
+    total_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters())
+    trainable_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters() if p.requires_grad)
+    return total_params, trainable_params
+
+
+def load_tokenizer(model_args, training_args, local_pretrained_kwargs):
+    model_name = model_args.model_name_or_path.lower()
+    tokenizer_kwargs = dict(
+        cache_dir=training_args.cache_dir,
+        model_max_length=training_args.model_max_length,
+        padding_side="right",
+        **local_pretrained_kwargs,
+    )
+    if "mistral" in model_name or "mixtral" in model_name or "zephyr" in model_name:
+        tokenizer_kwargs["padding_side"] = "left"
+    elif (
+        "wizardlm-2" in model_name
+        or "vicuna" in model_name
+        or "llama" in model_name
+        or "yi" in model_name
+        or ("nous-hermes" in model_name and "wizard-2" in model_name)
+    ):
+        tokenizer_kwargs["use_fast"] = False
+    return transformers.AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
+
+
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
     """Collects the state dict and dump to disk."""
     if hasattr(trainer.args, "tune_mm_mlp_adapter") and trainer.args.tune_mm_mlp_adapter:
@@ -265,7 +292,9 @@ def smart_tokenizer_and_embedding_resize(
     Note: This is the unoptimized version that may make your embedding size not be divisible by 64.
     """
     num_new_tokens = tokenizer.add_special_tokens(special_tokens_dict)
-    model.resize_token_embeddings(len(tokenizer))
+    current_vocab_size = model.get_input_embeddings().weight.shape[0]
+    if len(tokenizer) > current_vocab_size:
+        model.resize_token_embeddings(len(tokenizer))
 
     if num_new_tokens > 0:
         input_embeddings = model.get_input_embeddings().weight.data
@@ -1680,28 +1709,11 @@ def train(attn_implementation=None):
                 model.to(torch.float16)
         rank0_print("Adding LoRA adapters...")
         model = get_peft_model(model, lora_config)
+        if hasattr(model, "print_trainable_parameters"):
+            model.print_trainable_parameters()
         # import ipdb; ipdb.set_trace()
 
-    if "mistral" in model_args.model_name_or_path.lower() or "mixtral" in model_args.model_name_or_path.lower() or "zephyr" in model_args.model_name_or_path.lower():
-        tokenizer = transformers.AutoTokenizer.from_pretrained(model_args.model_name_or_path, cache_dir=training_args.cache_dir, model_max_length=training_args.model_max_length, padding_side="left", **local_pretrained_kwargs)
-    elif "qwen" in model_args.model_name_or_path.lower():
-        tokenizer = transformers.AutoTokenizer.from_pretrained(model_args.model_name_or_path, cache_dir=training_args.cache_dir, model_max_length=training_args.model_max_length, padding_side="right", **local_pretrained_kwargs)
-    elif (
-        "wizardlm-2" in model_args.model_name_or_path.lower()
-        or "vicuna" in model_args.model_name_or_path.lower()
-        or "llama" in model_args.model_name_or_path.lower()
-        or "yi" in model_args.model_name_or_path.lower()
-        or "nous-hermes" in model_args.model_name_or_path.lower()
-        and "wizard-2" in model_args.model_name_or_path.lower()
-    ):
-        tokenizer = transformers.AutoTokenizer.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            model_max_length=training_args.model_max_length,
-            padding_side="right",
-            use_fast=False,
-            **local_pretrained_kwargs,
-        )
+    tokenizer = load_tokenizer(model_args, training_args, local_pretrained_kwargs)
 
     rank0_print(f"Prompt version: {model_args.version}")
     if model_args.version == "v0":
@@ -1824,8 +1836,7 @@ def train(attn_implementation=None):
         for name, param in model.named_parameters():
             if param.requires_grad:  # Check if the parameter requires training
                 rank0_print(name)
-        total_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters())
-        trainable_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters() if p.requires_grad)
+        total_params, trainable_params = get_parameter_count_summary(model)
         rank0_print(f"Total parameters: ~{total_params/1e6:.2f} MB)")
         rank0_print(f"Trainable parameters: ~{trainable_params/1e6:.2f} MB)")
         if training_args.bits in [4, 8]:
@@ -1871,6 +1882,8 @@ def train(attn_implementation=None):
         data_args=data_args,
         model_args=model_args,
     )
+    total_params, trainable_params = get_parameter_count_summary(model)
+    rank0_print(f"Final parameter summary - total: {total_params:,}, trainable: {trainable_params:,}, ratio: {trainable_params / max(total_params, 1):.4%}")
     
     params_no_grad = [
         n for n, p in model.named_parameters() if not p.requires_grad

@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import random
+import re
 from typing import Dict, List, Optional
 
 import torch
@@ -178,14 +179,42 @@ def _frame_to_image_path(image_root: Optional[str], episode_key: str, frame_idx:
 
 def _resolve_existing_image_path(image_path: str) -> str:
     path = str(image_path)
-    if os.path.exists(path):
-        return path
+    candidates = [path]
     r2r_marker = f"{os.sep}R2R_back{os.sep}images{os.sep}"
     if r2r_marker in path:
-        fallback = path.replace(r2r_marker, f"{os.sep}R2R_back{os.sep}r2r{os.sep}")
-        if os.path.exists(fallback):
-            return fallback
+        candidates.append(path.replace(r2r_marker, f"{os.sep}R2R_back{os.sep}r2r{os.sep}"))
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    for candidate in candidates:
+        clamped = _resolve_clamped_image_path(candidate)
+        if clamped is not None:
+            return clamped
     return path
+
+
+def _resolve_clamped_image_path(image_path: str) -> Optional[str]:
+    directory = os.path.dirname(image_path)
+    if not os.path.isdir(directory):
+        return None
+    match = re.search(r"(\d+)_rgb\.jpg$", os.path.basename(image_path))
+    if match is None:
+        return None
+    requested_frame = int(match.group(1))
+    available_frames = []
+    for name in os.listdir(directory):
+        frame_match = re.match(r"(\d+)_rgb\.jpg$", name)
+        if frame_match is not None:
+            available_frames.append(int(frame_match.group(1)))
+    if not available_frames:
+        return None
+    available_frames.sort()
+    chosen_frame = available_frames[0]
+    for frame in available_frames:
+        if frame > requested_frame:
+            break
+        chosen_frame = frame
+    return os.path.join(directory, f"{chosen_frame:06d}_rgb.jpg")
 
 
 def _build_actor_sample(

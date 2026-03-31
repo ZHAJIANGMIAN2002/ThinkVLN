@@ -13,6 +13,22 @@ from llava.model.llava_arch import LlavaMetaForCausalLM
 from streamvln.utils.utils import IGNORE_INDEX, IMAGE_TOKEN_INDEX, MEMORY_TOKEN_INDEX
 
 
+def compute_masked_progress_loss(progress_preds, progress_labels, ignore_value: float = -100.0):
+    progress_labels = progress_labels.to(progress_preds.device, dtype=progress_preds.dtype).reshape(-1)
+    valid_progress = progress_labels != ignore_value
+    if not valid_progress.any():
+        return None
+    return nn.functional.mse_loss(progress_preds[valid_progress], progress_labels[valid_progress])
+
+
+def compute_masked_done_loss(done_logits, done_labels, ignore_value: float = -100.0):
+    done_labels = done_labels.to(done_logits.device, dtype=done_logits.dtype).reshape(-1)
+    valid_done = done_labels != ignore_value
+    if not valid_done.any():
+        return None
+    return nn.functional.binary_cross_entropy_with_logits(done_logits[valid_done], done_labels[valid_done])
+
+
 @dataclass
 class StreamVLNCausalLMOutputWithAux(CausalLMOutputWithPast):
     progress_preds: Optional[torch.FloatTensor] = None
@@ -440,17 +456,11 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
 
         progress_loss = None
         if progress_labels is not None:
-            progress_labels = progress_labels.to(progress_preds.device).float().reshape(-1)
-            valid_progress = progress_labels != -100.0
-            if valid_progress.any():
-                progress_loss = nn.functional.mse_loss(progress_preds[valid_progress], progress_labels[valid_progress])
+            progress_loss = compute_masked_progress_loss(progress_preds, progress_labels)
 
         done_loss = None
         if done_labels is not None:
-            done_labels = done_labels.to(done_logits.device).float().reshape(-1)
-            valid_done = done_labels != -100.0
-            if valid_done.any():
-                done_loss = nn.functional.binary_cross_entropy_with_logits(done_logits[valid_done], done_labels[valid_done])
+            done_loss = compute_masked_done_loss(done_logits, done_labels)
 
         total_loss = outputs.loss
         if progress_loss is not None or done_loss is not None:

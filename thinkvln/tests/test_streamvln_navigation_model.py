@@ -58,3 +58,46 @@ def test_supports_progress_done_actor_model_uses_capability_not_class():
 
     assert supports_progress_done_actor_model(_CapableNavModel()) is True
     assert supports_progress_done_actor_model(object()) is False
+
+
+def test_initialize_vision_tokenizer_does_not_shrink_padded_vocab():
+    import torch
+    from llava.model.llava_arch import LlavaMetaForCausalLM
+
+    class _DummyTokenizer:
+        def __len__(self):
+            return 151647
+
+        def add_tokens(self, tokens, special_tokens=True):
+            return len(tokens)
+
+    class _DummyLlavaModel(LlavaMetaForCausalLM):
+        def __init__(self):
+            self.resize_calls = []
+            self.input_embeddings = torch.nn.Embedding(152064, 8)
+            self.output_embeddings = torch.nn.Linear(8, 152064, bias=False)
+
+        def get_model(self):
+            return self
+
+        def resize_token_embeddings(self, new_size):
+            self.resize_calls.append(int(new_size))
+
+        def get_input_embeddings(self):
+            return self.input_embeddings
+
+        def get_output_embeddings(self):
+            return self.output_embeddings
+
+    model = _DummyLlavaModel()
+    tokenizer = _DummyTokenizer()
+    model_args = SimpleNamespace(
+        mm_use_im_patch_token=True,
+        mm_use_im_start_end=False,
+        tune_mm_mlp_adapter=False,
+        pretrain_mm_mlp_adapter=None,
+    )
+
+    model.initialize_vision_tokenizer(model_args, tokenizer)
+
+    assert model.resize_calls == []

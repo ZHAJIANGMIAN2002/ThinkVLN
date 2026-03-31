@@ -1,6 +1,50 @@
 from types import SimpleNamespace
 
 
+def test_load_tokenizer_uses_fallback_for_unknown_model_family(monkeypatch, tmp_path):
+    import sys
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["streamvln_train.py", "--model_name_or_path", str(tmp_path)],
+    )
+
+    import streamvln.streamvln_train as train_mod
+
+    calls = {}
+
+    class _DummyTokenizer:
+        pad_token = None
+        unk_token = "<unk>"
+        model_max_length = 4096
+        padding_side = "right"
+
+    def _fake_from_pretrained(path, **kwargs):
+        calls["path"] = path
+        calls["kwargs"] = dict(kwargs)
+        return _DummyTokenizer()
+
+    monkeypatch.setattr(
+        train_mod.transformers,
+        "AutoTokenizer",
+        SimpleNamespace(from_pretrained=_fake_from_pretrained),
+    )
+
+    tokenizer = train_mod.load_tokenizer(
+        SimpleNamespace(model_name_or_path=str(tmp_path / "custom-streamvln-model")),
+        SimpleNamespace(cache_dir="/tmp/cache", model_max_length=2048),
+        {"local_files_only": True},
+    )
+
+    assert isinstance(tokenizer, _DummyTokenizer)
+    assert calls["path"] == str(tmp_path / "custom-streamvln-model")
+    assert calls["kwargs"]["cache_dir"] == "/tmp/cache"
+    assert calls["kwargs"]["model_max_length"] == 2048
+    assert calls["kwargs"]["padding_side"] == "right"
+    assert "use_fast" not in calls["kwargs"]
+
+
 def test_get_model_loads_config_when_actor_overrides_exist(monkeypatch, tmp_path):
     import sys
 
@@ -121,3 +165,46 @@ def test_find_all_linear_names_ignores_numeric_suffix_modules(monkeypatch, tmp_p
     assert "k_proj" in names
     assert "0" not in names
     assert "2" not in names
+
+
+def test_smart_tokenizer_and_embedding_resize_does_not_shrink_padded_vocab(monkeypatch, tmp_path):
+    import sys
+    import torch
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["streamvln_train.py", "--model_name_or_path", str(tmp_path)],
+    )
+
+    import streamvln.streamvln_train as train_mod
+
+    class _DummyTokenizer:
+        def __len__(self):
+            return 151647
+
+        def add_special_tokens(self, special_tokens_dict):
+            return len(special_tokens_dict)
+
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.input_embeddings = torch.nn.Embedding(152064, 8)
+            self.output_embeddings = torch.nn.Linear(8, 152064, bias=False)
+            self.resize_calls = []
+
+        def resize_token_embeddings(self, new_size):
+            self.resize_calls.append(int(new_size))
+
+        def get_input_embeddings(self):
+            return self.input_embeddings
+
+        def get_output_embeddings(self):
+            return self.output_embeddings
+
+    model = _DummyModel()
+    tokenizer = _DummyTokenizer()
+
+    train_mod.smart_tokenizer_and_embedding_resize({"pad_token": "[PAD]"}, tokenizer, model)
+
+    assert model.resize_calls == []

@@ -9,17 +9,29 @@ if [ ! -f "$CONFIG_FILE" ]; then
   exit 1
 fi
 
-mapfile -t CFG_VALUES < <(python - "$CONFIG_FILE" <<'PY'
-import sys
-import yaml
+if command -v python >/dev/null 2>&1; then
+  PYTHON_CMD=(python)
+elif command -v conda >/dev/null 2>&1; then
+  PYTHON_CMD=(conda run -n vln python)
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON_CMD=(python3)
+else
+  echo "No Python interpreter found. Activate the vln environment or install python."
+  exit 1
+fi
 
+if command -v python3 >/dev/null 2>&1; then
+  CONFIG_PYTHON_CMD=(python3)
+else
+  CONFIG_PYTHON_CMD=("${PYTHON_CMD[@]}")
+fi
+
+mapfile -t CFG_VALUES < <("${CONFIG_PYTHON_CMD[@]}" -c 'import sys,yaml
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
     config = yaml.safe_load(handle) or {}
 runtime = config.get("runtime") or {}
 print(runtime.get("gpus", "0"))
-print(runtime.get("master_port", 29512))
-PY
-)
+print(runtime.get("master_port", 29512))' "$CONFIG_FILE")
 
 GPUS="${CFG_VALUES[0]}"
 MASTER_PORT="${MASTER_PORT:-${CFG_VALUES[1]}}"
@@ -36,11 +48,11 @@ echo "Master port:  $MASTER_PORT"
 echo "=========================================="
 
 if [ "$NUM_GPUS" -gt 1 ]; then
-  torchrun \
+  "${PYTHON_CMD[@]}" -m torch.distributed.run \
     --nproc_per_node="$NUM_GPUS" \
     --master_port="$MASTER_PORT" \
     scripts/train_streamvln_actor.py \
     --config "$CONFIG_FILE"
 else
-  python scripts/train_streamvln_actor.py --config "$CONFIG_FILE"
+  "${PYTHON_CMD[@]}" scripts/train_streamvln_actor.py --config "$CONFIG_FILE"
 fi

@@ -112,3 +112,35 @@ def test_build_runtime_env_includes_wandb_settings():
     assert env["WANDB_ENTITY"] == "lab"
     assert env["WANDB_MODE"] == "offline"
     assert env["WANDB_TAGS"] == "streamvln_actor,debug"
+
+
+def test_build_streamvln_train_argv_fills_vision_tower_from_model_config(tmp_path):
+    module = _load_script_module()
+    model_dir = tmp_path / "streamvln"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "vision_tower": "google/siglip-so400m-patch14-384",
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = {
+        "model": {
+            "model_name_or_path": str(model_dir),
+            "model_type": "streamvln_actor",
+        },
+        "data": {
+            "summary_data_path": "/data/train.jsonl",
+        },
+        "training": {
+            "output_dir": "/outputs/actor",
+        },
+    }
+
+    argv = module.build_streamvln_train_argv(config)
+
+    assert "--vision_tower" in argv
+    vision_idx = argv.index("--vision_tower")
+    assert argv[vision_idx + 1] == "google/siglip-so400m-patch14-384"

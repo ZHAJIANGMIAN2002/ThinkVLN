@@ -62,7 +62,7 @@ logging:
     tags: ["streamvln_actor", "1k", "debug"]
 
 runtime:
-  gpus: "0,1,2,3"
+  gpus: "0"
   master_port: 29511
   env:
     TOKENIZERS_PARALLELISM: "false"
