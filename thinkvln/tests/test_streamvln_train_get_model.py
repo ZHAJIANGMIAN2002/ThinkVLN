@@ -208,3 +208,64 @@ def test_smart_tokenizer_and_embedding_resize_does_not_shrink_padded_vocab(monke
     train_mod.smart_tokenizer_and_embedding_resize({"pad_token": "[PAD]"}, tokenizer, model)
 
     assert model.resize_calls == []
+
+
+def test_make_supervised_data_module_splits_streamvln_actor_dataset(monkeypatch, tmp_path):
+    import sys
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["streamvln_train.py", "--model_name_or_path", str(tmp_path)],
+    )
+
+    import streamvln.streamvln_train as train_mod
+
+    class _DummyDataset:
+        def __init__(self, *args, **kwargs):
+            self.lengths = [1] * 10
+
+        def __len__(self):
+            return len(self.lengths)
+
+        def __getitem__(self, idx):
+            return {"idx": idx}
+
+    monkeypatch.setattr(train_mod, "StreamVLNActorDataset", _DummyDataset)
+
+    module = train_mod.make_supervised_data_module(
+        tokenizer=object(),
+        vision_tower=None,
+        data_args=SimpleNamespace(val_split_ratio=0.2, multi_task_training=False),
+        model_args=SimpleNamespace(model_type="streamvln_actor"),
+        training_args=SimpleNamespace(seed=123),
+    )
+
+    assert len(module["train_dataset"]) == 8
+    assert len(module["eval_dataset"]) == 2
+
+
+def test_streamvln_actor_trainer_logs_aux_losses():
+    import torch
+
+    import streamvln.streamvln_train as train_mod
+
+    trainer = object.__new__(train_mod.StreamVLNActorTrainer)
+    trainer.args = SimpleNamespace(logging_steps=1)
+    trainer.state = SimpleNamespace(global_step=0)
+    logged = {}
+    trainer.log = logged.update
+
+    class _DummyModel:
+        def __call__(self, **inputs):
+            return {
+                "loss": torch.tensor(3.0),
+                "progress_loss": torch.tensor(0.25),
+                "done_loss": torch.tensor(0.75),
+            }
+
+    loss = train_mod.StreamVLNActorTrainer.compute_loss(trainer, _DummyModel(), inputs={}, return_outputs=False)
+
+    assert float(loss.item()) == 3.0
+    assert logged["train/progress_loss"] == 0.25
+    assert logged["train/done_loss"] == 0.75

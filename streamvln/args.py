@@ -102,6 +102,7 @@ class DataArguments:
     watcher_memory_ratio: float = field(default=1.0)
     watcher_memory_seed: int = field(default=42)
     done_threshold: float = field(default=0.85)
+    val_split_ratio: float = field(default=0.0)
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):

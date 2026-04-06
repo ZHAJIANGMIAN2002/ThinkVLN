@@ -30,13 +30,17 @@ def test_build_streamvln_train_argv_from_yaml_sections():
             "num_history": 8,
             "num_future_steps": 4,
             "done_threshold": 0.85,
+            "val_split_ratio": 0.1,
         },
         "training": {
             "output_dir": "/outputs/actor",
             "per_device_train_batch_size": 1,
+            "per_device_eval_batch_size": 1,
             "gradient_accumulation_steps": 8,
             "bf16": True,
             "deepspeed": "config/zero2.json",
+            "eval_strategy": "steps",
+            "eval_steps": 100,
         },
         "logging": {
             "report_to": ["wandb"],
@@ -55,6 +59,8 @@ def test_build_streamvln_train_argv_from_yaml_sections():
     assert "8" in argv
     assert "--num_future_steps" in argv
     assert "4" in argv
+    assert "--val_split_ratio" in argv
+    assert "0.1" in argv
     assert "--lora_enable" in argv
     assert "True" in argv
     assert "--lora_target_modules" in argv
@@ -64,6 +70,10 @@ def test_build_streamvln_train_argv_from_yaml_sections():
     assert "config/zero2.json" in argv
     assert "--report_to" in argv
     assert "wandb" in argv
+    assert "--eval_strategy" in argv
+    assert "steps" in argv
+    assert "--eval_steps" in argv
+    assert "100" in argv
     assert "--run_name" in argv
     assert "streamvln-actor-test" in argv
 

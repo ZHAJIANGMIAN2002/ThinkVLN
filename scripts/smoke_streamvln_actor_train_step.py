@@ -124,7 +124,7 @@ def main() -> None:
             bf16=args.device.startswith("cuda"),
         )
 
-        module = make_supervised_data_module(tokenizer, None, data_args, model_args)
+        module = make_supervised_data_module(tokenizer, None, data_args, model_args, training_args=training_args)
         dataset = module["train_dataset"]
         collator = module["data_collator"]
         take = min(max(1, int(args.batch_size)), len(dataset))

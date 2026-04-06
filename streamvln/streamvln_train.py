@@ -46,7 +46,7 @@ import transformers
 import tokenizers
 
 from transformers import AutoConfig
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, random_split
 from llava.constants import IGNORE_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, IMAGE_TOKEN_INDEX
 from llava.train.llava_trainer import LLaVATrainer
 
@@ -1490,15 +1490,36 @@ class DataCollatorForSupervisedDataset(object):
         
 
 
-def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, vision_tower, data_args, model_args) -> Dict:
+def _split_streamvln_actor_dataset(dataset, val_split_ratio: float, seed: int):
+    ratio = float(getattr(val_split_ratio, "__float__", lambda: val_split_ratio)())
+    if ratio <= 0.0:
+        return dataset, None
+    val_size = int(len(dataset) * ratio)
+    train_size = len(dataset) - val_size
+    if val_size <= 0 or train_size <= 0:
+        return dataset, None
+    return random_split(
+        dataset,
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(int(seed)),
+    )
+
+
+def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, vision_tower, data_args, model_args, training_args=None) -> Dict:
     """Make dataset and collator for supervised fine-tuning."""
 
     if getattr(model_args, "model_type", "streamvln") == "streamvln_actor":
         nav_dataset = StreamVLNActorDataset(tokenizer=tokenizer, data_args=data_args, task_id=0)
-        train_dataset = nav_dataset
+        train_dataset, eval_dataset = _split_streamvln_actor_dataset(
+            nav_dataset,
+            val_split_ratio=getattr(data_args, "val_split_ratio", 0.0),
+            seed=getattr(training_args, "seed", 42),
+        )
         rank0_print('len train_dataset ', len(train_dataset))
+        if eval_dataset is not None:
+            rank0_print('len eval_dataset ', len(eval_dataset))
         data_collator = partial(streamvln_actor_collate_fn, tokenizer=tokenizer)
-        return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
+        return dict(train_dataset=train_dataset, eval_dataset=eval_dataset, data_collator=data_collator)
 
     nav_dataset = VLNActionDataset(tokenizer=tokenizer, data_args=data_args, task_id=0)
     dataset =[nav_dataset]
@@ -1524,6 +1545,32 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, vis
 
     data_collator = partial(collate_fn, tokenizer=tokenizer)
     return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
+
+
+class StreamVLNActorTrainer(LLaVATrainer):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        outputs = model(**inputs)
+        loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
+        if self.state.global_step % self.args.logging_steps == 0:
+            metrics = self._collect_actor_aux_metrics(outputs)
+            if metrics:
+                self.log(metrics)
+        return (loss, outputs) if return_outputs else loss
+
+    @staticmethod
+    def _collect_actor_aux_metrics(outputs):
+        metrics = {}
+        if isinstance(outputs, dict):
+            progress_loss = outputs.get("progress_loss")
+            done_loss = outputs.get("done_loss")
+        else:
+            progress_loss = getattr(outputs, "progress_loss", None)
+            done_loss = getattr(outputs, "done_loss", None)
+        if progress_loss is not None:
+            metrics["train/progress_loss"] = float(progress_loss.detach().float().cpu().item())
+        if done_loss is not None:
+            metrics["train/done_loss"] = float(done_loss.detach().float().cpu().item())
+        return metrics
 
 
 def get_model(model_args, training_args, data_args, bnb_model_from_pretrained_args):
@@ -1881,6 +1928,7 @@ def train(attn_implementation=None):
         vision_tower=vision_tower,
         data_args=data_args,
         model_args=model_args,
+        training_args=training_args,
     )
     total_params, trainable_params = get_parameter_count_summary(model)
     rank0_print(f"Final parameter summary - total: {total_params:,}, trainable: {trainable_params:,}, ratio: {trainable_params / max(total_params, 1):.4%}")
@@ -1916,7 +1964,8 @@ def train(attn_implementation=None):
                 return wrap_func
             FSDP.__init__ = patch_FSDP_use_orig_params(FSDP.__init__)
     
-    trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
+    trainer_cls = StreamVLNActorTrainer if getattr(model_args, "model_type", "streamvln") == "streamvln_actor" else LLaVATrainer
+    trainer = trainer_cls(model=model, tokenizer=tokenizer, args=training_args, **data_module)
     # print(list(model.get_model().vision_resampler.parameters())[0])
     # import ipdb; ipdb.set_trace()
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):

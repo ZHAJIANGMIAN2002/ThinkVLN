@@ -160,6 +160,7 @@ def build_streamvln_train_argv(config: dict, data_path_override: Optional[str] =
         "done_threshold": "done_threshold",
         "num_history": "num_history",
         "num_future_steps": "num_future_steps",
+        "val_split_ratio": "val_split_ratio",
         "multi_task_training": "multi_task_training",
     }
     training_key_map = {
@@ -167,6 +168,7 @@ def build_streamvln_train_argv(config: dict, data_path_override: Optional[str] =
         "num_train_epochs": "num_train_epochs",
         "max_steps": "max_steps",
         "per_device_train_batch_size": "per_device_train_batch_size",
+        "per_device_eval_batch_size": "per_device_eval_batch_size",
         "gradient_accumulation_steps": "gradient_accumulation_steps",
         "learning_rate": "learning_rate",
         "weight_decay": "weight_decay",
@@ -183,6 +185,8 @@ def build_streamvln_train_argv(config: dict, data_path_override: Optional[str] =
         "logging_first_step": "logging_first_step",
         "save_steps": "save_steps",
         "save_total_limit": "save_total_limit",
+        "eval_strategy": "eval_strategy",
+        "eval_steps": "eval_steps",
         "dataloader_num_workers": "dataloader_num_workers",
         "dataloader_pin_memory": "dataloader_pin_memory",
         "seed": "seed",
