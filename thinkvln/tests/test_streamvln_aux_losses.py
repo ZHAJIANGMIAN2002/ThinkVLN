@@ -2,6 +2,45 @@ import pytest
 import torch
 
 
+def test_aux_pooling_uses_prompt_boundary_when_labels_present():
+    import streamvln.model.stream_video_vln as model_mod
+
+    hidden_states = torch.tensor(
+        [[[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]]],
+        dtype=torch.float32,
+    )
+    attention_mask = torch.tensor([[1, 1, 1, 1]], dtype=torch.long)
+    labels = torch.tensor([[-100, -100, 7, 8]], dtype=torch.long)
+
+    pooled = model_mod.StreamVLNForCausalLM._pool_aux_hidden(
+        hidden_states=hidden_states,
+        attention_mask=attention_mask,
+        labels=labels,
+    )
+
+    assert pooled.shape == (1, 2)
+    assert torch.allclose(pooled[0], torch.tensor([2.0, 20.0]))
+
+
+def test_aux_pooling_falls_back_to_last_valid_token_without_labels():
+    import streamvln.model.stream_video_vln as model_mod
+
+    hidden_states = torch.tensor(
+        [[[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]]],
+        dtype=torch.float32,
+    )
+    attention_mask = torch.tensor([[1, 1, 0, 0]], dtype=torch.long)
+
+    pooled = model_mod.StreamVLNForCausalLM._pool_aux_hidden(
+        hidden_states=hidden_states,
+        attention_mask=attention_mask,
+        labels=None,
+    )
+
+    assert pooled.shape == (1, 2)
+    assert torch.allclose(pooled[0], torch.tensor([2.0, 20.0]))
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for bf16 backward coverage")
 def test_progress_loss_helper_keeps_bfloat16_backward_stable():
     import streamvln.model.stream_video_vln as model_mod

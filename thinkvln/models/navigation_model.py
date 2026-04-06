@@ -1238,6 +1238,10 @@ class StreamVLNNavigationModel(NavigationModel):
             if depth.ndim != 3:
                 depth = np.zeros((rgb.shape[0], rgb.shape[1], 1), dtype=np.float32)
 
+        if need_progress_done and len(self.action_seq) > 0:
+            # Keep progress/done aligned with each control step by forcing a fresh forward.
+            self.action_seq = []
+
         # If we have action sequence, return next action
         if len(self.action_seq) > 0:
             action = self.action_seq.pop(0)
@@ -1425,6 +1429,9 @@ class StreamVLNNavigationModel(NavigationModel):
         # Return first action from sequence
         if len(self.action_seq) > 0:
             action = self.action_seq.pop(0)
+            if need_progress_done:
+                # Do not reuse stale aux predictions across cached chunk steps.
+                self.action_seq = []
             self._last_debug_snapshot = {
                 "instruction_text": instruction_text,
                 "predicted_progress": float(self._last_predicted_progress),

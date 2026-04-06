@@ -75,3 +75,28 @@ def test_extract_frames_rebuilds_partial_episode_and_splits_frames(tmp_path: Pat
     map_img = cv2.imread(str(destination / "000001_map.jpg"))
     assert rgb.shape[:2] == (6, 4)
     assert map_img.shape[:2] == (6, 6)
+
+
+def test_extract_frames_rebuilds_when_existing_frame_count_is_short(tmp_path: Path):
+    video_root = tmp_path / "images"
+    output_root = tmp_path / "r2r"
+    rel_dir = Path("scene_r2r_000003")
+    video_path = video_root / rel_dir / "trajectory.mp4"
+    frames = [np.full((6, 10, 3), 30 + idx, dtype=np.uint8) for idx in range(2)]
+    _write_video(video_path, frames)
+
+    destination = output_root / rel_dir
+    destination.mkdir(parents=True)
+    (destination / "000000_rgb.jpg").write_bytes(b"rgb")
+    (destination / "000000_map.jpg").write_bytes(b"map")
+
+    result = extract_frames(video_path, video_root, output_root, overwrite=False, fixed_rgb_width=4)
+
+    assert result["status"] == "rebuilt_partial"
+    assert result["frames_total"] == 2
+    assert sorted(p.name for p in destination.iterdir()) == [
+        "000000_map.jpg",
+        "000000_rgb.jpg",
+        "000001_map.jpg",
+        "000001_rgb.jpg",
+    ]

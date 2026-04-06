@@ -18,7 +18,7 @@ from thinkvln.dataset.watcher_sft_dataset import (
     format_watcher_update_json,
     select_rollout_paths,
 )
-from thinkvln.engine.watcher_sft_trainer import build_watcher_trainer_components
+from thinkvln.engine.watcher_sft_trainer import build_watcher_trainer_components, create_training_args_from_config
 
 
 def _write_jsonl(path: Path, rows: Sequence[dict]) -> None:
@@ -182,6 +182,28 @@ class TestWatcherCollator:
 
 
 class TestWatcherTrainerSmoke:
+    def test_create_training_args_sets_non_reentrant_checkpointing_defaults(self):
+        args = create_training_args_from_config(
+            {
+                "model": {"model_name_or_path": "/tmp/model"},
+                "data": {
+                    "manifest_file": "/tmp/manifest",
+                    "annotation_file": "/tmp/annotation",
+                    "bundle_root": "/tmp/bundle",
+                    "summary_full_path": "/tmp/summary",
+                },
+                "training": {
+                    "output_dir": "/tmp/output",
+                    "gradient_checkpointing": True,
+                    "ddp_find_unused_parameters": False,
+                },
+            }
+        )
+
+        assert args.gradient_checkpointing is True
+        assert args.gradient_checkpointing_kwargs == {"use_reentrant": False}
+        assert args.ddp_find_unused_parameters is False
+
     @patch("thinkvln.engine.watcher_sft_trainer.Trainer", autospec=True)
     @patch("thinkvln.engine.watcher_sft_trainer.WatcherSFTCollator", autospec=True)
     @patch("thinkvln.engine.watcher_sft_trainer.WatcherSFTDataset", autospec=True)
@@ -242,3 +264,6 @@ class TestWatcherTrainerSmoke:
         load_model(args)
 
         base_model.enable_input_require_grads.assert_called_once()
+        base_model.gradient_checkpointing_enable.assert_called_once_with(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )

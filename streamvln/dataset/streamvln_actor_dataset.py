@@ -177,6 +177,41 @@ def _frame_to_image_path(image_root: Optional[str], episode_key: str, frame_idx:
     return os.path.join(str(image_root), dir_key, f"{int(frame_idx):06d}_rgb.jpg")
 
 
+def _materialized_frame_to_image_path(
+    image_root: Optional[str],
+    traj: Dict,
+    frame_idx: int,
+    dataset_name: Optional[str] = None,
+) -> Optional[str]:
+    if not image_root:
+        return None
+    episode_key = str(traj.get("episode_key") or "")
+    video = str(traj.get("video") or "").strip().lstrip("./")
+    candidates = []
+    if video:
+        video_basename = os.path.basename(video)
+        if str(dataset_name or "").lower() == "r2r":
+            candidates.append(video_basename)
+        else:
+            candidates.extend([video, video_basename])
+    dir_key = _episode_key_to_dir_key(episode_key)
+    if dir_key:
+        candidates.append(dir_key)
+    deduped = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    chosen_dir = deduped[0] if deduped else dir_key
+    for candidate in deduped:
+        if os.path.isdir(os.path.join(str(image_root), candidate)):
+            chosen_dir = candidate
+            break
+    frame_number = int(frame_idx)
+    if str(dataset_name or "").lower() == "scalevln":
+        frame_number += 1
+    return os.path.join(str(image_root), chosen_dir, f"{frame_number:06d}_rgb.jpg")
+
+
 def _resolve_existing_image_path(image_path: str) -> str:
     path = str(image_path)
     candidates = [path]
@@ -263,14 +298,92 @@ def _build_actor_sample(
     if dataset_name is not None:
         sample["dataset_name"] = str(dataset_name)
     if image_root:
-        sample["image_path"] = _frame_to_image_path(image_root, episode_key, int(frame_idx))
+        sample["image_path"] = _materialized_frame_to_image_path(
+            image_root=image_root,
+            traj=traj,
+            frame_idx=int(frame_idx),
+            dataset_name=dataset_name,
+        )
         sample["history_image_paths"] = [
-            _frame_to_image_path(image_root, episode_key, idx) for idx in history_frame_indices
+            _materialized_frame_to_image_path(
+                image_root=image_root,
+                traj=traj,
+                frame_idx=idx,
+                dataset_name=dataset_name,
+            )
+            for idx in history_frame_indices
         ]
     else:
         sample["history_image_paths"] = []
     sample["input_mode"] = "instruction_subtask_hint" if sample["watcher_hint"] else "instruction_subtask"
     return sample
+
+
+def _normalize_materialized_actor_rows(rows: List[Dict], done_threshold: float) -> List[Dict]:
+    normalized: List[Dict] = [dict(row) for row in rows]
+    by_episode: Dict[str, List[int]] = {}
+    for idx, row in enumerate(normalized):
+        episode_key = str(row.get("episode_key") or "")
+        by_episode.setdefault(episode_key, []).append(idx)
+        if row.get("history_frame_indices") is None:
+            row["history_frame_indices"] = []
+        if row.get("history_image_paths") is None:
+            row["history_image_paths"] = []
+        if "done_label" not in row and "progress_label" in row:
+            row["done_label"] = float(
+                compute_done_label(float(row.get("progress_label", 0.0)), threshold=done_threshold)
+            )
+        hint_text = str(row.get("watcher_hint") or "").strip()
+        row["watcher_hint"] = hint_text if hint_text else None
+        row["input_mode"] = "instruction_subtask_hint" if row["watcher_hint"] else "instruction_subtask"
+
+    for _, index_list in by_episode.items():
+        index_list.sort(key=lambda i: int(normalized[i].get("frame_idx", 0)))
+        prev_progress = 0.0
+        for row_idx in index_list:
+            row = normalized[row_idx]
+            if "previous_progress" not in row:
+                row["previous_progress"] = float(prev_progress)
+            progress = float(row.get("progress_label", row["previous_progress"]))
+            prev_progress = progress
+
+    return normalized
+
+
+def _remap_materialized_watcher_hints(
+    rows: List[Dict],
+    watcher_memory_path: Optional[str],
+    watcher_memory_ratio: float,
+    seed: int,
+) -> List[Dict]:
+    if not rows:
+        return rows
+    if watcher_memory_path and os.path.exists(watcher_memory_path):
+        hint_map = _load_watcher_hints(watcher_memory_path, watcher_memory_ratio, seed)
+        remapped: List[Dict] = []
+        for row in rows:
+            patched = dict(row)
+            key = (str(patched.get("episode_key") or ""), int(patched.get("frame_idx", 0)))
+            hint_text = str(hint_map.get(key) or "").strip()
+            patched["watcher_hint"] = hint_text if hint_text else None
+            patched["input_mode"] = "instruction_subtask_hint" if patched["watcher_hint"] else "instruction_subtask"
+            remapped.append(patched)
+        return remapped
+
+    ratio = max(0.0, min(1.0, float(watcher_memory_ratio)))
+    if ratio >= 1.0:
+        return rows
+    rng = random.Random(int(seed))
+    remapped = []
+    for row in rows:
+        patched = dict(row)
+        hint_text = str(patched.get("watcher_hint") or "").strip()
+        if hint_text and rng.random() > ratio:
+            hint_text = ""
+        patched["watcher_hint"] = hint_text if hint_text else None
+        patched["input_mode"] = "instruction_subtask_hint" if patched["watcher_hint"] else "instruction_subtask"
+        remapped.append(patched)
+    return remapped
 
 
 def load_streamvln_actor_samples(
@@ -283,7 +396,13 @@ def load_streamvln_actor_samples(
 ) -> List[Dict]:
     rows = _load_jsonl(summary_path)
     if rows and _materialized_actor_row(rows[0]):
-        return rows
+        normalized_rows = _normalize_materialized_actor_rows(rows, done_threshold=done_threshold)
+        return _remap_materialized_watcher_hints(
+            normalized_rows,
+            watcher_memory_path=watcher_memory_path,
+            watcher_memory_ratio=watcher_memory_ratio,
+            seed=seed,
+        )
 
     watcher_hints = _load_watcher_hints(watcher_memory_path, watcher_memory_ratio, seed)
     samples: List[Dict] = []

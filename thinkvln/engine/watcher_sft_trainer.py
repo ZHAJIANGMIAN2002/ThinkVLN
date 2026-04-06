@@ -75,6 +75,10 @@ def create_training_args_from_config(config: Dict[str, Any]) -> WatcherSFTTraini
     data_cfg = config.get("data", {})
     train_cfg = config.get("training", {})
     log_cfg = config.get("logging", {})
+    gradient_checkpointing = bool(train_cfg.get("gradient_checkpointing", True))
+    gradient_checkpointing_kwargs = train_cfg.get("gradient_checkpointing_kwargs")
+    if gradient_checkpointing_kwargs is None and gradient_checkpointing:
+        gradient_checkpointing_kwargs = {"use_reentrant": False}
     flat: Dict[str, Any] = {
         "remove_unused_columns": False,
         "output_dir": train_cfg.get("output_dir", "outputs/watcher_sft"),
@@ -105,7 +109,8 @@ def create_training_args_from_config(config: Dict[str, Any]) -> WatcherSFTTraini
         "lr_scheduler_type": train_cfg.get("lr_scheduler_type", "cosine"),
         "bf16": bool(train_cfg.get("bf16", torch.cuda.is_available())),
         "fp16": bool(train_cfg.get("fp16", False)),
-        "gradient_checkpointing": bool(train_cfg.get("gradient_checkpointing", True)),
+        "gradient_checkpointing": gradient_checkpointing,
+        "gradient_checkpointing_kwargs": gradient_checkpointing_kwargs,
         "logging_steps": int(train_cfg.get("logging_steps", 10)),
         "logging_first_step": bool(train_cfg.get("logging_first_step", True)),
         "save_steps": int(train_cfg.get("save_steps", 1000)),
@@ -116,6 +121,8 @@ def create_training_args_from_config(config: Dict[str, Any]) -> WatcherSFTTraini
         "dataloader_num_workers": int(train_cfg.get("dataloader_num_workers", 0)),
         "dataloader_pin_memory": bool(train_cfg.get("dataloader_pin_memory", True)),
         "seed": int(train_cfg.get("seed", 42)),
+        "ddp_find_unused_parameters": train_cfg.get("ddp_find_unused_parameters", False),
+        "ddp_backend": train_cfg.get("ddp_backend", "nccl"),
         "report_to": log_cfg.get("report_to", []),
         "run_name": log_cfg.get("run_name"),
         "logging_dir": log_cfg.get("logging_dir"),
@@ -196,7 +203,7 @@ def load_model(args: WatcherSFTTrainingArguments):
     if args.use_lora and args.gradient_checkpointing and hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
     if args.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
-        model.gradient_checkpointing_enable()
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=args.gradient_checkpointing_kwargs)
     return model
 
 

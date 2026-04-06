@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import thinkvln.datagen.generation.extract_tar_shard_folder as extract_tar_shard_folder
 import thinkvln.datagen.generation.tar_shard_folder as tar_shard_folder
 
 
@@ -117,6 +118,50 @@ def test_shard_folder_removes_stale_generated_shards_on_rerun(tmp_path: Path) ->
 
     assert result["num_shards"] == 1
     assert sorted(path.name for path in shards_dir.glob("*.tar")) == ["shard-00000.tar"]
+
+
+def test_extract_shard_folder_restores_original_tree_from_manifest(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    shard_root = tmp_path / "sharded"
+    restore_root = tmp_path / "restored"
+    _write_file(input_root / "images" / "scene" / "000000_rgb.jpg", b"a" * 10)
+    _write_file(input_root / "manifest" / "watcher_rollout_manifest.jsonl", b'{"sample_id":"x"}\n')
+
+    tar_shard_folder.shard_folder(
+        input_root=input_root,
+        output_root=shard_root,
+        max_shard_bytes=64,
+    )
+
+    result = extract_tar_shard_folder.extract_shard_folder(
+        input_root=shard_root,
+        output_root=restore_root,
+    )
+
+    assert result["num_files"] == 2
+    assert result["num_shards"] == 1
+    assert (restore_root / "images" / "scene" / "000000_rgb.jpg").read_bytes() == b"a" * 10
+    assert (restore_root / "manifest" / "watcher_rollout_manifest.jsonl").read_text(encoding="utf-8") == '{"sample_id":"x"}\n'
+
+
+def test_extract_shard_folder_fails_when_manifest_references_missing_shard(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    shard_root = tmp_path / "sharded"
+    restore_root = tmp_path / "restored"
+    _write_file(input_root / "a.txt", b"hello")
+
+    tar_shard_folder.shard_folder(
+        input_root=input_root,
+        output_root=shard_root,
+        max_shard_bytes=64,
+    )
+    (shard_root / "shards" / "shard-00000.tar").unlink()
+
+    with pytest.raises(FileNotFoundError, match="missing shard"):
+        extract_tar_shard_folder.extract_shard_folder(
+            input_root=shard_root,
+            output_root=restore_root,
+        )
 
 
 @pytest.mark.parametrize(

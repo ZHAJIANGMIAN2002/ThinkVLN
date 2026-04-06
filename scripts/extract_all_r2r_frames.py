@@ -37,6 +37,15 @@ def get_episode_state(destination_dir: Path) -> str:
     return "partial"
 
 
+def get_episode_frame_counts(destination_dir: Path) -> tuple[int, int]:
+    if not destination_dir.exists():
+        return 0, 0
+    return (
+        len(list(destination_dir.glob("*_rgb.jpg"))),
+        len(list(destination_dir.glob("*_map.jpg"))),
+    )
+
+
 def split_frame(frame, fixed_rgb_width: int):
     height, width = frame.shape[:2]
     if width <= fixed_rgb_width:
@@ -67,7 +76,9 @@ def extract_frames(
         }
 
     frames_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-    if state == "complete" and not overwrite:
+    rgb_count, map_count = get_episode_frame_counts(destination_dir)
+    is_complete = state == "complete" and rgb_count == frames_total and map_count == frames_total
+    if is_complete and not overwrite:
         cap.release()
         return {
             "video": str(rel_dir),
@@ -77,7 +88,8 @@ def extract_frames(
             "status": "skipped_complete",
         }
 
-    if state == "partial" or overwrite:
+    needs_rebuild = state != "missing" and not is_complete
+    if needs_rebuild or overwrite:
         shutil.rmtree(destination_dir, ignore_errors=True)
     destination_dir.mkdir(parents=True, exist_ok=True)
 
@@ -105,7 +117,7 @@ def extract_frames(
     finally:
         cap.release()
 
-    status = "rebuilt_partial" if state == "partial" else "extracted"
+    status = "rebuilt_partial" if needs_rebuild else "extracted"
     return {
         "video": str(rel_dir),
         "frames_extracted": saved,

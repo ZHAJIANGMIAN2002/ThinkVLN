@@ -114,6 +114,39 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
     
     def get_model(self):
         return self.model
+
+    @staticmethod
+    def _pool_aux_hidden(
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        labels: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        seq_len = int(hidden_states.shape[1])
+        device = hidden_states.device
+        batch_indices = torch.arange(hidden_states.shape[0], device=device)
+        token_positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(hidden_states.shape[0], seq_len)
+
+        if attention_mask is None:
+            fallback_indices = torch.full((hidden_states.shape[0],), seq_len - 1, device=device, dtype=torch.long)
+        else:
+            valid_lengths = attention_mask.long().sum(dim=1).clamp(min=1)
+            fallback_indices = (valid_lengths - 1).to(device)
+
+        if labels is not None:
+            prompt_mask = labels.eq(IGNORE_INDEX)
+            if attention_mask is not None:
+                prompt_mask = prompt_mask & attention_mask.bool()
+            has_prompt = prompt_mask.any(dim=1)
+            prompt_last_indices = torch.where(
+                prompt_mask,
+                token_positions,
+                torch.zeros_like(token_positions),
+            ).max(dim=1).values
+            pooled_indices = torch.where(has_prompt, prompt_last_indices, fallback_indices)
+        else:
+            pooled_indices = fallback_indices
+
+        return hidden_states[batch_indices, pooled_indices]
     
     def get_2dPool(self, image_feature, stride=2):
         height = width = self.get_vision_tower().num_patches_per_side # 27
@@ -424,7 +457,12 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 time_ids,
                 task_ids
             )
-    
+        current_vocab_size = int(self.lm_head.out_features)
+        if int(getattr(self.config, "vocab_size", current_vocab_size)) != current_vocab_size:
+            # Keep loss reshape vocab size aligned with actual lm_head output width.
+            self.config.vocab_size = current_vocab_size
+            self.vocab_size = current_vocab_size
+
         outputs = super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -441,13 +479,11 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             return outputs
 
         hidden_states = outputs.hidden_states[-1]
-        if attention_mask is None:
-            pooled_hidden = hidden_states[:, -1, :]
-        else:
-            valid_lengths = attention_mask.long().sum(dim=1).clamp(min=1)
-            last_indices = (valid_lengths - 1).to(hidden_states.device)
-            batch_indices = torch.arange(hidden_states.shape[0], device=hidden_states.device)
-            pooled_hidden = hidden_states[batch_indices, last_indices]
+        pooled_hidden = self._pool_aux_hidden(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            labels=labels,
+        )
 
         progress_logits = self.progress_head(pooled_hidden).squeeze(-1)
         done_logits = self.done_head(pooled_hidden).squeeze(-1)

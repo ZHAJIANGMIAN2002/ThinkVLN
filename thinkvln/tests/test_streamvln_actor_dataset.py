@@ -138,8 +138,14 @@ def test_build_materialized_streamvln_actor_records_combines_r2r_and_scalevln(tm
     assert scale_raw["dataset_name"] == "scalevln"
     assert scale_raw["watcher_hint"] is None
     assert scale_raw["input_mode"] == "instruction_subtask"
+    assert scale_raw["image_path"].endswith("/tmp/scale/images/scale_scalevln_000001/000001_rgb.jpg")
     assert scale_raw["history_frame_indices"] == []
     assert scale_raw["history_image_paths"] == []
+
+    scale_next = next(record for record in records if record["episode_key"] == "scale_scene_00001" and record["frame_idx"] == 1)
+    assert scale_next["image_path"].endswith("/tmp/scale/images/scale_scalevln_000001/000002_rgb.jpg")
+    assert scale_next["history_frame_indices"] == [0]
+    assert scale_next["history_image_paths"] == ["/tmp/scale/images/scale_scalevln_000001/000001_rgb.jpg"]
 
 
 def test_build_streamvln_actor_prompt_formats_optional_hint():
@@ -167,6 +173,109 @@ def test_build_streamvln_actor_prompt_formats_optional_hint():
     assert "Watcher hint:" not in prompt_without_hint
     assert "Previous progress: 0.0000" in prompt_without_hint
     assert "<memory>" not in prompt_without_hint
+
+
+def test_load_materialized_actor_samples_backfills_progress_and_done(tmp_path: Path):
+    materialized_path = tmp_path / "materialized_actor.jsonl"
+    _write_jsonl(
+        materialized_path,
+        [
+            {
+                "episode_key": "scene_00001",
+                "frame_idx": 0,
+                "instruction": "Walk to the sink.",
+                "subtask": "Start moving.",
+                "action_labels": [1, 1, 1, 1],
+                "progress_label": 0.0,
+            },
+            {
+                "episode_key": "scene_00001",
+                "frame_idx": 1,
+                "instruction": "Walk to the sink.",
+                "subtask": "Keep moving.",
+                "action_labels": [1, 1, 0, 0],
+                "progress_label": 0.5,
+            },
+            {
+                "episode_key": "scene_00001",
+                "frame_idx": 2,
+                "instruction": "Walk to the sink.",
+                "subtask": "Stop at sink.",
+                "action_labels": [0, 0, 0, 0],
+                "progress_label": 1.0,
+            },
+        ],
+    )
+
+    rows = load_streamvln_actor_samples(
+        summary_path=str(materialized_path),
+        watcher_memory_path=None,
+        watcher_memory_ratio=1.0,
+        done_threshold=0.85,
+        seed=0,
+    )
+
+    assert [round(float(row["previous_progress"]), 4) for row in rows] == [0.0, 0.0, 0.5]
+    assert [float(row["done_label"]) for row in rows] == [0.0, 0.0, 1.0]
+    assert all("history_frame_indices" in row for row in rows)
+    assert all("history_image_paths" in row for row in rows)
+
+
+def test_load_materialized_actor_samples_remaps_hints_from_watcher_file(tmp_path: Path):
+    materialized_path = tmp_path / "materialized_actor.jsonl"
+    watcher_path = tmp_path / "watcher_memory.jsonl"
+    _write_jsonl(
+        materialized_path,
+        [
+            {
+                "episode_key": "scene_00001",
+                "frame_idx": 0,
+                "instruction": "Walk to the sink.",
+                "subtask": "Start moving.",
+                "action_labels": [1, 1, 1, 1],
+                "progress_label": 0.0,
+                "previous_progress": 0.0,
+                "done_label": 0.0,
+                "watcher_hint": "old hint should be replaced",
+            },
+            {
+                "episode_key": "scene_00001",
+                "frame_idx": 1,
+                "instruction": "Walk to the sink.",
+                "subtask": "Keep moving.",
+                "action_labels": [1, 1, 0, 0],
+                "progress_label": 0.5,
+                "previous_progress": 0.0,
+                "done_label": 0.0,
+                "watcher_hint": "old hint should be replaced",
+            },
+        ],
+    )
+    _write_jsonl(
+        watcher_path,
+        [
+            {
+                "episode_key": "scene_00001",
+                "pivot_frame": 1,
+                "memory_start": "new watcher hint",
+            }
+        ],
+    )
+
+    rows = load_streamvln_actor_samples(
+        summary_path=str(materialized_path),
+        watcher_memory_path=str(watcher_path),
+        watcher_memory_ratio=1.0,
+        done_threshold=0.85,
+        seed=0,
+    )
+
+    frame0 = next(row for row in rows if int(row["frame_idx"]) == 0)
+    frame1 = next(row for row in rows if int(row["frame_idx"]) == 1)
+    assert frame0["watcher_hint"] is None
+    assert frame0["input_mode"] == "instruction_subtask"
+    assert frame1["watcher_hint"] == "new watcher hint"
+    assert frame1["input_mode"] == "instruction_subtask_hint"
 
 
 def test_streamvln_actor_collate_fn_batches_aux_labels():
