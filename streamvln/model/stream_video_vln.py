@@ -10,7 +10,7 @@ from transformers.generation.utils import GenerateOutput
 from transformers import Qwen2ForCausalLM
 from llava.model.language_model.llava_qwen import LlavaQwenModel
 from llava.model.llava_arch import LlavaMetaForCausalLM
-from streamvln.utils.utils import IGNORE_INDEX, IMAGE_TOKEN_INDEX, MEMORY_TOKEN_INDEX
+from streamvln.utils.utils import ANCHOR_TOKEN_INDEX, IGNORE_INDEX, IMAGE_TOKEN_INDEX, MEMORY_TOKEN_INDEX
 
 
 def compute_masked_progress_loss(progress_preds, progress_labels, ignore_value: float = -100.0):
@@ -116,37 +116,88 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         return self.model
 
     @staticmethod
+    def _resolve_aux_positions(
+        attention_mask: Optional[torch.Tensor],
+        labels: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if labels is None:
+            if attention_mask is None:
+                raise ValueError("attention_mask is required when labels are absent for aux pooling")
+            valid_lengths = attention_mask.long().sum(dim=1).clamp(min=1)
+            return valid_lengths - 1
+
+        device = labels.device
+        seq_len = int(labels.shape[1])
+        token_positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(labels.shape[0], seq_len)
+        if attention_mask is None:
+            fallback_indices = torch.full((labels.shape[0],), seq_len - 1, device=device, dtype=torch.long)
+            prompt_mask = labels.eq(IGNORE_INDEX)
+        else:
+            valid_lengths = attention_mask.long().sum(dim=1).clamp(min=1)
+            fallback_indices = (valid_lengths - 1).to(device)
+            prompt_mask = labels.eq(IGNORE_INDEX) & attention_mask.bool()
+        has_prompt = prompt_mask.any(dim=1)
+        prompt_last_indices = torch.where(
+            prompt_mask,
+            token_positions,
+            torch.zeros_like(token_positions),
+        ).max(dim=1).values
+        return torch.where(has_prompt, prompt_last_indices, fallback_indices)
+
+    @staticmethod
     def _pool_aux_hidden(
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
         labels: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        seq_len = int(hidden_states.shape[1])
         device = hidden_states.device
         batch_indices = torch.arange(hidden_states.shape[0], device=device)
-        token_positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(hidden_states.shape[0], seq_len)
-
-        if attention_mask is None:
-            fallback_indices = torch.full((hidden_states.shape[0],), seq_len - 1, device=device, dtype=torch.long)
-        else:
-            valid_lengths = attention_mask.long().sum(dim=1).clamp(min=1)
-            fallback_indices = (valid_lengths - 1).to(device)
-
-        if labels is not None:
-            prompt_mask = labels.eq(IGNORE_INDEX)
-            if attention_mask is not None:
-                prompt_mask = prompt_mask & attention_mask.bool()
-            has_prompt = prompt_mask.any(dim=1)
-            prompt_last_indices = torch.where(
-                prompt_mask,
-                token_positions,
-                torch.zeros_like(token_positions),
-            ).max(dim=1).values
-            pooled_indices = torch.where(has_prompt, prompt_last_indices, fallback_indices)
-        else:
-            pooled_indices = fallback_indices
-
+        pooled_indices = StreamVLNForCausalLM._resolve_aux_positions(
+            attention_mask=attention_mask,
+            labels=labels,
+        ).to(device)
         return hidden_states[batch_indices, pooled_indices]
+
+    def _project_pooled_frames(self, frame_features: torch.Tensor) -> torch.Tensor:
+        if frame_features.ndim != 4:
+            raise ValueError(f"expected frame features with shape [N, C, H, W], got {tuple(frame_features.shape)}")
+        projected = frame_features.flatten(2, 3).permute(0, 2, 1)
+        projected = self.get_model().mm_projector(projected)
+        return self.get_2dPool(projected, 2)
+
+    def encode_anchor_memory_rgb(self, images: torch.FloatTensor):
+        batch_size, num_view, _, _, _ = images.shape
+        image_features = self.get_model().get_vision_tower()(images.flatten(0, 1))
+        num_patches_per_side = self.get_model().get_vision_tower().num_patches_per_side
+        image_features = image_features.permute(0, 2, 1).reshape(
+            batch_size,
+            num_view,
+            -1,
+            num_patches_per_side,
+            num_patches_per_side,
+        )
+
+        current_features = []
+        anchor_features = []
+        memory_features = []
+        for b in range(batch_size):
+            memory_count = max(0, int(num_view) - 2)
+            memory_raw = image_features[b, :memory_count] if memory_count > 0 else image_features[b, :0]
+            anchor_raw = image_features[b, memory_count : memory_count + 1] if num_view >= 2 else image_features[b, :1]
+            current_raw = image_features[b, memory_count + 1 : memory_count + 2] if num_view >= 2 else image_features[b, :1]
+
+            current_projected = self._project_pooled_frames(current_raw)
+            anchor_projected = self._project_pooled_frames(anchor_raw)
+            current_features.append(current_projected)
+            anchor_features.append(anchor_projected)
+
+            if memory_count > 0:
+                memory_projected = self._project_pooled_frames(memory_raw)
+                memory_features.append(memory_projected.flatten(0, 1).unsqueeze(0))
+            else:
+                memory_features.append(None)
+
+        return current_features, anchor_features, memory_features
     
     def get_2dPool(self, image_feature, stride=2):
         height = width = self.get_vision_tower().num_patches_per_side # 27
@@ -241,7 +292,7 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
    
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels, 
-        images, image_sizes, depths, poses, intrinsics, time_ids=None, task_ids=None
+        images, image_sizes, depths, poses, intrinsics, time_ids=None, task_ids=None, preserve_labels_for_aux: bool = False
     ):  
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
@@ -249,7 +300,12 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
 
         depths, poses, intrinsics = self._ensure_rgbd_modalities(images, depths, poses, intrinsics)
 
-        image_features, memory_features = self.encode_rgbd(images, depths, poses, intrinsics, time_ids, task_ids)
+        has_anchor_tokens = bool((input_ids == ANCHOR_TOKEN_INDEX).any().item()) if input_ids is not None else False
+        if has_anchor_tokens:
+            image_features, anchor_features, memory_features = self.encode_anchor_memory_rgb(images)
+        else:
+            image_features, memory_features = self.encode_rgbd(images, depths, poses, intrinsics, time_ids, task_ids)
+            anchor_features = [None] * len(image_features)
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
@@ -281,11 +337,13 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
+            num_anchors = (cur_input_ids == ANCHOR_TOKEN_INDEX).sum()
             num_memories = (cur_input_ids == MEMORY_TOKEN_INDEX).sum()
-            num_specials = num_images + num_memories
+            num_specials = num_images + num_anchors + num_memories
             image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist()
+            anchor_token_indices = torch.where(cur_input_ids == ANCHOR_TOKEN_INDEX)[0].tolist()
             memory_token_indices = torch.where(cur_input_ids == MEMORY_TOKEN_INDEX)[0].tolist()
-            special_token_indices = sorted(image_token_indices + memory_token_indices)
+            special_token_indices = sorted(image_token_indices + anchor_token_indices + memory_token_indices)
             special_tokens = [cur_input_ids[indice] for indice in special_token_indices]
             special_token_indices = [-1] + special_token_indices + [cur_input_ids.shape[0]]
             
@@ -304,6 +362,7 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             cur_new_labels = []
             
             cur_img_id = 0
+            cur_anchor_id = 0
             cur_mem_id = 0
             
             for i in range(num_specials + 1):
@@ -317,6 +376,16 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                         cur_img_id += 1
                         cur_new_input_embeds.append(cur_image_feature)
                         cur_new_labels.append(torch.full((cur_image_feature.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
+                    elif special_token == ANCHOR_TOKEN_INDEX:
+                        anchor_feature = anchor_features[batch_idx]
+                        if anchor_feature is None:
+                            ref_feature = image_features[batch_idx][0]
+                            anchor_feature = torch.zeros_like(ref_feature)
+                        else:
+                            anchor_feature = anchor_feature[cur_anchor_id]
+                        cur_anchor_id += 1
+                        cur_new_input_embeds.append(anchor_feature)
+                        cur_new_labels.append(torch.full((anchor_feature.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
                     elif special_token == MEMORY_TOKEN_INDEX:
                         # Check if memory_features[batch_idx] is None or empty
                         if memory_features is None or batch_idx >= len(memory_features) or memory_features[batch_idx] is None:
@@ -392,7 +461,7 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
 
         new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
         
-        if _labels is None:
+        if _labels is None and not preserve_labels_for_aux:
             new_labels = None
         else:
             new_labels = new_labels_padded
@@ -455,7 +524,8 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 poses, 
                 intrinsics,
                 time_ids,
-                task_ids
+                task_ids,
+                preserve_labels_for_aux=needs_aux,
             )
         current_vocab_size = int(self.lm_head.out_features)
         if int(getattr(self.config, "vocab_size", current_vocab_size)) != current_vocab_size:

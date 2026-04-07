@@ -8,11 +8,13 @@ from PIL import Image
 
 from streamvln.dataset.streamvln_actor_dataset import (
     StreamVLNActorDataset,
+    _tokenize_actor_sample,
     build_materialized_streamvln_actor_records,
     build_streamvln_actor_prompt,
     load_streamvln_actor_samples,
     streamvln_actor_collate_fn,
 )
+from streamvln.utils.utils import ANCHOR_TOKEN_INDEX
 
 
 def _write_jsonl(path: Path, rows):
@@ -131,8 +133,10 @@ def test_build_materialized_streamvln_actor_records_combines_r2r_and_scalevln(tm
     assert r2r_hint["watcher_hint"] == "已经朝向浴室入口。"
     assert r2r_hint["input_mode"] == "instruction_subtask_hint"
     assert r2r_hint["image_path"].endswith("/tmp/r2r/scene_r2r_000001/000001_rgb.jpg")
-    assert r2r_hint["history_frame_indices"] == [0]
-    assert r2r_hint["history_image_paths"] == ["/tmp/r2r/scene_r2r_000001/000000_rgb.jpg"]
+    assert r2r_hint["anchor_frame_idx"] == 0
+    assert r2r_hint["anchor_image_path"] == "/tmp/r2r/scene_r2r_000001/000000_rgb.jpg"
+    assert r2r_hint["history_frame_indices"] == []
+    assert r2r_hint["history_image_paths"] == []
 
     scale_raw = next(record for record in records if record["episode_key"] == "scale_scene_00001" and record["frame_idx"] == 0)
     assert scale_raw["dataset_name"] == "scalevln"
@@ -154,12 +158,14 @@ def test_build_streamvln_actor_prompt_formats_optional_hint():
         subtask="Turn right into the bathroom.",
         watcher_hint="You already cleared the dining area.",
         include_visual_memory=True,
+        include_anchor_frame=True,
         previous_progress=0.25,
     )
     assert "Instruction: Walk to the sink." in prompt
     assert "Current subtask: Turn right into the bathroom." in prompt
     assert "Watcher hint: You already cleared the dining area." in prompt
     assert "Previous progress: 0.2500" in prompt
+    assert "Subtask start observation: <anchor>" in prompt
     assert "<memory>" in prompt
 
     prompt_without_hint = build_streamvln_actor_prompt(
@@ -167,12 +173,51 @@ def test_build_streamvln_actor_prompt_formats_optional_hint():
         subtask="Turn right into the bathroom.",
         watcher_hint=None,
         previous_progress=0.0,
+        include_anchor_frame=True,
     )
     assert "Instruction: Walk to the sink." in prompt_without_hint
     assert "Current subtask: Turn right into the bathroom." in prompt_without_hint
     assert "Watcher hint:" not in prompt_without_hint
     assert "Previous progress: 0.0000" in prompt_without_hint
+    assert "<anchor>" in prompt_without_hint
     assert "<memory>" not in prompt_without_hint
+
+
+def test_tokenize_actor_sample_replaces_anchor_token():
+    class _Tokenizer:
+        pad_token_id = 0
+        model_max_length = 128
+        _vocab = {"<image>": 101, "<memory>": 102, "<anchor>": 103}
+
+        def add_tokens(self, tokens, special_tokens=False):
+            for token in tokens:
+                self._vocab.setdefault(token, len(self._vocab) + 200)
+
+        def convert_tokens_to_ids(self, token):
+            return self._vocab.get(token)
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+            rendered = "\n".join(message["content"] for message in messages)
+            if add_generation_prompt:
+                rendered += "\nassistant:"
+            return rendered
+
+        def __call__(self, text, return_tensors="pt"):
+            tokens = text.replace("\n", " ").split()
+            ids = [self._vocab.setdefault(tok, len(self._vocab) + 200) for tok in tokens] or [1]
+            return types.SimpleNamespace(input_ids=torch.tensor([ids], dtype=torch.long))
+
+    prompt = build_streamvln_actor_prompt(
+        instruction="Walk to the sink.",
+        subtask="Turn right into the bathroom.",
+        include_visual_memory=True,
+        include_anchor_frame=True,
+        previous_progress=0.25,
+    )
+
+    input_ids, _ = _tokenize_actor_sample(_Tokenizer(), prompt, "↑ STOP STOP STOP")
+
+    assert int(ANCHOR_TOKEN_INDEX) in input_ids.tolist()
 
 
 def test_load_materialized_actor_samples_backfills_progress_and_done(tmp_path: Path):
@@ -333,6 +378,8 @@ def test_streamvln_actor_dataset_uses_materialized_history_image_paths(tmp_path:
                 "action_labels": [1, 0, 0, 0],
                 "progress_label": 0.5,
                 "done_label": 0.0,
+                "anchor_frame_idx": 1,
+                "anchor_image_path": str(history1),
                 "history_frame_indices": [0, 1],
                 "history_image_paths": [str(history0), str(history1)],
                 "image_path": str(current),
@@ -344,7 +391,7 @@ def test_streamvln_actor_dataset_uses_materialized_history_image_paths(tmp_path:
     class _Tokenizer:
         pad_token_id = 0
         model_max_length = 128
-        _vocab = {"<image>": 101, "<memory>": 102}
+        _vocab = {"<image>": 101, "<memory>": 102, "<anchor>": 103}
 
         def add_tokens(self, tokens, special_tokens=False):
             for token in tokens:
@@ -396,7 +443,7 @@ def test_streamvln_actor_dataset_uses_materialized_history_image_paths(tmp_path:
     dataset = StreamVLNActorDataset(tokenizer=_Tokenizer(), data_args=data_args, task_id=0)
     item = dataset[0]
 
-    assert tuple(item["images"].shape) == (3, 3, 2, 2)
+    assert tuple(item["images"].shape) == (4, 3, 2, 2)
 
 
 def test_streamvln_actor_dataset_falls_back_from_r2r_images_dir_to_frame_dir(tmp_path: Path, monkeypatch):
@@ -422,6 +469,8 @@ def test_streamvln_actor_dataset_falls_back_from_r2r_images_dir_to_frame_dir(tmp
                 "action_labels": [1, 0, 0, 0],
                 "progress_label": 0.5,
                 "done_label": 0.0,
+                "anchor_frame_idx": 0,
+                "anchor_image_path": str(wrong_dir / "000000_rgb.jpg"),
                 "history_frame_indices": [0],
                 "history_image_paths": [str(wrong_dir / "000000_rgb.jpg")],
                 "image_path": str(wrong_dir / "000001_rgb.jpg"),
@@ -433,7 +482,7 @@ def test_streamvln_actor_dataset_falls_back_from_r2r_images_dir_to_frame_dir(tmp
     class _Tokenizer:
         pad_token_id = 0
         model_max_length = 128
-        _vocab = {"<image>": 101, "<memory>": 102}
+        _vocab = {"<image>": 101, "<memory>": 102, "<anchor>": 103}
 
         def add_tokens(self, tokens, special_tokens=False):
             for token in tokens:
@@ -485,7 +534,7 @@ def test_streamvln_actor_dataset_falls_back_from_r2r_images_dir_to_frame_dir(tmp
     dataset = StreamVLNActorDataset(tokenizer=_Tokenizer(), data_args=data_args, task_id=0)
     item = dataset[0]
 
-    assert tuple(item["images"].shape) == (2, 3, 2, 2)
+    assert tuple(item["images"].shape) == (3, 3, 2, 2)
 
 
 def test_resolve_existing_image_path_clamps_to_latest_available_frame(tmp_path: Path):

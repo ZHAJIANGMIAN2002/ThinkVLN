@@ -2,6 +2,26 @@ import pytest
 import torch
 
 
+def test_aux_position_resolver_uses_prompt_boundary_for_training_and_prompt_only_inference():
+    import streamvln.model.stream_video_vln as model_mod
+
+    attention_mask = torch.tensor([[1, 1, 1, 1]], dtype=torch.long)
+    train_labels = torch.tensor([[-100, -100, 7, 8]], dtype=torch.long)
+    prompt_only_labels = torch.tensor([[-100, -100, -100, -100]], dtype=torch.long)
+
+    train_positions = model_mod.StreamVLNForCausalLM._resolve_aux_positions(
+        attention_mask=attention_mask,
+        labels=train_labels,
+    )
+    prompt_only_positions = model_mod.StreamVLNForCausalLM._resolve_aux_positions(
+        attention_mask=attention_mask,
+        labels=prompt_only_labels,
+    )
+
+    assert train_positions.tolist() == [1]
+    assert prompt_only_positions.tolist() == [3]
+
+
 def test_aux_pooling_uses_prompt_boundary_when_labels_present():
     import streamvln.model.stream_video_vln as model_mod
 
@@ -22,23 +42,24 @@ def test_aux_pooling_uses_prompt_boundary_when_labels_present():
     assert torch.allclose(pooled[0], torch.tensor([2.0, 20.0]))
 
 
-def test_aux_pooling_falls_back_to_last_valid_token_without_labels():
+def test_aux_pooling_uses_prompt_boundary_for_prompt_only_sequences():
     import streamvln.model.stream_video_vln as model_mod
 
     hidden_states = torch.tensor(
         [[[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]]],
         dtype=torch.float32,
     )
-    attention_mask = torch.tensor([[1, 1, 0, 0]], dtype=torch.long)
+    attention_mask = torch.tensor([[1, 1, 1, 1]], dtype=torch.long)
+    labels = torch.tensor([[-100, -100, -100, -100]], dtype=torch.long)
 
     pooled = model_mod.StreamVLNForCausalLM._pool_aux_hidden(
         hidden_states=hidden_states,
         attention_mask=attention_mask,
-        labels=None,
+        labels=labels,
     )
 
     assert pooled.shape == (1, 2)
-    assert torch.allclose(pooled[0], torch.tensor([2.0, 20.0]))
+    assert torch.allclose(pooled[0], torch.tensor([4.0, 40.0]))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for bf16 backward coverage")

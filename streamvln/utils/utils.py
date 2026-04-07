@@ -14,6 +14,8 @@ DEFAULT_IM_START_TOKEN = "<im_start>"
 DEFAULT_IM_END_TOKEN = "<im_end>"
 MEMORY_TOKEN_INDEX = -300
 DEFAULT_MEMORY_TOKEN = "<memory>"
+ANCHOR_TOKEN_INDEX = -400
+DEFAULT_ANCHOR_TOKEN = "<anchor>"
 
 SHORT_QUESTION_LIST = [
     DEFAULT_IMAGE_TOKEN + "\n" + "Can you segment the {class_name} in this image?",

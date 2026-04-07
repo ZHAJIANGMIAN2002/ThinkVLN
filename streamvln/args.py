@@ -103,6 +103,8 @@ class DataArguments:
     watcher_memory_seed: int = field(default=42)
     done_threshold: float = field(default=0.85)
     val_split_ratio: float = field(default=0.0)
+    memory_post_anchor_count: Optional[int] = field(default=None)
+    memory_pre_anchor_count: Optional[int] = field(default=None)
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):

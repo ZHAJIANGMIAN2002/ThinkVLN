@@ -10,7 +10,15 @@ from PIL import Image
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
-from streamvln.utils.utils import DEFAULT_MEMORY_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX, MEMORY_TOKEN_INDEX
+from streamvln.dataset.streamvln_actor_history_layout import select_anchor_memory_layout
+from streamvln.utils.utils import (
+    ANCHOR_TOKEN_INDEX,
+    DEFAULT_ANCHOR_TOKEN,
+    DEFAULT_MEMORY_TOKEN,
+    IGNORE_INDEX,
+    IMAGE_TOKEN_INDEX,
+    MEMORY_TOKEN_INDEX,
+)
 from thinkvln.datagen.generation.watcher_actor_memory_dataset import parse_sample_id_to_episode_frame
 from thinkvln.dataset.dataset import _episode_key_to_dir_key
 from thinkvln.tools.dataset_utils import (
@@ -18,7 +26,6 @@ from thinkvln.tools.dataset_utils import (
     compute_done_label,
     compute_previous_step_progress,
     extract_action_chunk,
-    select_memory_frame_indices,
 )
 
 
@@ -83,6 +90,7 @@ def build_streamvln_actor_prompt(
     watcher_hint: Optional[str] = None,
     include_visual_memory: bool = False,
     previous_progress: Optional[float] = None,
+    include_anchor_frame: bool = False,
 ) -> str:
     lines = [
         "<image>",
@@ -91,6 +99,8 @@ def build_streamvln_actor_prompt(
     ]
     if previous_progress is not None:
         lines.append(f"Previous progress: {float(previous_progress):.4f}")
+    if include_anchor_frame:
+        lines.append(f"Subtask start observation: {DEFAULT_ANCHOR_TOKEN}")
     hint_text = str(watcher_hint or "").strip()
     if hint_text:
         lines.append(f"Watcher hint: {hint_text}")
@@ -132,12 +142,45 @@ def _resolve_sparse_history_indices(
     frame_idx: int,
     subtask_sequence: List[int],
     memory_num_history_images: int,
+    memory_post_anchor_count: int,
+    memory_pre_anchor_count: int,
 ) -> List[int]:
-    return select_memory_frame_indices(
+    del memory_num_history_images
+    layout = select_anchor_memory_layout(
         frame_idx=frame_idx,
         subtask_sequence=subtask_sequence,
-        memory_num_history_images=memory_num_history_images,
+        memory_post_anchor_count=memory_post_anchor_count,
+        memory_pre_anchor_count=memory_pre_anchor_count,
     )
+    return list(layout.memory_frame_indices)
+
+
+def _derive_anchor_fields_from_materialized_row(row: Dict) -> Dict:
+    patched = dict(row)
+    if patched.get("anchor_frame_idx") is not None:
+        return patched
+
+    history_frame_indices = [int(idx) for idx in patched.get("history_frame_indices", [])]
+    history_image_paths = [str(path) for path in patched.get("history_image_paths", [])]
+    frame_idx = int(patched.get("frame_idx", 0))
+    image_path = patched.get("image_path")
+
+    anchor_idx = frame_idx
+    anchor_path = image_path
+    positive_history = [idx for idx in history_frame_indices if idx > 0]
+    if positive_history:
+        anchor_idx = int(positive_history[0])
+        anchor_pos = history_frame_indices.index(anchor_idx)
+        if anchor_pos < len(history_image_paths):
+            anchor_path = history_image_paths[anchor_pos]
+    elif history_frame_indices:
+        anchor_idx = int(history_frame_indices[0])
+        if history_image_paths:
+            anchor_path = history_image_paths[0]
+
+    patched["anchor_frame_idx"] = int(anchor_idx)
+    patched["anchor_image_path"] = str(anchor_path) if str(anchor_path or "").strip() else None
+    return patched
 
 
 def _pad_history_indices(
@@ -260,6 +303,8 @@ def _build_actor_sample(
     dataset_name: Optional[str] = None,
     image_root: Optional[str] = None,
     memory_num_history_images: int = 0,
+    memory_post_anchor_count: int = 0,
+    memory_pre_anchor_count: int = 0,
 ) -> Dict:
     episode_key = str(traj["episode_key"])
     instruction = str(traj.get("instruction", ""))
@@ -278,10 +323,18 @@ def _build_actor_sample(
     progress_label = compute_current_step_progress(frame_idx, subtask_sequence)
     previous_progress = compute_previous_step_progress(frame_idx, subtask_sequence)
     done_label = compute_done_label(progress_label, threshold=done_threshold)
+    history_layout = select_anchor_memory_layout(
+        frame_idx=frame_idx,
+        subtask_sequence=subtask_sequence,
+        memory_post_anchor_count=memory_post_anchor_count,
+        memory_pre_anchor_count=memory_pre_anchor_count,
+    )
     history_frame_indices = _resolve_sparse_history_indices(
         frame_idx=frame_idx,
         subtask_sequence=subtask_sequence,
         memory_num_history_images=memory_num_history_images,
+        memory_post_anchor_count=memory_post_anchor_count,
+        memory_pre_anchor_count=memory_pre_anchor_count,
     )
     sample = {
         "episode_key": episode_key,
@@ -293,11 +346,20 @@ def _build_actor_sample(
         "progress_label": float(progress_label),
         "previous_progress": float(previous_progress),
         "done_label": float(done_label),
+        "anchor_frame_idx": int(history_layout.anchor_frame_idx),
         "history_frame_indices": list(history_frame_indices),
+        "pre_anchor_history_frame_indices": list(history_layout.pre_anchor_frame_indices),
+        "post_anchor_history_frame_indices": list(history_layout.post_anchor_frame_indices),
     }
     if dataset_name is not None:
         sample["dataset_name"] = str(dataset_name)
     if image_root:
+        sample["anchor_image_path"] = _materialized_frame_to_image_path(
+            image_root=image_root,
+            traj=traj,
+            frame_idx=int(history_layout.anchor_frame_idx),
+            dataset_name=dataset_name,
+        )
         sample["image_path"] = _materialized_frame_to_image_path(
             image_root=image_root,
             traj=traj,
@@ -314,6 +376,7 @@ def _build_actor_sample(
             for idx in history_frame_indices
         ]
     else:
+        sample["anchor_image_path"] = None
         sample["history_image_paths"] = []
     sample["input_mode"] = "instruction_subtask_hint" if sample["watcher_hint"] else "instruction_subtask"
     return sample
@@ -323,12 +386,16 @@ def _normalize_materialized_actor_rows(rows: List[Dict], done_threshold: float) 
     normalized: List[Dict] = [dict(row) for row in rows]
     by_episode: Dict[str, List[int]] = {}
     for idx, row in enumerate(normalized):
+        row = _derive_anchor_fields_from_materialized_row(row)
+        normalized[idx] = row
         episode_key = str(row.get("episode_key") or "")
         by_episode.setdefault(episode_key, []).append(idx)
         if row.get("history_frame_indices") is None:
             row["history_frame_indices"] = []
         if row.get("history_image_paths") is None:
             row["history_image_paths"] = []
+        if row.get("anchor_image_path") is None:
+            row["anchor_image_path"] = row.get("image_path")
         if "done_label" not in row and "progress_label" in row:
             row["done_label"] = float(
                 compute_done_label(float(row.get("progress_label", 0.0)), threshold=done_threshold)
@@ -392,6 +459,8 @@ def load_streamvln_actor_samples(
     watcher_memory_ratio: float = 1.0,
     done_threshold: float = 0.85,
     memory_num_history_images: int = 0,
+    memory_post_anchor_count: Optional[int] = None,
+    memory_pre_anchor_count: Optional[int] = None,
     seed: int = 42,
 ) -> List[Dict]:
     rows = _load_jsonl(summary_path)
@@ -406,6 +475,15 @@ def load_streamvln_actor_samples(
 
     watcher_hints = _load_watcher_hints(watcher_memory_path, watcher_memory_ratio, seed)
     samples: List[Dict] = []
+    total_history = max(0, int(memory_num_history_images))
+    default_pre = min(2, total_history)
+    resolved_pre = default_pre if memory_pre_anchor_count is None else max(0, int(memory_pre_anchor_count))
+    resolved_pre = min(resolved_pre, total_history)
+    resolved_post = (
+        max(0, total_history - resolved_pre)
+        if memory_post_anchor_count is None
+        else max(0, int(memory_post_anchor_count))
+    )
 
     for traj in rows:
         episode_key = str(traj["episode_key"])
@@ -424,6 +502,8 @@ def load_streamvln_actor_samples(
                     done_threshold=done_threshold,
                     watcher_hint=watcher_hint,
                     memory_num_history_images=memory_num_history_images,
+                    memory_post_anchor_count=resolved_post,
+                    memory_pre_anchor_count=resolved_pre,
                 )
             )
 
@@ -436,10 +516,21 @@ def build_materialized_streamvln_actor_records(
     watcher_memory_ratio: float = 1.0,
     done_threshold: float = 0.85,
     memory_num_history_images: int = 0,
+    memory_post_anchor_count: Optional[int] = None,
+    memory_pre_anchor_count: Optional[int] = None,
     seed: int = 42,
 ) -> List[Dict]:
     watcher_hints = _load_watcher_hints(watcher_memory_path, watcher_memory_ratio, seed)
     records: List[Dict] = []
+    total_history = max(0, int(memory_num_history_images))
+    default_pre = min(2, total_history)
+    resolved_pre = default_pre if memory_pre_anchor_count is None else max(0, int(memory_pre_anchor_count))
+    resolved_pre = min(resolved_pre, total_history)
+    resolved_post = (
+        max(0, total_history - resolved_pre)
+        if memory_post_anchor_count is None
+        else max(0, int(memory_post_anchor_count))
+    )
     for spec in summary_specs:
         dataset_name = str(spec.get("dataset_name") or "")
         summary_path = str(spec["summary_path"])
@@ -460,6 +551,8 @@ def build_materialized_streamvln_actor_records(
                         dataset_name=dataset_name or None,
                         image_root=image_root or None,
                         memory_num_history_images=memory_num_history_images,
+                        memory_post_anchor_count=resolved_post,
+                        memory_pre_anchor_count=resolved_pre,
                     )
                 )
     return records
@@ -470,6 +563,9 @@ def _replace_special_token_ids(tokenizer, input_ids: torch.Tensor) -> torch.Tens
     image_token_id = tokenizer.convert_tokens_to_ids("<image>")
     if image_token_id is not None:
         input_ids[input_ids == int(image_token_id)] = IMAGE_TOKEN_INDEX
+    anchor_token_id = tokenizer.convert_tokens_to_ids("<anchor>")
+    if anchor_token_id is not None:
+        input_ids[input_ids == int(anchor_token_id)] = ANCHOR_TOKEN_INDEX
     memory_token_id = tokenizer.convert_tokens_to_ids("<memory>")
     if memory_token_id is not None:
         input_ids[input_ids == int(memory_token_id)] = MEMORY_TOKEN_INDEX
@@ -479,7 +575,7 @@ def _replace_special_token_ids(tokenizer, input_ids: torch.Tensor) -> torch.Tens
 def _tokenize_actor_sample(tokenizer, prompt_text: str, target_text: str):
     tokenizer = copy.deepcopy(tokenizer)
     if hasattr(tokenizer, "add_tokens"):
-        tokenizer.add_tokens(["<image>", "<memory>"], special_tokens=True)
+        tokenizer.add_tokens(["<image>", "<anchor>", "<memory>"], special_tokens=True)
 
     prompt_messages = [{"role": "user", "content": prompt_text}]
     full_messages = prompt_messages + [{"role": "assistant", "content": target_text}]
@@ -522,6 +618,23 @@ class StreamVLNActorDataset(Dataset):
                 )
             ),
         )
+        default_pre = min(2, self.memory_num_history_images)
+        self.memory_pre_anchor_count = max(
+            0,
+            int(getattr(data_args, "memory_pre_anchor_count", default_pre) or 0),
+        )
+        self.memory_pre_anchor_count = min(self.memory_pre_anchor_count, self.memory_num_history_images)
+        self.memory_post_anchor_count = max(
+            0,
+            int(
+                getattr(
+                    data_args,
+                    "memory_post_anchor_count",
+                    max(0, self.memory_num_history_images - self.memory_pre_anchor_count),
+                )
+                or 0
+            ),
+        )
         summary_path = str(getattr(data_args, "summary_data_path", "") or "")
         if not summary_path:
             summary_path = str(getattr(data_args, "data_path", "") or "")
@@ -534,6 +647,8 @@ class StreamVLNActorDataset(Dataset):
             watcher_memory_ratio=float(getattr(data_args, "watcher_memory_ratio", 1.0)),
             done_threshold=float(getattr(data_args, "done_threshold", 0.85)),
             memory_num_history_images=self.memory_num_history_images,
+            memory_post_anchor_count=self.memory_post_anchor_count,
+            memory_pre_anchor_count=self.memory_pre_anchor_count,
             seed=int(getattr(data_args, "watcher_memory_seed", 42)),
         )
 
@@ -574,6 +689,14 @@ class StreamVLNActorDataset(Dataset):
                 self._load_current_image(sample["episode_key"], idx)
                 for idx in padded_history
             ]
+        anchor_frame_idx = int(sample.get("anchor_frame_idx", sample["frame_idx"]))
+        tensors.append(
+            self._load_current_image(
+                sample["episode_key"],
+                anchor_frame_idx,
+                image_path=sample.get("anchor_image_path"),
+            )
+        )
         tensors.append(
             self._load_current_image(
                 sample["episode_key"],
@@ -593,6 +716,7 @@ class StreamVLNActorDataset(Dataset):
             watcher_hint=sample.get("watcher_hint"),
             include_visual_memory=include_visual_memory,
             previous_progress=prev_prog,
+            include_anchor_frame=True,
         )
         target_text = _actions_to_text(sample["action_labels"])
         input_ids, labels = _tokenize_actor_sample(self.tokenizer, prompt, target_text)

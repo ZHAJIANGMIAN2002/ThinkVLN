@@ -159,6 +159,8 @@ def build_streamvln_train_argv(config: dict, data_path_override: Optional[str] =
         "watcher_memory_seed": "watcher_memory_seed",
         "done_threshold": "done_threshold",
         "num_history": "num_history",
+        "memory_post_anchor_count": "memory_post_anchor_count",
+        "memory_pre_anchor_count": "memory_pre_anchor_count",
         "num_future_steps": "num_future_steps",
         "val_split_ratio": "val_split_ratio",
         "multi_task_training": "multi_task_training",
