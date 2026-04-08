@@ -480,10 +480,14 @@ class VLNEvaluator:
                                 forbidden_actions=[0],
                             )
                             snapshot = self.nav_model.get_last_debug_snapshot()
+                            fresh_actor_metadata = bool(
+                                True if snapshot is None else snapshot.get("fresh_actor_metadata", True)
+                            )
 
                             target_progress = timeline_progress(rollout_steps, gt_subtask_steps)
-                            stats["progress_abs_error_sum"] += abs(pred_progress - target_progress)
-                            stats["progress_count"] += 1.0
+                            if fresh_actor_metadata:
+                                stats["progress_abs_error_sum"] += abs(pred_progress - target_progress)
+                                stats["progress_count"] += 1.0
                             prev_progress_in = None
                             if snapshot is not None:
                                 prev_progress_in = snapshot.get("prev_progress_input")
@@ -535,15 +539,16 @@ class VLNEvaluator:
                                     "selected_indices": snapshot.get("selected_indices", []) if snapshot is not None else [],
                                     "selected_subtask_ids": snapshot.get("selected_subtask_ids", []) if snapshot is not None else [],
                                     "prev_progress_in": prev_progress_in,
-                                    "pred_progress": float(pred_progress),
-                                    "target_progress": float(target_progress),
+                                    "pred_progress": float(pred_progress) if fresh_actor_metadata else None,
+                                    "target_progress": float(target_progress) if fresh_actor_metadata else None,
                                     "progress_pass_through_delta": progress_pass_through_delta,
                                     "memory_bank_size": int(memory_bank_size),
                                     "expected_memory_bank_size": int(expected_memory_bank_size),
                                     "checks": {
                                         "memory_frame_count_ok": bool(memory_frame_count_ok),
                                         "memory_includes_past_subtask": bool(memory_includes_past_subtask),
-                                        "progress_pass_through_ok": bool(progress_pass_through_ok),
+                                        "progress_pass_through_ok": bool(progress_pass_through_ok) if fresh_actor_metadata else True,
+                                        "fresh_actor_metadata": bool(fresh_actor_metadata),
                                     },
                                     "replay_leading_sentinel_stripped": bool(
                                         replay_meta["leading_sentinel_stripped"]
@@ -565,8 +570,8 @@ class VLNEvaluator:
                                     rollout_steps,
                                     step_budget,
                                     final_distance,
-                                    pred_progress,
-                                    target_progress,
+                                    pred_progress if fresh_actor_metadata else float("nan"),
+                                    target_progress if fresh_actor_metadata else float("nan"),
                                 )
                             if final_distance <= float(self.args.subgoal_success_distance):
                                 success = True

@@ -1,0 +1,76 @@
+model:
+  model_name_or_path: "/mnt/swx/ThinkVLN/model_weights/streamvln"
+  model_type: "streamvln_actor"
+  progress_loss_weight: 1.0
+  done_loss_weight: 1.0
+  use_pos_skipping: false
+  pos_skipping_range: 4096
+  mm_newline_position: "grid"
+  mm_patch_merge_type: "flat"
+  use_lora: true
+  lora_r: 64
+  lora_alpha: 16
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  bits: 16
+
+data:
+  summary_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/streamvln_actor_train_anchor.jsonl"
+  watcher_memory_path: null
+  watcher_memory_ratio: 0.25
+  watcher_memory_seed: 42
+  val_split_ratio: 0.1
+  num_history: 8
+  memory_pre_anchor_count: 2
+  memory_post_anchor_count: 6
+  num_future_steps: 4
+  done_threshold: 0.85
+  max_samples: null
+
+training:
+  output_dir: "/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_anchor_full_lora_v1"
+  num_train_epochs: 1
+  max_steps: -1
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16
+  learning_rate: 2.0e-4
+  weight_decay: 0.0
+  warmup_ratio: 0.03
+  max_grad_norm: 1.0
+  lr_scheduler_type: "cosine"
+  bf16: true
+  fp16: false
+  tf32: true
+  gradient_checkpointing: true
+  logging_steps: 20
+  logging_first_step: true
+  eval_strategy: "steps"
+  eval_steps: 2000
+  save_steps: 1000
+  save_total_limit: 3
+  dataloader_num_workers: 4
+  dataloader_pin_memory: true
+  seed: 42
+  ddp_find_unused_parameters: false
+  ddp_backend: "nccl"
+  deepspeed: "config/zero2.json"
+  remove_unused_columns: false
+  attn_implementation: "flash_attention_2"
+
+logging:
+  report_to: ["wandb"]
+  run_name: "streamvln-actor-anchor-full-v1"
+  logging_dir: "/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_anchor_full_lora_v1/runs"
+  wandb:
+    project: "ThinkVLN"
+    mode: "online"
+    tags: ["streamvln_actor", "anchor", "full"]
+
+runtime:
+  gpus: "0,1,2,3"
+  master_port: 29513
+  env:
+    TOKENIZERS_PARALLELISM: "false"
+    HF_HUB_OFFLINE: "1"
+    TRANSFORMERS_OFFLINE: "1"

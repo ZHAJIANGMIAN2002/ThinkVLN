@@ -846,7 +846,7 @@ class TwoSystemEpisodeRunner:
         rollout_index: int,
         step_in_rollout: int,
         action: int,
-        progress: float,
+        progress: Optional[float],
         actor_done: bool,
         active_step: str,
         watcher_hint: str,
@@ -868,7 +868,7 @@ class TwoSystemEpisodeRunner:
             "action": action_id_to_name(action),
             "position": state["position"],
             "rotation": state["rotation"],
-            "actor_progress": float(progress),
+            "actor_progress": None if progress is None else float(progress),
             "actor_done": bool(actor_done),
             "active_plan_step": active_step,
             "watcher_hint": watcher_hint,
@@ -934,15 +934,16 @@ class TwoSystemEpisodeRunner:
     def _wakeup_reason(
         self,
         action: int,
-        progress: float,
+        progress: Optional[float],
         actor_done: bool,
+        fresh_actor_metadata: bool,
         env: Any,
         rollout_len: int,
     ) -> Optional[str]:
         del actor_done
         if int(action) == 0:
             return "stop_action"
-        if float(progress) >= self.progress_threshold:
+        if fresh_actor_metadata and progress is not None and float(progress) >= self.progress_threshold:
             return "progress_threshold"
         if bool(getattr(env, "episode_over", False)):
             return "env_episode_over"
@@ -1213,7 +1214,8 @@ class TwoSystemEpisodeRunner:
         while steps_total < self.episode_step_cap and not watcher_complete and not episode_over and not nav_success:
             rollout_slice: List[Dict[str, Any]] = []
             while steps_total < self.episode_step_cap and not watcher_complete and not episode_over and not nav_success:
-                if actor_calls_total >= self.max_actor_calls_per_episode:
+                pending_cached_actions = len(getattr(self.nav_model, "action_seq", []) or [])
+                if actor_calls_total >= self.max_actor_calls_per_episode and pending_cached_actions <= 0:
                     trace["watcher_events"].append(
                         {
                             "type": "error",
@@ -1245,7 +1247,16 @@ class TwoSystemEpisodeRunner:
                     hint=watcher_hint or None,
                     forbidden_actions=self.forbidden_actions,
                 )
-                actor_calls_total += 1
+                debug_snapshot = None
+                if hasattr(self.nav_model, "get_last_debug_snapshot"):
+                    debug_snapshot = self.nav_model.get_last_debug_snapshot()
+                fresh_actor_metadata = bool(
+                    True if debug_snapshot is None else debug_snapshot.get("fresh_actor_metadata", True)
+                )
+                if fresh_actor_metadata:
+                    actor_calls_total += 1
+                step_progress = float(progress) if fresh_actor_metadata else None
+                step_actor_done = bool(actor_done) if fresh_actor_metadata else False
 
                 if int(action) == 0:
                     step_record = self._step_record(
@@ -1257,8 +1268,8 @@ class TwoSystemEpisodeRunner:
                         rollout_index=rollout_index,
                         step_in_rollout=len(rollout_slice),
                         action=int(action),
-                        progress=float(progress),
-                        actor_done=bool(actor_done),
+                        progress=step_progress,
+                        actor_done=step_actor_done,
                         active_step=todo_state.active_step,
                         watcher_hint=watcher_hint,
                         watcher_subtask=watcher_subtask,
@@ -1365,8 +1376,8 @@ class TwoSystemEpisodeRunner:
                     rollout_index=rollout_index,
                     step_in_rollout=len(rollout_slice),
                     action=int(action),
-                    progress=float(progress),
-                    actor_done=bool(actor_done),
+                    progress=step_progress,
+                    actor_done=step_actor_done,
                     active_step=todo_state.active_step,
                     watcher_hint=watcher_hint,
                     watcher_subtask=watcher_subtask,
@@ -1384,8 +1395,9 @@ class TwoSystemEpisodeRunner:
 
                 wakeup_reason = self._wakeup_reason(
                     action=int(action),
-                    progress=float(progress),
-                    actor_done=bool(actor_done),
+                    progress=step_progress,
+                    actor_done=step_actor_done,
+                    fresh_actor_metadata=fresh_actor_metadata,
                     env=env,
                     rollout_len=len(rollout_slice),
                 )

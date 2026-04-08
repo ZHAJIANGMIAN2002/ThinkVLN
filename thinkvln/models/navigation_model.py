@@ -866,6 +866,7 @@ class StreamVLNNavigationModel(NavigationModel):
         num_history: int = 8,
         env_id: int = 0,
         done_threshold: float = 0.85,
+        include_previous_progress_in_prompt: bool = True,
     ):
         """
         Initialize StreamVLN navigation model wrapper.
@@ -887,6 +888,7 @@ class StreamVLNNavigationModel(NavigationModel):
         self.num_history = num_history
         self.env_id = env_id
         self.done_threshold = float(done_threshold)
+        self.include_previous_progress_in_prompt = bool(include_previous_progress_in_prompt)
         
         # StreamVLN action mapping (different from ThinkVLN)
         self.actions2idx = {
@@ -930,6 +932,9 @@ class StreamVLNNavigationModel(NavigationModel):
         self._last_debug_snapshot: Optional[Dict[str, Any]] = None
         self.memory_bank_images = []
         self.memory_bank_subtasks = []
+        self._chunk_progress: Optional[float] = None
+        self._chunk_done: bool = False
+        self._chunk_metadata_pending: bool = False
         if hasattr(self.model, "reset_for_env"):
             self.model.reset_for_env(self.env_id)
 
@@ -1191,7 +1196,11 @@ class StreamVLNNavigationModel(NavigationModel):
             instruction,
             subgoal=subgoal,
             hint=hint,
-            previous_progress=float(self.prev_progress),
+            previous_progress=(
+                float(self.prev_progress)
+                if self.include_previous_progress_in_prompt
+                else None
+            ),
         )
         
         # Handle observation input
@@ -1238,24 +1247,12 @@ class StreamVLNNavigationModel(NavigationModel):
             if depth.ndim != 3:
                 depth = np.zeros((rgb.shape[0], rgb.shape[1], 1), dtype=np.float32)
 
-        if need_progress_done and len(self.action_seq) > 0:
-            # Keep progress/done aligned with each control step by forcing a fresh forward.
-            self.action_seq = []
-
-        # If we have action sequence, return next action
-        if len(self.action_seq) > 0:
-            action = self.action_seq.pop(0)
-            if need_progress_done:
-                done = bool(action == self.actions2idx["STOP"] or self._last_predicted_done)
-                self._last_predicted_done = done
-            self._last_debug_snapshot = {
-                "instruction_text": instruction_text,
-                "predicted_progress": float(self._last_predicted_progress),
-                "predicted_done": bool(self._last_predicted_done),
-                "used_cached_action_seq": True,
-                "returned_action": int(action),
-            }
-            return action, None
+        should_roll_window = bool(
+            len(self.action_seq) == 0
+            and self.num_frames is not None
+            and int(self.step_count) > 0
+            and int(self.step_count) % int(self.num_frames) == 0
+        )
         
         # Process depth
         depth = filter_depth(depth.reshape(depth.shape[:2]), blur_type=None)
@@ -1296,11 +1293,30 @@ class StreamVLNNavigationModel(NavigationModel):
         intrinsic = torch.from_numpy(intrinsic).float()
         
         # Update history
-        self.time_ids.append(self.step_count)
+        current_time_id = int(self.step_count)
+        self.time_ids.append(current_time_id)
         self.rgb_list.append(image_tensor)
         self.depth_list.append(torch.from_numpy(depth_image).float())
         self.pose_list.append(torch.from_numpy(tf_camera_to_episodic) @ self._get_axis_align_matrix())
         self.intrinsic_list.append(intrinsic)
+        self.step_count += 1
+
+        # Cached chunk steps still need to update temporal history so the next fresh
+        # actor call sees the true executed trajectory.
+        if len(self.action_seq) > 0:
+            action = self.action_seq.pop(0)
+            if int(action) == self.actions2idx["STOP"]:
+                self.action_seq = []
+                self._chunk_metadata_pending = False
+            self._last_debug_snapshot = {
+                "instruction_text": instruction_text,
+                "predicted_progress": None,
+                "predicted_done": None,
+                "fresh_actor_metadata": False,
+                "used_cached_action_seq": True,
+                "returned_action": int(action),
+            }
+            return action, None
         
         # Prepare input for model
         sources = copy.deepcopy(self.conversation)
@@ -1315,8 +1331,6 @@ class StreamVLNNavigationModel(NavigationModel):
         add_system = True
         
         input_ids, conversations = self._preprocess_qwen([sources], True, add_system=add_system)
-        if self.output_ids is not None:
-            input_ids = torch.cat([self.output_ids, input_ids.to(self.output_ids.device)], dim=1)
         
         # Select frames (current + history if needed)
         images = self.rgb_list[-1:]
@@ -1324,7 +1338,7 @@ class StreamVLNNavigationModel(NavigationModel):
         poses = self.pose_list[-1:]
         intrinsics = self.intrinsic_list[-1:]
         
-        if self.step_count != 0 and self.step_count % self.num_frames == 0:
+        if should_roll_window:
             if self.num_history is None:
                 history_ids = slice(0, len(self.time_ids), self.num_future_steps)
             else:
@@ -1370,7 +1384,7 @@ class StreamVLNNavigationModel(NavigationModel):
                     max_new_tokens=10000,
                     use_cache=True,
                     return_dict_in_generate=True,
-                    past_key_values=self.past_key_values
+                    past_key_values=None,
                 )
             
             # Check if outputs is valid
@@ -1381,14 +1395,15 @@ class StreamVLNNavigationModel(NavigationModel):
             if not hasattr(outputs, 'sequences') or outputs.sequences is None:
                 raise ValueError("Outputs.sequences is None")
             
-            self.output_ids = outputs.sequences
-            self.past_key_values = getattr(outputs, 'past_key_values', None)
+            self.output_ids = None
+            self.past_key_values = None
             
             # Check if output_ids is valid before decoding
-            if self.output_ids is None or self.output_ids.numel() == 0:
+            generated_sequences = outputs.sequences
+            if generated_sequences is None or generated_sequences.numel() == 0:
                 raise ValueError("output_ids is None or empty")
             
-            decoded_outputs = self.tokenizer.batch_decode(self.output_ids, skip_special_tokens=False)
+            decoded_outputs = self.tokenizer.batch_decode(generated_sequences, skip_special_tokens=False)
             if not decoded_outputs or len(decoded_outputs) == 0:
                 raise ValueError("batch_decode returned empty list")
             
@@ -1411,40 +1426,57 @@ class StreamVLNNavigationModel(NavigationModel):
             )
             self._last_predicted_progress = progress
             self._last_predicted_done = done
+            self._chunk_progress = float(progress)
+            self._chunk_done = bool(done)
+            self._chunk_metadata_pending = True
+        else:
+            self._chunk_progress = None
+            self._chunk_done = False
+            self._chunk_metadata_pending = False
         
-        # Reset if needed (after processing current step)
-        if self.step_count % self.num_frames == 0:
+        # Reset stream cache/window only when starting a new fresh actor segment at the
+        # frame boundary. Keep the current frame as the first item of the new window.
+        if should_roll_window:
+            current_rgb = self.rgb_list[-1]
+            current_depth = self.depth_list[-1]
+            current_pose = self.pose_list[-1]
+            current_intrinsic = self.intrinsic_list[-1]
+            current_time = self.time_ids[-1]
             self.model.reset_for_env(self.env_id)
             self.output_ids = None
             self.past_key_values = None
-            # Clear history lists to prevent memory growth
-            self.rgb_list = []
-            self.depth_list = []
-            self.pose_list = []
-            self.intrinsic_list = []
-            self.time_ids = []
-        
-        self.step_count += 1
+            self.rgb_list = [current_rgb]
+            self.depth_list = [current_depth]
+            self.pose_list = [current_pose]
+            self.intrinsic_list = [current_intrinsic]
+            self.time_ids = [current_time]
         
         # Return first action from sequence
         if len(self.action_seq) > 0:
             action = self.action_seq.pop(0)
-            if need_progress_done:
-                # Do not reuse stale aux predictions across cached chunk steps.
+            fresh_actor_metadata = bool(self._chunk_metadata_pending)
+            if int(action) == self.actions2idx["STOP"]:
                 self.action_seq = []
             self._last_debug_snapshot = {
                 "instruction_text": instruction_text,
-                "predicted_progress": float(self._last_predicted_progress),
-                "predicted_done": bool(self._last_predicted_done),
+                "predicted_progress": (
+                    float(self._chunk_progress)
+                    if fresh_actor_metadata and self._chunk_progress is not None
+                    else None
+                ),
+                "predicted_done": bool(self._chunk_done) if fresh_actor_metadata else None,
+                "fresh_actor_metadata": fresh_actor_metadata,
                 "used_cached_action_seq": False,
                 "returned_action": int(action),
             }
+            self._chunk_metadata_pending = False
             return action, None
         else:
             self._last_debug_snapshot = {
                 "instruction_text": instruction_text,
-                "predicted_progress": float(self._last_predicted_progress),
-                "predicted_done": bool(self._last_predicted_done),
+                "predicted_progress": None,
+                "predicted_done": None,
+                "fresh_actor_metadata": False,
                 "used_cached_action_seq": False,
                 "returned_action": int(self.actions2idx['STOP']),
             }
@@ -1485,8 +1517,12 @@ class StreamVLNNavigationModel(NavigationModel):
             need_progress_done=True,
         )
 
+        snapshot = self.get_last_debug_snapshot() or {}
+        fresh_actor_metadata = bool(snapshot.get("fresh_actor_metadata", True))
         progress = float(self._last_predicted_progress)
         done = bool(self._last_predicted_done or int(action) == self.actions2idx["STOP"])
+        if not fresh_actor_metadata:
+            done = False
         if forbidden_actions and int(action) in [int(x) for x in forbidden_actions]:
             action = self.actions2idx["STOP"]
             done = True
@@ -1495,8 +1531,12 @@ class StreamVLNNavigationModel(NavigationModel):
         progress = max(0.0, min(1.0, float(progress)))
         self.prev_progress = progress
         if self._last_debug_snapshot is not None:
-            self._last_debug_snapshot["predicted_progress"] = progress
-            self._last_debug_snapshot["predicted_done"] = done
+            self._last_debug_snapshot["predicted_progress"] = (
+                progress if fresh_actor_metadata else None
+            )
+            self._last_debug_snapshot["predicted_done"] = (
+                done if fresh_actor_metadata else None
+            )
             self._last_debug_snapshot["watcher_subgoal"] = str(subgoal)
             self._last_debug_snapshot["watcher_hint"] = str(hint or "")
         return int(action), progress, bool(done)

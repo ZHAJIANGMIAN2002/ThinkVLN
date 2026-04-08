@@ -491,6 +491,93 @@ class TestSubtaskReplayMemoryPriming:
 
         assert captured["forbidden_actions"] == [0]
 
+    def test_subtask_eval_counts_progress_only_on_fresh_actor_metadata(self, tmp_path, monkeypatch):
+        model = _DummyActor(progress_value=0.3, done_prob=0.0)
+        processor = _DummyProcessor()
+        nav_model = ThinkVLNActorNavigationModel(model=model, processor=processor, device="cpu")
+
+        evaluator = VLNEvaluator.__new__(VLNEvaluator)
+        evaluator.nav_model = nav_model
+        evaluator.output_path = str(tmp_path)
+        evaluator.env_num = 1
+        evaluator.args = SimpleNamespace(
+            debug_log_interval=0,
+            subtask_step_budget_factor=1.0,
+            subgoal_success_distance=0.1,
+        )
+        evaluator.target_episode_key = ""
+        evaluator.enable_step_debug = False
+        evaluator.step_debug_format = "none"
+        evaluator.config_path = "config/vln_r2r.yaml"
+        evaluator._episode_instruction = lambda config_path, episode: "go forward"
+        evaluator._iter_assigned_episodes = lambda env, idx: [("scene_020", env.episodes[0])]
+
+        class _FakeSim:
+            def __init__(self):
+                self.position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+            def get_agent_state(self):
+                return SimpleNamespace(position=self.position.copy())
+
+            def geodesic_distance(self, start, goal):
+                return float(np.linalg.norm(np.array(start) - np.array(goal)))
+
+        class _FakeEnv:
+            def __init__(self):
+                self.episodes = [SimpleNamespace(scene_id="scene_020.glb", episode_id="ep-2")]
+                self.current_episode = None
+                self.episode_over = False
+                self.sim = _FakeSim()
+
+            def reset(self):
+                self.episode_over = False
+                self.sim.position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+                return {"rgb": np.zeros((8, 8, 3), dtype=np.uint8)}
+
+            def step(self, action):
+                if int(action) == 1:
+                    self.sim.position = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+                return {"rgb": np.zeros((8, 8, 3), dtype=np.uint8)}
+
+            def get_metrics(self):
+                return {}
+
+            def close(self):
+                return None
+
+        env = _FakeEnv()
+        evaluator.config_env = lambda: env
+
+        snapshots = iter(
+            [
+                {"fresh_actor_metadata": True},
+                {"fresh_actor_metadata": False},
+            ]
+        )
+
+        def _predict(**kwargs):
+            del kwargs
+            return 1, 0.25, False
+
+        monkeypatch.setattr(nav_model, "predict_action_with_progress_and_done", _predict)
+        monkeypatch.setattr(nav_model, "get_last_debug_snapshot", lambda: next(snapshots))
+        monkeypatch.setattr(
+            "thinkvln.eval.close_eval_runner.write_jsonl_record",
+            lambda handle, payload, sync_to_disk=True: handle.write("ok\n"),
+        )
+
+        summary_full = {
+            "scene_020_ep-2": {
+                "actions": [1, 1],
+                "subtask_sequence": [1, 1],
+                "plan": ["go forward"],
+            }
+        }
+
+        stats = evaluator.eval_subtask_closed_loop(0, summary_full)
+
+        assert stats["progress_count"] == 1.0
+
 
 class TestReplayActionNormalization:
     def test_strip_leading_negative_one_sentinel(self):

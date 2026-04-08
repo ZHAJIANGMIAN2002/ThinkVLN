@@ -232,6 +232,7 @@ class _FakeNavModel:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
+        self._last_debug_snapshot = None
 
     def eval(self):
         return self
@@ -256,7 +257,22 @@ class _FakeNavModel:
                 "forbidden_actions": list(forbidden_actions or []),
             }
         )
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if len(response) == 4:
+            action, progress, done, fresh_actor_metadata = response
+        else:
+            action, progress, done = response
+            fresh_actor_metadata = True
+        self._last_debug_snapshot = {
+            "fresh_actor_metadata": bool(fresh_actor_metadata),
+            "used_cached_action_seq": not bool(fresh_actor_metadata),
+        }
+        return action, progress, done
+
+    def get_last_debug_snapshot(self):
+        if self._last_debug_snapshot is None:
+            return None
+        return dict(self._last_debug_snapshot)
 
 
 class _FakeEnv:
@@ -967,6 +983,51 @@ class TestTwoSystemEval:
         result = runner.run_episode(
             env=_FakeEnv(),
             episode_key="scene_ignore_actor_done",
+            instruction="go ahead",
+            plan_steps=["move forward"],
+        )
+
+        assert result["failed"] is False
+        assert result["watcher_wakeups"] == 1
+        assert result["trace"]["watcher_events"][-1]["wakeup_reason"] == "max_steps_per_wakeup"
+
+    def test_episode_runner_ignores_cached_step_progress_for_wakeup(self):
+        class _WakeupReasonWatcher:
+            def initialize(self, instruction, plan_steps, first_observation, episode_key):
+                del instruction, plan_steps, first_observation, episode_key
+                return WatcherDecision(
+                    memory="start memory",
+                    done=False,
+                    subtask="move forward",
+                    raw_response={"memory": "start memory", "done": False, "subtask": "move forward"},
+                    wakeup_reason="init",
+                )
+
+            def update(self, instruction, todo_state, memory_text, rollout_slice, episode_key):
+                del instruction, todo_state, memory_text, episode_key
+                assert len(rollout_slice) == 2
+                assert rollout_slice[0]["actor_progress"] == pytest.approx(0.4, rel=1e-5, abs=1e-6)
+                assert rollout_slice[1]["actor_progress"] is None
+                return WatcherDecision(
+                    memory="done",
+                    done=True,
+                    subtask="stop",
+                    raw_response={"memory": "done", "done": True, "subtask": "stop"},
+                    wakeup_reason="",
+                )
+
+        runner = TwoSystemEpisodeRunner(
+            nav_model=_FakeNavModel([(1, 0.4, False, True), (1, 0.9, False, False)]),
+            watcher_backend=_WakeupReasonWatcher(),
+            max_steps_per_wakeup=2,
+            progress_threshold=0.85,
+            episode_step_cap=10,
+            forbidden_actions=[],
+        )
+
+        result = runner.run_episode(
+            env=_FakeEnv(),
+            episode_key="scene_ignore_cached_progress",
             instruction="go ahead",
             plan_steps=["move forward"],
         )

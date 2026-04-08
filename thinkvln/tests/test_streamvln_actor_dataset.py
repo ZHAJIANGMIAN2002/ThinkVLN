@@ -152,6 +152,38 @@ def test_build_materialized_streamvln_actor_records_combines_r2r_and_scalevln(tm
     assert scale_next["history_image_paths"] == ["/tmp/scale/images/scale_scalevln_000001/000001_rgb.jpg"]
 
 
+def test_build_materialized_streamvln_actor_records_prefers_r2r_frame_dir_when_present(tmp_path: Path):
+    summary_path = tmp_path / "r2r_summary.jsonl"
+    image_root = tmp_path / "R2R_back"
+    (image_root / "r2r" / "scene_r2r_000001").mkdir(parents=True)
+    _write_jsonl(
+        summary_path,
+        [
+            {
+                "episode_key": "scene_00001",
+                "num_frames": 2,
+                "instruction": "Walk to the sink.",
+                "plan": ["Walk down the hall."],
+                "actions": [-1, 1],
+                "subtask_sequence": [1, 1],
+                "video": "images/scene_r2r_000001",
+            }
+        ],
+    )
+
+    records = build_materialized_streamvln_actor_records(
+        summary_specs=[
+            {"dataset_name": "r2r", "summary_path": str(summary_path), "image_root": str(image_root)},
+        ],
+        memory_num_history_images=2,
+        seed=0,
+    )
+
+    frame1 = next(record for record in records if record["frame_idx"] == 1)
+    assert frame1["anchor_image_path"].endswith("/R2R_back/r2r/scene_r2r_000001/000000_rgb.jpg")
+    assert frame1["image_path"].endswith("/R2R_back/r2r/scene_r2r_000001/000001_rgb.jpg")
+
+
 def test_build_streamvln_actor_prompt_formats_optional_hint():
     prompt = build_streamvln_actor_prompt(
         instruction="Walk to the sink.",
@@ -159,12 +191,11 @@ def test_build_streamvln_actor_prompt_formats_optional_hint():
         watcher_hint="You already cleared the dining area.",
         include_visual_memory=True,
         include_anchor_frame=True,
-        previous_progress=0.25,
     )
     assert "Instruction: Walk to the sink." in prompt
     assert "Current subtask: Turn right into the bathroom." in prompt
     assert "Watcher hint: You already cleared the dining area." in prompt
-    assert "Previous progress: 0.2500" in prompt
+    assert "Previous progress:" not in prompt
     assert "Subtask start observation: <anchor>" in prompt
     assert "<memory>" in prompt
 
@@ -172,13 +203,12 @@ def test_build_streamvln_actor_prompt_formats_optional_hint():
         instruction="Walk to the sink.",
         subtask="Turn right into the bathroom.",
         watcher_hint=None,
-        previous_progress=0.0,
         include_anchor_frame=True,
     )
     assert "Instruction: Walk to the sink." in prompt_without_hint
     assert "Current subtask: Turn right into the bathroom." in prompt_without_hint
     assert "Watcher hint:" not in prompt_without_hint
-    assert "Previous progress: 0.0000" in prompt_without_hint
+    assert "Previous progress:" not in prompt_without_hint
     assert "<anchor>" in prompt_without_hint
     assert "<memory>" not in prompt_without_hint
 
@@ -212,7 +242,6 @@ def test_tokenize_actor_sample_replaces_anchor_token():
         subtask="Turn right into the bathroom.",
         include_visual_memory=True,
         include_anchor_frame=True,
-        previous_progress=0.25,
     )
 
     input_ids, _ = _tokenize_actor_sample(_Tokenizer(), prompt, "↑ STOP STOP STOP")

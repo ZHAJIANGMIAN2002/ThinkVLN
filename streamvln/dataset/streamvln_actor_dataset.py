@@ -89,7 +89,6 @@ def build_streamvln_actor_prompt(
     subtask: str,
     watcher_hint: Optional[str] = None,
     include_visual_memory: bool = False,
-    previous_progress: Optional[float] = None,
     include_anchor_frame: bool = False,
 ) -> str:
     lines = [
@@ -97,8 +96,6 @@ def build_streamvln_actor_prompt(
         f"Instruction: {str(instruction or '').strip()}",
         f"Current subtask: {str(subtask or '').strip()}",
     ]
-    if previous_progress is not None:
-        lines.append(f"Previous progress: {float(previous_progress):.4f}")
     if include_anchor_frame:
         lines.append(f"Subtask start observation: {DEFAULT_ANCHOR_TOKEN}")
     hint_text = str(watcher_hint or "").strip()
@@ -234,7 +231,7 @@ def _materialized_frame_to_image_path(
     if video:
         video_basename = os.path.basename(video)
         if str(dataset_name or "").lower() == "r2r":
-            candidates.append(video_basename)
+            candidates.extend([os.path.join("r2r", video_basename), video_basename])
         else:
             candidates.extend([video, video_basename])
     dir_key = _episode_key_to_dir_key(episode_key)
@@ -244,7 +241,13 @@ def _materialized_frame_to_image_path(
     for candidate in candidates:
         if candidate and candidate not in deduped:
             deduped.append(candidate)
-    chosen_dir = deduped[0] if deduped else dir_key
+    if video:
+        if str(dataset_name or "").lower() == "r2r":
+            chosen_dir = video_basename
+        else:
+            chosen_dir = video
+    else:
+        chosen_dir = deduped[0] if deduped else dir_key
     for candidate in deduped:
         if os.path.isdir(os.path.join(str(image_root), candidate)):
             chosen_dir = candidate
@@ -709,13 +712,11 @@ class StreamVLNActorDataset(Dataset):
     def __getitem__(self, index: int) -> Dict:
         sample = self.samples[index]
         include_visual_memory = self.memory_num_history_images > 0
-        prev_prog = float(sample.get("previous_progress", 0.0))
         prompt = build_streamvln_actor_prompt(
             instruction=sample["instruction"],
             subtask=sample["subtask"],
             watcher_hint=sample.get("watcher_hint"),
             include_visual_memory=include_visual_memory,
-            previous_progress=prev_prog,
             include_anchor_frame=True,
         )
         target_text = _actions_to_text(sample["action_labels"])

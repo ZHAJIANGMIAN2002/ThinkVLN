@@ -183,7 +183,8 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
                     "Base model path is required for LoRA StreamVLN checkpoint. "
                     "Use --base_model_path or provide base_model_name_or_path in adapter_config.json."
                 )
-            tokenizer_source = actual_base_model
+            # Keep tokenizer aligned with the LoRA checkpoint artifacts.
+            tokenizer_source = args.model_path
             config_source = actual_base_model
         else:
             actual_base_model = args.model_path
@@ -217,6 +218,8 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
             low_cpu_mem_usage=False,
         )
         if is_lora:
+            model.resize_token_embeddings(len(tokenizer))
+        if is_lora:
             from peft import PeftModel
 
             model = PeftModel.from_pretrained(model, args.model_path)
@@ -240,6 +243,7 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
             num_history=args.num_history,
             env_id=rank,
             done_threshold=getattr(args, "done_threshold", 0.85),
+            include_previous_progress_in_prompt=False,
         )
 
     raise ValueError(f"Unknown model type: {args.model_type}")
