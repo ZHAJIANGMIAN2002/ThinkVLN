@@ -1,12 +1,26 @@
-# ThinkVLN
+# ThinkVLN 🧭
 
-ThinkVLN is a vision-language navigation research codebase focused on instruction following, long-horizon reasoning, action prediction, and data generation for embodied navigation.
+ThinkVLN is a vision-language navigation research codebase for embodied agents that must interpret instructions, reason over long-horizon context, and predict navigation actions from visual observations.
 
-This repository contains the current ThinkVLN training, evaluation, and dataset tooling used around actor-style navigation models, chain-of-thought style supervision, automatic annotation pipelines, and closed-loop evaluation. It also keeps compatibility code for earlier StreamVLN components, but this repository is maintained as the ThinkVLN codebase.
+This repository brings together the current ThinkVLN training, evaluation, and data-generation stack: actor-style navigation models, chain-of-thought style supervision, automatic annotation pipelines, and closed-loop evaluation tools. It follows earlier StreamVLN explorations, while the repository itself is maintained as the ThinkVLN codebase.
 
-## What Is In This Repo
+## Overview 🔬
 
-- `thinkvln/models`: ThinkVLN model definitions, actor heads, configs, and flow-matching components.
+ThinkVLN is organized as a research workspace rather than a single training script. The codebase supports iterative work on model design, supervised fine-tuning, closed-loop policy evaluation, reasoning-oriented dataset construction, and annotation workflows for navigation experiments.
+
+In short, this repo is where we train models, build datasets, generate auxiliary supervision, and evaluate navigation behavior end to end.
+
+## Highlights ✨
+
+- Train ThinkVLN actor models with supervised fine-tuning configs.
+- Run closed-loop evaluation for navigation policies.
+- Build action and reasoning datasets for VLN-style tasks.
+- Generate rollout annotations, trajectory summaries, and supporting supervision.
+- Iterate on ThinkVLN, ThinkVLN-Actor, and related research variants in one workspace.
+
+## Repository Map 🗂️
+
+- `thinkvln/models`: model definitions, actor heads, configs, and flow-matching components.
 - `thinkvln/engine`: training and inference entry points for SFT, AR, and evaluation helpers.
 - `thinkvln/eval`: closed-loop and debug evaluation pipelines.
 - `thinkvln/dataset`: dataset builders and dataset classes for training and analysis.
@@ -14,17 +28,9 @@ This repository contains the current ThinkVLN training, evaluation, and dataset 
 - `thinkvln/tools`: internal utility tools, web refinement apps, and development scripts.
 - `thinkvln/tests`: unit tests and integration-oriented checks for core pipelines.
 - `config`: YAML configs for training, evaluation, and data workflows.
-- `scripts`: shell and Python entry scripts for common experiments and data processing.
+- `scripts`: shell and Python entry scripts for common experiment workflows.
 
-## Main Capabilities
-
-- Train ThinkVLN actor models with supervised fine-tuning configs.
-- Run closed-loop evaluation for navigation policies.
-- Build and preprocess action / reasoning datasets for VLN-style tasks.
-- Generate auxiliary annotations, rollout artifacts, and trajectory summaries.
-- Support iterative experiments around ThinkVLN, ThinkVLN-Actor, and related research variants.
-
-## Typical Entry Points
+## Quick Entry 🚀
 
 Training:
 
@@ -45,13 +51,13 @@ python -m thinkvln.datagen.generation.cot_generation --help
 python -m thinkvln.datagen.generation.subtask_determination --help
 ```
 
-## Project Notes
+## Project Notes 🧠
 
 - The repository includes research code, experiment configs, and utility scripts under active iteration.
-- Some modules still reference legacy `streamvln` components for compatibility and comparison, but the top-level project identity is ThinkVLN.
+- Some modules still reference legacy `streamvln` components for compatibility and comparison.
 - Deployment instructions are intentionally omitted here for now.
 
-## Repository Structure
+## Structure
 
 ```text
 ThinkVLN/
