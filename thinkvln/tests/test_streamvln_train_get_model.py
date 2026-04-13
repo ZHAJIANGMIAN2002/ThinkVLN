@@ -406,6 +406,40 @@ def test_get_peft_state_non_lora_maybe_zero_3_excludes_modules_to_save(monkeypat
     assert "base_model.model.progress_head.modules_to_save.default.0.weight" not in state
 
 
+def test_normalize_resume_from_checkpoint_arg_handles_falsey_strings(monkeypatch, tmp_path):
+    import sys
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["streamvln_train.py", "--model_name_or_path", str(tmp_path)],
+    )
+
+    import streamvln.streamvln_train as train_mod
+
+    assert train_mod.normalize_resume_from_checkpoint_arg(None) is None
+    assert train_mod.normalize_resume_from_checkpoint_arg(False) is None
+    assert train_mod.normalize_resume_from_checkpoint_arg("") is None
+    assert train_mod.normalize_resume_from_checkpoint_arg("false") is None
+    assert train_mod.normalize_resume_from_checkpoint_arg(" False ") is None
+
+
+def test_normalize_resume_from_checkpoint_arg_preserves_explicit_resume_targets(monkeypatch, tmp_path):
+    import sys
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["streamvln_train.py", "--model_name_or_path", str(tmp_path)],
+    )
+
+    import streamvln.streamvln_train as train_mod
+
+    assert train_mod.normalize_resume_from_checkpoint_arg(True) is True
+    assert train_mod.normalize_resume_from_checkpoint_arg("true") is True
+    assert train_mod.normalize_resume_from_checkpoint_arg("checkpoint-7") == "checkpoint-7"
+
+
 def test_streamvln_actor_trainer_uses_sequential_sampler_when_enabled(monkeypatch, tmp_path):
     import sys
 

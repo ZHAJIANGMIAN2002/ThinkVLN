@@ -1753,6 +1753,19 @@ def get_model(model_args, training_args, data_args, bnb_model_from_pretrained_ar
     return model
 
 
+def normalize_resume_from_checkpoint_arg(resume_from_checkpoint):
+    if isinstance(resume_from_checkpoint, str):
+        normalized = resume_from_checkpoint.strip()
+        if not normalized or normalized.lower() == "false":
+            return None
+        if normalized.lower() == "true":
+            return True
+        return normalized
+    if resume_from_checkpoint is False:
+        return None
+    return resume_from_checkpoint
+
+
 def train(attn_implementation=None):
     global local_rank
     
@@ -2058,10 +2071,13 @@ def train(attn_implementation=None):
     trainer = trainer_cls(model=model, tokenizer=tokenizer, args=training_args, **data_module)
     # print(list(model.get_model().vision_resampler.parameters())[0])
     # import ipdb; ipdb.set_trace()
-    if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
-        trainer.train(resume_from_checkpoint=True)
-    else:
+    resume_from_checkpoint = normalize_resume_from_checkpoint_arg(
+        getattr(training_args, "resume_from_checkpoint", None)
+    )
+    if resume_from_checkpoint is None:
         trainer.train()
+    else:
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     trainer.save_state()
 
     model.config.use_cache = True
