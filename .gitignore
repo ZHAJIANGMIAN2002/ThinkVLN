@@ -6,8 +6,11 @@ __pycache__/
 # --- IDE 配置 (可选) ---
 .vscode/
 .idea/
+.claude/
+.codex/
 .cursor/
 .worktrees/
+.pytest_cache/
 
 # --- 大型文件 (模型权重) ---
 *.pth
@@ -30,6 +33,14 @@ wandb/
 third_party/
 llava/
 results/
+
+# --- Secrets / local env ---
+.env
+.env.*
+*.pem
+*.key
+*.secret
+secrets/
 
 # --- 忽略 third_party 下可能产生的临时文件 (保留 submodule 链接本身) ---
 third_party/**/__pycache__

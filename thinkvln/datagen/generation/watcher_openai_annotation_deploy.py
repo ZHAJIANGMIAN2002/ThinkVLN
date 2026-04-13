@@ -18,7 +18,6 @@ from openai import OpenAI
 DEFAULT_MODEL_NAME = "Qwen/Qwen3.5-397B-A17B"
 # DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_REASONING_EFFORT = "high"
-# DEFAULT_API_KEY = "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"
 
 DEFAULT_BASE_URL = "http://localhost:11451/v1"
 DEFAULT_API_KEY = "EMPTY"

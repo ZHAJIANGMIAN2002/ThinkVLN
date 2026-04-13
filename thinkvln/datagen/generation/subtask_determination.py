@@ -14,7 +14,7 @@ from threading import Lock
 
 # client = OpenAI(
 #     base_url="https://openrouter.ai/api/v1",
-#     api_key=os.environ.get("OPENROUTER_API_KEY", "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"),
+#     api_key=os.environ.get("OPENROUTER_API_KEY", "EMPTY"),
 # )
 
 # # # Initialize OpenAI client

@@ -1,124 +1,76 @@
----
-pipeline_tag: robotics
-library_name: transformers
-license: cc-by-nc-sa-4.0
-tags:
-  - vision-language-model
-  - video-language-model
-  - navigation
----
+# ThinkVLN
 
-# StreamVLN: Streaming Vision-and-Language Navigation via SlowFast Context Modeling
+ThinkVLN is a vision-language navigation research codebase focused on instruction following, long-horizon reasoning, action prediction, and data generation for embodied navigation.
 
-<div id="top" align="center">
-[![arXiv](https://img.shields.io/badge/arXiv-red?logo=arxiv)](http://arxiv.org/abs/2507.05240)
-[![Project Page](https://img.shields.io/badge/Project-0065D3?logo=rocket&logoColor=white)](https://streamvln.github.io/)
-[![Video Demo](https://img.shields.io/badge/Video-D33846?logo=youtube)](https://www.youtube.com/watch?v=gG3mpefOBjc)
-[![Code](https://img.shields.io/badge/GitHub-Code-181717?logo=github)](https://github.com/OpenRobotLab/StreamVLN)
-</div>
+This repository contains the current ThinkVLN training, evaluation, and dataset tooling used around actor-style navigation models, chain-of-thought style supervision, automatic annotation pipelines, and closed-loop evaluation. It also keeps compatibility code for earlier StreamVLN components, but this repository is maintained as the ThinkVLN codebase.
 
-<div style="text-align: center;">
-    <img src="https://github.com/OpenRobotLab/StreamVLN/raw/main/assets/teaser.gif" width=100% >
-</div>
+## What Is In This Repo
 
-## Paper
-[StreamVLN: Streaming Vision-and-Language Navigation via SlowFast Context Modeling](https://huggingface.co/papers/2507.05240)
+- `thinkvln/models`: ThinkVLN model definitions, actor heads, configs, and flow-matching components.
+- `thinkvln/engine`: training and inference entry points for SFT, AR, and evaluation helpers.
+- `thinkvln/eval`: closed-loop and debug evaluation pipelines.
+- `thinkvln/dataset`: dataset builders and dataset classes for training and analysis.
+- `thinkvln/datagen`: preprocessing, annotation, rollout, trajectory, and video generation tools.
+- `thinkvln/tools`: internal utility tools, web refinement apps, and development scripts.
+- `thinkvln/tests`: unit tests and integration-oriented checks for core pipelines.
+- `config`: YAML configs for training, evaluation, and data workflows.
+- `scripts`: shell and Python entry scripts for common experiments and data processing.
 
-## Abstract
-Vision-and-Language Navigation (VLN) in real-world settings requires agents to process continuous visual streams and generate actions with low latency grounded in language instructions. While Video-based Large Language Models (Video-LLMs) have driven recent progress, current VLN methods based on Video-LLM often face trade-offs among fine-grained visual understanding, long-term context modeling and computational efficiency. We introduce StreamVLN, a streaming VLN framework that employs a hybrid slow-fast context modeling strategy to support multi-modal reasoning over interleaved vision, language and action inputs. The fast-streaming dialogue context facilitates responsive action generation through a sliding-window of active dialogues, while the slow-updating memory context compresses historical visual states using a 3D-aware token pruning strategy. With this slow-fast design, StreamVLN achieves coherent multi-turn dialogue through efficient KV cache reuse, supporting long video streams with bounded context size and inference cost. Experiments on VLN-CE benchmarks demonstrate state-of-the-art performance with stable low latency, ensuring robustness and efficiency in real-world deployment.
+## Main Capabilities
 
-## About
-**StreamVLN** generates action outputs from continuous video input in an online, multi-turn dialogue manner. Built on **LLaVA-Video** as the foundational Video-LLM, we extend it for interleaved vision, language, and action modeling. For both effective context modeling of long sequence and efficient computation for real-time interaction, StreamVLN has: (1) a **fast-streaming** dialogue context with a sliding-window KV cache; and (2) a **slow-updating** memory via token pruning.
+- Train ThinkVLN actor models with supervised fine-tuning configs.
+- Run closed-loop evaluation for navigation policies.
+- Build and preprocess action / reasoning datasets for VLN-style tasks.
+- Generate auxiliary annotations, rollout artifacts, and trajectory summaries.
+- Support iterative experiments around ThinkVLN, ThinkVLN-Actor, and related research variants.
 
-## Model Zoo
+## Typical Entry Points
 
-We provide two model checkpoints for different use cases:
+Training:
 
--   **Benchmark Reproduction**
-    Use this [checkpoint](https://huggingface.co/mengwei0427/StreamVLN_Video_qwen_1_5_r2r_rxr_envdrop_scalevln) to reproduce results on the VLN-CE benchmark.
-
--   **Real-World Deployment**
-    This [checkpoint](https://huggingface.co/mengwei0427/StreamVLN_Video_qwen_1_5_r2r_rxr_envdrop_scalevln_real_world) is recommended for deployment on physical robots.
-
-    We made two modifications:
-    1.  **Remove redundant initial turn actions**: The initial left/right turns not mentioned in the instructions are removed for better instruction alignment.
-    2.  **Trajectory safety**: Enhanced obstacle avoidance ensures more reliable navigation in real-world environments.
-
-## Usage (with Transformers)
-
-You can load StreamVLN models using the `transformers` library. Ensure you have the necessary dependencies installed as outlined in the [project's GitHub repository](https://github.com/OpenRobotLab/StreamVLN).
-
-```python
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor
-from PIL import Image
-import requests
-from io import BytesIO
-
-# Load model and processor
-model_id = "mengwei0427/StreamVLN_Video_qwen_1_5_r2r_rxr_envdrop_scalevln"
-model = AutoModelForCausalLM.from_pretrained(
-    model_id,
-    torch_dtype=torch.bfloat16, # Adjust dtype based on your hardware (e.g., torch.float16 for Ampere GPUs)
-    device_map="auto",
-    trust_remote_code=True # Required for custom modeling components like Qwen-VL
-)
-processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-
-# Example: This model is designed for Vision-and-Language Navigation (VLN).
-# The full inference loop involves continuous visual stream processing and action generation
-# within an environment. The snippet below shows a basic setup for text-image input.
-# For complete VLN usage, including environment setup and action generation,
-# please refer to the project's [GitHub repository](https://github.com/OpenRobotLab/StreamVLN).
-
-# Load a sample image (replace with actual environment image in VLN tasks)
-image_url = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/transformers/tasks/car.jpg?width=400"
-image = Image.open(BytesIO(requests.get(image_url).content)).convert("RGB")
-
-# Prepare text input using the chat template
-messages = [
-    {"role": "user", "content": "What is in the image? Describe it."},
-]
-text_input = tokenizer.apply_chat_template(
-    messages, tokenize=False, add_generation_prompt=True
-)
-
-# Process inputs (text and image)
-inputs = processor(text=text_input, images=image, return_tensors="pt").to(model.device)
-
-# Generate response
-output_ids = model.generate(
-    **inputs,
-    max_new_tokens=256, # Increase max_new_tokens for more detailed responses
-    do_sample=True,
-    temperature=0.7,
-    top_p=0.8,
-)
-
-# Decode and print the output, skipping the input prompt
-output_text = tokenizer.decode(output_ids[0][len(inputs.input_ids[0]):], skip_special_tokens=True)
-print(output_text)
+```bash
+bash scripts/train_thinkvln_actor.sh config/sft_training.yaml
 ```
 
-## Citation
+Evaluation:
 
-If you find our work helpful, please consider starring this repo 🌟 and cite:
+```bash
+python -m thinkvln.eval.close_eval --help
+```
 
-```bibtex
-@misc{wei2025streamvlnstreamingvisionandlanguagenavigation,
-      title={StreamVLN: Streaming Vision-and-Language Navigation via SlowFast Context Modeling}, 
-      author={Meng Wei and Chenyang Wan and Xiqian Yu and Tai Wang and Yuqiang Yang and Xiaohan Mao and Chenming Zhu and Wenzhe Cai and Hanqing Wang and Yilun Chen and Xihui Liu and Jiangmiao Pang},
-      year={2025},
-      eprint={2507.05240},
-      archivePrefix={arXiv},
-      primaryClass={cs.RO},
-      url={https://arxiv.org/abs/2507.05240}, 
-}
+Data generation:
+
+```bash
+python -m thinkvln.datagen.generation.cot_generation --help
+python -m thinkvln.datagen.generation.subtask_determination --help
+```
+
+## Project Notes
+
+- The repository includes research code, experiment configs, and utility scripts under active iteration.
+- Some modules still reference legacy `streamvln` components for compatibility and comparison, but the top-level project identity is ThinkVLN.
+- Deployment instructions are intentionally omitted here for now.
+
+## Repository Structure
+
+```text
+ThinkVLN/
+├── config/
+├── scripts/
+├── thinkvln/
+│   ├── datagen/
+│   ├── dataset/
+│   ├── engine/
+│   ├── eval/
+│   ├── habitat_extensions/
+│   ├── models/
+│   ├── tests/
+│   └── tools/
+├── streamvln/
+├── docs/
+└── README.md
 ```
 
 ## License
-This work is under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](http://creativecommons.org/licenses/by-nc-sa/4.0/).
 
-## Acknowledgements
-This repository is based on [LLaVA-NeXT](https://github.com/LLaVA-VL/LLaVA-NeXT).
+Add the project license information here before publishing the repository publicly.
