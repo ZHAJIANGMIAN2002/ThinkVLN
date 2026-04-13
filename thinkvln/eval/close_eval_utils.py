@@ -110,6 +110,19 @@ def timeline_progress(step_idx: int, gt_subtask_steps: int) -> float:
     return max(0.0, min(1.0, progress))
 
 
+def distance_based_progress(
+    start_to_current_distance: float,
+    current_to_goal_distance: float,
+) -> float:
+    traveled = max(0.0, float(start_to_current_distance))
+    remaining = max(0.0, float(current_to_goal_distance))
+    denom = traveled + remaining
+    if denom <= 1e-6:
+        return 1.0
+    progress = traveled / denom
+    return max(0.0, min(1.0, progress))
+
+
 def compute_step_budget(gt_subtask_steps: int, factor: float) -> int:
     return max(1, int(math.ceil(max(gt_subtask_steps, 0) * factor)))
 
@@ -121,11 +134,27 @@ def summarize_subtask_aggregation(stats: Dict[str, float]) -> Dict[str, float]:
     success_steps_sum = float(stats.get("steps_success_sum", 0.0))
     progress_count = float(stats.get("progress_count", 0.0))
     progress_error_sum = float(stats.get("progress_abs_error_sum", 0.0))
+    done_tp = float(stats.get("done_tp", 0.0))
+    done_tn = float(stats.get("done_tn", 0.0))
+    done_fp = float(stats.get("done_fp", 0.0))
+    done_fn = float(stats.get("done_fn", 0.0))
+    done_total = done_tp + done_tn + done_fp + done_fn
+    done_precision = done_tp / (done_tp + done_fp) if (done_tp + done_fp) > 0 else 0.0
+    done_recall = done_tp / (done_tp + done_fn) if (done_tp + done_fn) > 0 else 0.0
+    done_f1 = (
+        2.0 * done_precision * done_recall / (done_precision + done_recall)
+        if (done_precision + done_recall) > 0
+        else 0.0
+    )
 
     return {
         "subtask_success_rate": successful_subtasks / total_subtasks if total_subtasks > 0 else 0.0,
         "steps_to_subgoal": success_steps_sum / success_steps_count if success_steps_count > 0 else 0.0,
         "progress_mae": progress_error_sum / progress_count if progress_count > 0 else 0.0,
+        "done_accuracy": (done_tp + done_tn) / done_total if done_total > 0 else 0.0,
+        "done_precision": done_precision,
+        "done_recall": done_recall,
+        "done_f1": done_f1,
     }
 
 
@@ -190,6 +219,7 @@ __all__ = [
     "load_summary_full",
     "build_subtask_spans",
     "timeline_progress",
+    "distance_based_progress",
     "compute_step_budget",
     "summarize_subtask_aggregation",
     "normalize_action",

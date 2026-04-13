@@ -46,12 +46,24 @@ def test_streamvln_navigation_model_formats_actor_text_lines():
         subgoal="Turn right into the bathroom.",
         hint="You already cleared the dining area.",
         previous_progress=0.5,
+        include_visual_memory=True,
+        include_anchor_frame=True,
+        next_subtask="Stop at the sink.",
+        subtask_position="2/3",
+        action_history="↑ ←",
+        steps_in_subtask=4,
     )
 
+    assert text.startswith("<image>\n")
     assert "Instruction: Walk to the sink." in text
-    assert "Current subtask: Turn right into the bathroom." in text
+    assert "Current subtask (2/3): Turn right into the bathroom." in text
+    assert "Next subtask: Stop at the sink." in text
+    assert "Subtask start observation: <anchor>" in text
     assert "Watcher hint: You already cleared the dining area." in text
-    assert "Previous progress: 0.5000" in text
+    assert "Historical observations: <memory>" in text
+    assert "Recent actions: ↑ ←" in text
+    assert "Steps in current subtask: 4" in text
+    assert "Previous progress:" not in text
 
 
 def test_supports_progress_done_actor_model_uses_capability_not_class():
@@ -240,11 +252,13 @@ def test_streamvln_navigation_model_reuses_chunk_cache_and_emits_fresh_metadata_
     assert fourth[0] == 0
     assert fifth[0] == 1
     assert model.generate_calls == 2
-    assert model.progress_calls == 2
+    assert model.progress_calls == 5
     assert snapshot1["fresh_actor_metadata"] is True
     assert snapshot1["used_cached_action_seq"] is False
     assert snapshot2["fresh_actor_metadata"] is False
     assert snapshot2["used_cached_action_seq"] is True
+    assert snapshot2["fresh_progress_done"] is True
+    assert snapshot2["predicted_progress"] == pytest.approx(0.9, rel=1e-5, abs=1e-6)
 
 
 def test_streamvln_navigation_model_stop_clears_remaining_cached_actions(monkeypatch):

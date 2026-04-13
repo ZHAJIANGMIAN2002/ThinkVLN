@@ -232,11 +232,19 @@ def evaluate(
     global_subtask_stats = all_reduce_scalar_dict(local_subtask_stats, evaluator.device)
     if rank == 0:
         subtask_metrics = summarize_subtask_aggregation(global_subtask_stats)
+        done_samples = int(
+            global_subtask_stats.get("done_tp", 0.0)
+            + global_subtask_stats.get("done_tn", 0.0)
+            + global_subtask_stats.get("done_fp", 0.0)
+            + global_subtask_stats.get("done_fn", 0.0)
+        )
         ladder_summary["subtask_closed_loop"] = {
             **subtask_metrics,
+            "progress_l1": float(subtask_metrics.get("progress_mae", 0.0)),
             "total_subtasks": int(global_subtask_stats.get("subtasks_total", 0.0)),
             "successful_subtasks": int(global_subtask_stats.get("subtasks_success", 0.0)),
             "progress_samples": int(global_subtask_stats.get("progress_count", 0.0)),
+            "done_samples": done_samples,
             "episodes_total": int(global_subtask_stats.get("episodes_total", 0.0)),
             "episodes_evaluated": int(global_subtask_stats.get("episodes_evaluated", 0.0)),
             "episodes_missing_meta": int(global_subtask_stats.get("episodes_missing_meta", 0.0)),

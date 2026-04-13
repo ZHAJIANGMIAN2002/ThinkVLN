@@ -15,6 +15,36 @@ from thinkvln.models.navigation_model import (
 )
 
 
+def _load_streamvln_pretrained_model(
+    streamvln_cls,
+    model_path: str,
+    config,
+    dtype,
+    prefer_flash_attention: bool = True,
+):
+    kwargs = dict(
+        dtype=dtype,
+        config=config,
+        low_cpu_mem_usage=False,
+    )
+    attn_impl = "flash_attention_2" if prefer_flash_attention else "eager"
+    try:
+        return streamvln_cls.from_pretrained(
+            model_path,
+            attn_implementation=attn_impl,
+            **kwargs,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if (not prefer_flash_attention) or ("Flash Attention 2" not in message and "flash_attention_2" not in message):
+            raise
+        return streamvln_cls.from_pretrained(
+            model_path,
+            attn_implementation="eager",
+            **kwargs,
+        )
+
+
 def load_thinkvln_actor_model(
     model_path: str,
     device: str = "cuda",
@@ -210,12 +240,12 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
             else:
                 config.layer_types = ["full_attention"] * num_layers
 
-        model = StreamVLNForCausalLM.from_pretrained(
-            actual_base_model,
-            attn_implementation="flash_attention_2",
-            dtype=torch.bfloat16,
+        model = _load_streamvln_pretrained_model(
+            streamvln_cls=StreamVLNForCausalLM,
+            model_path=actual_base_model,
             config=config,
-            low_cpu_mem_usage=False,
+            dtype=torch.bfloat16,
+            prefer_flash_attention=bool(torch.cuda.is_available()),
         )
         if is_lora:
             model.resize_token_embeddings(len(tokenizer))
@@ -252,4 +282,5 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
 __all__ = [
     "load_thinkvln_actor_model",
     "build_nav_model",
+    "_load_streamvln_pretrained_model",
 ]

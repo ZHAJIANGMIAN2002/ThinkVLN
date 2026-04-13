@@ -22,45 +22,57 @@ def crop_cot_answer(answer: str) -> str:
     return answer
 
 
+# Sentinel value in action_chunk indicating subtask boundary (next subtask).
+# Distinct from STOP (0) which is true episode end.
+NEXT_SUBTASK_SENTINEL = -1
+
+
 def extract_action_chunk(
     frame_idx: int,
     actions: List[int],
     subtask_sequence: List[int],
-    num_steps: int = 4
+    num_steps: int = 4,
+    use_next_token: bool = False,
 ) -> Tuple[List[int], List[float]]:
     """
     Extract next N actions and progress values with subtask boundary handling.
-    
-    Returns (action_chunk, progress_chunk) where actions are padded with 0 (stop)
-    at subtask boundaries and progress is within-subtask progress [0.0-1.0].
+
+    Returns (action_chunk, progress_chunk).
+    - Episode end: action 0 (STOP).
+    - Subtask boundary: NEXT_SUBTASK_SENTINEL (-1) when use_next_token=True,
+      else 0 (backward-compatible STOP padding).
     """
     current_subtask = subtask_sequence[frame_idx]
     action_chunk = []
     progress_chunk = []
-    
-    # Get current subtask bounds
+
     subtask_frames = [i for i, s in enumerate(subtask_sequence) if s == current_subtask]
     subtask_start = min(subtask_frames)
     subtask_length = len(subtask_frames)
-    
+
+    hit_boundary = False
     for k in range(1, num_steps + 1):
         next_idx = frame_idx + k
-        
-        if next_idx >= len(actions):
-            # Beyond trajectory end
-            action_chunk.append(0)
+
+        if hit_boundary:
+            # After a subtask boundary or episode end, fill remaining slots
+            action_chunk.append(NEXT_SUBTASK_SENTINEL if use_next_token else 0)
             progress_chunk.append(1.0)
+        elif next_idx >= len(actions):
+            action_chunk.append(0)  # real STOP at episode end
+            progress_chunk.append(1.0)
+            hit_boundary = True
         elif next_idx >= len(subtask_sequence) or subtask_sequence[next_idx] != current_subtask:
-            # Crossed subtask boundary
-            action_chunk.append(0)
+            # First step that crosses into next subtask
+            action_chunk.append(NEXT_SUBTASK_SENTINEL if use_next_token else 0)
             progress_chunk.append(1.0)
+            hit_boundary = True
         else:
-            # Within same subtask
             action_chunk.append(actions[next_idx])
             position = next_idx - subtask_start
             progress = position / (subtask_length - 1) if subtask_length > 1 else 1.0
             progress_chunk.append(progress)
-    
+
     return action_chunk, progress_chunk
 
 
@@ -188,6 +200,47 @@ def select_memory_frame_indices(
     # Hard enforce in rare edge case.
     history = history[:max_history]
     return history
+
+
+def select_sliding_window_with_anchor(
+    frame_idx: int,
+    subtask_sequence: List[int],
+    num_memory_slots: int,
+) -> Tuple[int, List[int]]:
+    """
+    Select anchor frame (subtask start) + sliding window of history frames.
+
+    Returns (anchor_frame_idx, memory_frame_indices) where memory does NOT
+    include the anchor or current frame. Anchor is always the subtask start.
+    Window frames are uniformly sampled from (anchor+1, frame_idx).
+
+    This replaces the pre_anchor/post_anchor layout with a simpler design:
+    - 1 slot reserved for anchor
+    - remaining slots filled with evenly-strided frames within current subtask
+    """
+    current_idx = int(frame_idx)
+    anchor = get_subtask_start_frame(current_idx, subtask_sequence)
+    window_slots = max(0, int(num_memory_slots) - 1)  # 1 slot for anchor
+
+    candidates = list(range(anchor + 1, current_idx))
+    if not candidates or window_slots <= 0:
+        return anchor, []
+
+    take = min(window_slots, len(candidates))
+    positions = np.linspace(0, len(candidates) - 1, num=take, dtype=int).tolist()
+    window: List[int] = []
+    for p in positions:
+        idx = int(candidates[int(p)])
+        if idx not in window:
+            window.append(idx)
+    # Fill deduplication gaps
+    if len(window) < take:
+        for idx in candidates:
+            if idx not in window:
+                window.append(idx)
+            if len(window) == take:
+                break
+    return anchor, sorted(window[:take])
 
 
 def parse_frame_key(frame_key: str) -> Tuple[str, int]:

@@ -18,7 +18,22 @@ def compute_masked_progress_loss(progress_preds, progress_labels, ignore_value: 
     valid_progress = progress_labels != ignore_value
     if not valid_progress.any():
         return None
-    return nn.functional.mse_loss(progress_preds[valid_progress], progress_labels[valid_progress])
+    return nn.functional.l1_loss(progress_preds[valid_progress], progress_labels[valid_progress])
+
+
+def compute_masked_bins_progress_loss(
+    progress_logits: torch.Tensor,
+    progress_labels: torch.Tensor,
+    num_bins: int,
+    ignore_value: float = -100.0,
+) -> Optional[torch.Tensor]:
+    """Cross-entropy loss over discretised progress bins."""
+    progress_labels = progress_labels.to(progress_logits.device).reshape(-1)
+    valid = progress_labels != ignore_value
+    if not valid.any():
+        return None
+    bin_labels = (progress_labels[valid].float() * (num_bins - 1)).round().long().clamp(0, num_bins - 1)
+    return nn.functional.cross_entropy(progress_logits[valid], bin_labels)
 
 
 def compute_masked_done_loss(done_logits, done_labels, ignore_value: float = -100.0):
@@ -29,12 +44,79 @@ def compute_masked_done_loss(done_logits, done_labels, ignore_value: float = -10
     return nn.functional.binary_cross_entropy_with_logits(done_logits[valid_done], done_labels[valid_done])
 
 
+class GRUProgressHead(nn.Module):
+    """
+    GRU-based temporal progress and done predictor.
+
+    At training time the GRU hidden state defaults to zeros for each sample
+    (stateless mode). When a non-None gru_hidden is supplied the GRU operates
+    statelessly; pass the returned new_hidden across steps at inference time
+    for full temporal accumulation.
+
+    Args:
+        input_size: dimension of the pooled VLM hidden state.
+        hidden_size: GRU hidden dimension.
+        num_bins: 0 → continuous sigmoid regression; >0 → CE over that many bins.
+        dropout: applied to GRU output before the linear heads.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        num_bins: int = 0,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_bins = int(num_bins)
+        self.gru = nn.GRUCell(input_size, hidden_size)
+        self.dropout = nn.Dropout(dropout)
+        progress_out = self.num_bins if self.num_bins > 0 else 1
+        self.progress_linear = nn.Linear(hidden_size, progress_out)
+        self.done_linear = nn.Linear(hidden_size, 1)
+
+    def reset_recurrent_parameters(self) -> None:
+        self.gru.reset_parameters()
+
+    def forward(
+        self,
+        pooled_hidden: torch.Tensor,          # [B, input_size]
+        gru_hidden: Optional[torch.Tensor] = None,  # [B, hidden_size] or None
+    ):
+        """
+        Returns:
+            progress_logits: [B, num_bins] (bins) or [B] (continuous, after sigmoid)
+            done_logits:     [B]
+            new_hidden:      [B, hidden_size]  — pass back at inference
+        """
+        output_dtype = pooled_hidden.dtype
+        if gru_hidden is None:
+            gru_hidden = torch.zeros(
+                pooled_hidden.shape[0], self.hidden_size,
+                dtype=torch.float32, device=pooled_hidden.device,
+            )
+        compute_dtype = self.gru.weight_ih.dtype
+        pooled_hidden = pooled_hidden.to(compute_dtype)
+        gru_hidden = gru_hidden.to(compute_dtype)
+        with torch.autocast(device_type=pooled_hidden.device.type, enabled=False):
+            new_hidden = self.gru(pooled_hidden, gru_hidden)
+            h = self.dropout(new_hidden)
+            progress_logits = self.progress_linear(h)  # [B, num_bins] or [B, 1]
+            done_logits = self.done_linear(h).squeeze(-1)  # [B]
+        if self.num_bins == 0:
+            # continuous: return sigmoid scalar
+            progress_logits = torch.sigmoid(progress_logits.squeeze(-1))  # [B]
+        return progress_logits.to(output_dtype), done_logits.to(output_dtype), new_hidden.to(output_dtype)
+
+
 @dataclass
 class StreamVLNCausalLMOutputWithAux(CausalLMOutputWithPast):
     progress_preds: Optional[torch.FloatTensor] = None
     done_preds: Optional[torch.FloatTensor] = None
     progress_loss: Optional[torch.FloatTensor] = None
     done_loss: Optional[torch.FloatTensor] = None
+    gru_hidden_out: Optional[torch.FloatTensor] = None
 
 
 class StreamVLNModel(LlavaQwenModel):
@@ -71,23 +153,52 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         aux_hidden_size = int(getattr(config, "aux_hidden_size", config.hidden_size))
         aux_dropout = float(getattr(config, "aux_dropout", 0.1))
-        self.progress_head = nn.Sequential(
-            nn.Linear(config.hidden_size, aux_hidden_size),
-            nn.GELU(),
-            nn.Dropout(aux_dropout),
-            nn.Linear(aux_hidden_size, 1),
-        )
-        self.done_head = nn.Sequential(
-            nn.Linear(config.hidden_size, aux_hidden_size),
-            nn.GELU(),
-            nn.Dropout(aux_dropout),
-            nn.Linear(aux_hidden_size, 1),
-        )
+        self.use_gru_progress = bool(getattr(config, "use_gru_progress", False))
+        self.progress_num_bins = int(getattr(config, "progress_num_bins", 0))
+
+        if self.use_gru_progress:
+            self.gru_progress_head = GRUProgressHead(
+                input_size=config.hidden_size,
+                hidden_size=aux_hidden_size,
+                num_bins=self.progress_num_bins,
+                dropout=aux_dropout,
+            )
+            # Legacy attribute aliases so old code paths don't break
+            self.progress_head = self.gru_progress_head.progress_linear
+            self.done_head = self.gru_progress_head.done_linear
+        else:
+            self.progress_head = nn.Sequential(
+                nn.Linear(config.hidden_size, aux_hidden_size),
+                nn.GELU(),
+                nn.Dropout(aux_dropout),
+                nn.Linear(aux_hidden_size, 1),
+            )
+            self.done_head = nn.Sequential(
+                nn.Linear(config.hidden_size, aux_hidden_size),
+                nn.GELU(),
+                nn.Dropout(aux_dropout),
+                nn.Linear(aux_hidden_size, 1),
+            )
         self.progress_loss_weight = float(getattr(config, "progress_loss_weight", 1.0))
         self.done_loss_weight = float(getattr(config, "done_loss_weight", 1.0))
 
         # Initialize weights and apply final processing
         self.post_init()
+        if self.use_gru_progress:
+            self.gru_progress_head.reset_recurrent_parameters()
+
+    def ensure_gru_recurrent_parameters(self) -> None:
+        if not self.use_gru_progress:
+            return
+        gru = self.gru_progress_head.gru
+        with torch.no_grad():
+            has_non_finite = any(not torch.isfinite(param).all() for param in gru.parameters())
+            all_zero_weights = (
+                torch.count_nonzero(gru.weight_ih).item() == 0
+                and torch.count_nonzero(gru.weight_hh).item() == 0
+            )
+        if has_non_finite or all_zero_weights:
+            self.gru_progress_head.reset_recurrent_parameters()
 
     @staticmethod
     def _ensure_rgbd_modalities(
@@ -555,14 +666,34 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             labels=labels,
         )
 
-        progress_logits = self.progress_head(pooled_hidden).squeeze(-1)
-        done_logits = self.done_head(pooled_hidden).squeeze(-1)
-        progress_preds = torch.sigmoid(progress_logits)
-        done_preds = torch.sigmoid(done_logits)
+        gru_hidden_in = kwargs.get("gru_hidden", None)
+
+        if self.use_gru_progress:
+            progress_out, done_logits, gru_hidden_out = self.gru_progress_head(
+                pooled_hidden, gru_hidden=gru_hidden_in
+            )
+            if self.progress_num_bins > 0:
+                # bins mode: progress_out is logits [B, num_bins]
+                bin_centers = torch.linspace(0, 1, self.progress_num_bins, device=pooled_hidden.device)
+                progress_preds = (torch.softmax(progress_out.float(), dim=-1) * bin_centers).sum(-1).to(pooled_hidden.dtype)
+            else:
+                progress_preds = progress_out  # already sigmoid scalar
+            done_preds = torch.sigmoid(done_logits)
+        else:
+            gru_hidden_out = None
+            progress_out = self.progress_head(pooled_hidden).squeeze(-1)
+            done_logits = self.done_head(pooled_hidden).squeeze(-1)
+            progress_preds = torch.sigmoid(progress_out)
+            done_preds = torch.sigmoid(done_logits)
 
         progress_loss = None
         if progress_labels is not None:
-            progress_loss = compute_masked_progress_loss(progress_preds, progress_labels)
+            if self.use_gru_progress and self.progress_num_bins > 0:
+                progress_loss = compute_masked_bins_progress_loss(
+                    progress_out, progress_labels, num_bins=self.progress_num_bins
+                )
+            else:
+                progress_loss = compute_masked_progress_loss(progress_preds, progress_labels)
 
         done_loss = None
         if done_labels is not None:
@@ -587,6 +718,7 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             done_preds=done_preds,
             progress_loss=progress_loss,
             done_loss=done_loss,
+            gru_hidden_out=gru_hidden_out,
         )
         if return_dict is False:
             return aux_outputs.to_tuple()
@@ -602,7 +734,9 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         intrinsics: torch.FloatTensor,
         time_ids: Optional[List[List[int]]] = None,
         task_type: Optional[List[int]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        gru_hidden: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """Returns (progress_preds, done_preds, new_gru_hidden)."""
         outputs = self.forward(
             input_ids=input_ids,
             images=images,
@@ -613,8 +747,9 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             task_type=task_type,
             output_aux=True,
             return_dict=True,
+            gru_hidden=gru_hidden,
         )
-        return outputs.progress_preds, outputs.done_preds
+        return outputs.progress_preds, outputs.done_preds, outputs.gru_hidden_out
     
     @torch.no_grad()
     def generate(

@@ -16,3 +16,6 @@ def test_build_streamvln_actor_dataset_script_runs_help_from_repo_root():
     )
 
     assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "--use_next_token" in completed.stdout
+    assert "--use_sliding_window" in completed.stdout
+    assert "--action_history_len" in completed.stdout

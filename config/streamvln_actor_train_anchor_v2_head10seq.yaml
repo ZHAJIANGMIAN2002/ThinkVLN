@@ -2,9 +2,9 @@ model:
   model_name_or_path: "/mnt/swx/ThinkVLN/model_weights/streamvln"
   model_type: "streamvln_actor"
   progress_loss_weight: 4.0
-  done_loss_weight: 1.5
-  use_gru_progress: true      # GRU progress/done head (false = legacy MLP)
-  progress_num_bins: 0        # 0 = sigmoid regression; 11 = bin CE (parallel experiment)
+  done_loss_weight: 0.0
+  use_gru_progress: true
+  progress_num_bins: 0
   use_pos_skipping: false
   pos_skipping_range: 4096
   mm_newline_position: "grid"
@@ -17,7 +17,7 @@ model:
   bits: 16
 
 data:
-  summary_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/streamvln_actor_train_anchor.jsonl"
+  summary_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/streamvln_actor_train_anchor_v2_head10seq.jsonl"
   watcher_memory_path: null
   watcher_memory_ratio: 0.25
   watcher_memory_seed: 42
@@ -28,17 +28,19 @@ data:
   num_future_steps: 4
   done_threshold: 0.85
   max_samples: null
-  use_next_token: true         # <next> token at subtask boundaries instead of fake STOP
-  use_sliding_window: true     # anchor + sliding window memory layout
-  subtask_noise_prob: 0.15     # probability of injecting wrong subtask label
+  use_next_token: true
+  use_sliding_window: true
+  subtask_noise_prob: 0.0
+  use_sequential_subtask_sampler: true
+  action_history_len: 8
 
 training:
-  output_dir: "/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_anchor_full_lora_v1"
+  output_dir: "/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_anchor_v2_head10seq"
   num_train_epochs: 1
-  max_steps: -1
+  max_steps: 20
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 1
   learning_rate: 2.0e-4
   weight_decay: 0.0
   warmup_ratio: 0.03
@@ -48,33 +50,27 @@ training:
   fp16: false
   tf32: true
   gradient_checkpointing: true
-  logging_steps: 20
+  logging_steps: 1
   logging_first_step: true
-  eval_strategy: "steps"
-  eval_steps: 5000
-  save_steps: 2000
-  save_total_limit: 3
-  dataloader_num_workers: 4
+  eval_strategy: "no"
+  save_steps: 100
+  save_total_limit: 1
+  dataloader_num_workers: 0
   dataloader_pin_memory: true
   seed: 42
   ddp_find_unused_parameters: false
   ddp_backend: "nccl"
-  deepspeed: "config/zero2.json"
   remove_unused_columns: false
   attn_implementation: "flash_attention_2"
 
 logging:
-  report_to: ["wandb"]
-  run_name: "streamvln-actor-anchor-full-v1"
-  logging_dir: "/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_anchor_full_lora_v1/runs"
-  wandb:
-    project: "ThinkVLN"
-    mode: "online"
-    tags: ["streamvln_actor", "anchor", "full"]
+  report_to: "none"
+  run_name: "streamvln-actor-anchor-v2-head10seq"
+  logging_dir: "/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_anchor_v2_head10seq/runs"
 
 runtime:
-  gpus: "0,1,2,3"
-  master_port: 29513
+  gpus: "0"
+  master_port: 29524
   env:
     TOKENIZERS_PARALLELISM: "false"
     HF_HUB_OFFLINE: "1"

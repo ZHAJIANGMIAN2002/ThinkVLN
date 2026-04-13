@@ -16,6 +16,8 @@ MEMORY_TOKEN_INDEX = -300
 DEFAULT_MEMORY_TOKEN = "<memory>"
 ANCHOR_TOKEN_INDEX = -400
 DEFAULT_ANCHOR_TOKEN = "<anchor>"
+NEXT_SUBTASK_TOKEN_INDEX = -500
+DEFAULT_NEXT_TOKEN = "<next>"
 
 SHORT_QUESTION_LIST = [
     DEFAULT_IMAGE_TOKEN + "\n" + "Can you segment the {class_name} in this image?",

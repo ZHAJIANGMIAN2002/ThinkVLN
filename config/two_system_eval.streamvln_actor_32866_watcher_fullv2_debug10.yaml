@@ -1,0 +1,58 @@
+actor:
+  model_type: "streamvln_actor"
+  model_path: "/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_full_lora/checkpoint-32866"
+  base_model_path: "/mnt/swx/ThinkVLN/model_weights/streamvln"
+  device: "cuda"
+  memory_num_history_images: 8
+  done_threshold: 0.85
+  num_frames: 32
+  num_future_steps: 4
+  num_history: 8
+
+watcher:
+  backend: "local"
+  model_name: "qwen3vl-8"
+  model_path: "/mnt/swx/ThinkVLN/outputs/watcher/lora/qwen3vl8-fullv2-streamv2"
+  base_model_path: null
+  image_stride: 3
+  api_base_url: ""
+  api_key_env: "OPENROUTER_API_KEY"
+  reasoning_effort: "none"
+  request_timeout: 180.0
+  max_retries: 3
+
+env:
+  habitat_config_path: "config/vln_r2r.yaml"
+  summary_full_path: "/mnt/swx/ThinkVLN/data/trajectory_data/R2R_back/summary_full.jsonl"
+  eval_split: "train"
+  sample_rate: 1.0
+  target_episode_key: ""
+
+rollout:
+  max_steps_per_wakeup: 10
+  progress_threshold: 0.85
+  max_watcher_wakeups: 10
+  episode_step_cap: 80
+  forbidden_actions: []
+
+output:
+  output_dir: "results/two_system_eval/streamvln_actor_32866_watcher_fullv2_debug10"
+  save_trace_jsonl: true
+  save_summary_json: true
+  save_step_debug_html: true
+  save_debug_video: true
+  debug_video_fps: 2
+
+debug:
+  enabled: true
+  episode_key: ""
+  sample_limit: 10
+  sample_seed: 0
+  output_dir: "results/two_system_eval/streamvln_actor_32866_watcher_fullv2_debug10"
+  video_fps: 2
+
+runtime:
+  log_level: "INFO"
+  world_size: 1
+  dist_url: "env://"
+  dist_timeout_minutes: 120

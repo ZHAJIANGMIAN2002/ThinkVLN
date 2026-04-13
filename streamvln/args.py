@@ -11,6 +11,8 @@ class ModelArguments:
     model_type: Optional[str] = field(default="streamvln")
     progress_loss_weight: float = field(default=1.0)
     done_loss_weight: float = field(default=1.0)
+    use_gru_progress: bool = field(default=False)
+    progress_num_bins: int = field(default=0)
 
     mm_tunable_parts: Optional[str] = field(
         default=None, metadata={"help": 'Could be "mm_mlp_adapter", "mm_vision_resampler", "mm_vision_tower,mm_mlp_adapter,mm_language_model", "mm_vision_tower,mm_mlp_adapter,mm_language_model", "mm_mlp_adapter,mm_language_model"'}
@@ -105,6 +107,11 @@ class DataArguments:
     val_split_ratio: float = field(default=0.0)
     memory_post_anchor_count: Optional[int] = field(default=None)
     memory_pre_anchor_count: Optional[int] = field(default=None)
+    use_next_token: bool = field(default=False)
+    use_sliding_window: bool = field(default=False)
+    subtask_noise_prob: float = field(default=0.0)
+    use_sequential_subtask_sampler: bool = field(default=False)
+    action_history_len: int = field(default=8)
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):

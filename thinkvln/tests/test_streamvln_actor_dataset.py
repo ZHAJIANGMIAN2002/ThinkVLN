@@ -7,6 +7,7 @@ import torch
 from PIL import Image
 
 from streamvln.dataset.streamvln_actor_dataset import (
+    SequentialSubtaskSampler,
     StreamVLNActorDataset,
     _tokenize_actor_sample,
     build_materialized_streamvln_actor_records,
@@ -15,6 +16,7 @@ from streamvln.dataset.streamvln_actor_dataset import (
     streamvln_actor_collate_fn,
 )
 from streamvln.utils.utils import ANCHOR_TOKEN_INDEX
+from thinkvln.tools.dataset_utils import NEXT_SUBTASK_SENTINEL
 
 
 def _write_jsonl(path: Path, rows):
@@ -182,6 +184,88 @@ def test_build_materialized_streamvln_actor_records_prefers_r2r_frame_dir_when_p
     frame1 = next(record for record in records if record["frame_idx"] == 1)
     assert frame1["anchor_image_path"].endswith("/R2R_back/r2r/scene_r2r_000001/000000_rgb.jpg")
     assert frame1["image_path"].endswith("/R2R_back/r2r/scene_r2r_000001/000001_rgb.jpg")
+
+
+def test_build_materialized_streamvln_actor_records_supports_v2_fields(tmp_path: Path):
+    summary_path = tmp_path / "summary.jsonl"
+    _write_jsonl(
+        summary_path,
+        [
+            {
+                "episode_key": "scene_00001",
+                "num_frames": 5,
+                "instruction": "Walk to the sink.",
+                "plan": ["Go down the hall.", "Stop at the sink."],
+                "actions": [1, 1, 2, 1, 0],
+                "subtask_sequence": [1, 1, 1, 1, 2],
+                "video": "images/scene_r2r_000001",
+            }
+        ],
+    )
+
+    records = build_materialized_streamvln_actor_records(
+        summary_specs=[
+            {"dataset_name": "r2r", "summary_path": str(summary_path), "image_root": "/tmp/r2r"},
+        ],
+        memory_num_history_images=3,
+        memory_pre_anchor_count=1,
+        memory_post_anchor_count=2,
+        use_next_token=True,
+        use_sliding_window=True,
+        action_history_len=2,
+        seed=0,
+    )
+
+    row = next(record for record in records if record["frame_idx"] == 3)
+
+    assert row["action_labels"] == [NEXT_SUBTASK_SENTINEL] * 4
+    assert row["next_subtask"] == "Stop at the sink."
+    assert row["subtask_position"] == "1/2"
+    assert row["steps_in_subtask"] == 3
+    assert row["action_history_str"] == "↑ ←"
+    assert row["subtask_idx"] == 0
+    assert row["anchor_frame_idx"] == 0
+    assert row["history_frame_indices"] == [1, 2]
+
+
+def test_sequential_subtask_sampler_orders_subset_by_subtask_and_frame():
+    class _Dataset:
+        samples = [
+            {"episode_key": "ep1", "subtask_position": "1/2", "frame_idx": 1},
+            {"episode_key": "ep1", "subtask_position": "1/2", "frame_idx": 0},
+            {"episode_key": "ep1", "subtask_position": "2/2", "frame_idx": 3},
+            {"episode_key": "ep1", "subtask_position": "2/2", "frame_idx": 2},
+        ]
+
+        def __len__(self):
+            return len(self.samples)
+
+    subset = torch.utils.data.Subset(_Dataset(), [0, 1, 2, 3])
+
+    sampler = SequentialSubtaskSampler(subset, shuffle=False, seed=0)
+
+    assert list(iter(sampler)) == [1, 0, 3, 2]
+
+
+def test_sequential_subtask_sampler_returns_subset_relative_indices():
+    class _Dataset:
+        samples = [
+            {"episode_key": "ep0", "subtask_position": "1/1", "frame_idx": 0},
+            {"episode_key": "ep0", "subtask_position": "1/1", "frame_idx": 1},
+            {"episode_key": "ep1", "subtask_position": "1/2", "frame_idx": 1},
+            {"episode_key": "ep1", "subtask_position": "1/2", "frame_idx": 0},
+            {"episode_key": "ep1", "subtask_position": "2/2", "frame_idx": 3},
+            {"episode_key": "ep1", "subtask_position": "2/2", "frame_idx": 2},
+        ]
+
+        def __len__(self):
+            return len(self.samples)
+
+    subset = torch.utils.data.Subset(_Dataset(), [2, 3, 4, 5])
+
+    sampler = SequentialSubtaskSampler(subset, shuffle=False, seed=0)
+
+    assert list(iter(sampler)) == [1, 0, 3, 2]
 
 
 def test_build_streamvln_actor_prompt_formats_optional_hint():

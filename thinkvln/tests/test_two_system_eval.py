@@ -576,7 +576,7 @@ class TestTwoSystemEval:
             rollout_actions=["forward", "turn_right"],
         )
 
-        assert '{"memory":"...","done":false,"subtask":"..."}' in init_prompt.system_prompt
+        assert '{"memory_end":"...","done":true/false,"next_subtask":"..."}' in init_prompt.system_prompt
         assert '{"memory":"...","done":true/false,"subtask":"..."}' in update_prompt.system_prompt
         assert "Plan" in init_prompt.user_text
         assert "Done" in update_prompt.user_text
@@ -1263,6 +1263,32 @@ class TestTwoSystemEval:
         assert "Active Step</th>" not in html
         assert "Watcher Hint</th>" not in html
 
+    def test_write_debug_html_accepts_missing_actor_progress(self, tmp_path: Path, monkeypatch):
+        html_path = tmp_path / "debug" / "ep.html"
+        two_system_eval._write_debug_html(
+            html_path,
+            {
+                "episode_key": "scene_none_progress",
+                "trace": {
+                    "steps": [
+                        {
+                            "step_index": 0,
+                            "env_step_index": 0,
+                            "action": "forward",
+                            "actor_progress": None,
+                            "actor_done": False,
+                            "actor_prompt": "prompt",
+                        }
+                    ],
+                    "watcher_events": [],
+                },
+            },
+        )
+        html = html_path.read_text(encoding="utf-8")
+        assert "scene_none_progress" in html
+        assert "forward" in html
+        assert "<td></td>" in html
+
         sections = two_system_eval._build_debug_video_sections(
             episode_key="scene_1",
             step={
@@ -1289,6 +1315,20 @@ class TestTwoSystemEval:
         assert "Actor Input: Instruction: go to the sink" not in flat_lines
         assert "Actor Input: Subtask: reach door" not in flat_lines
         assert "Actor Input: Hint: hint" not in flat_lines
+        none_sections = two_system_eval._build_debug_video_sections(
+            episode_key="scene_none_progress",
+            step={
+                "step_index": 1,
+                "env_step_index": 1,
+                "action": "forward",
+                "actor_progress": None,
+                "actor_done": False,
+                "actor_prompt": "prompt",
+            },
+            watcher_event=None,
+        )
+        none_flat_lines = "\n".join(f"{title}: {label}: {value}" for title, fields in none_sections for label, value in fields)
+        assert "Actor Output: Progress: " in none_flat_lines
 
         captured = {}
 

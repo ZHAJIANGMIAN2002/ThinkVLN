@@ -3,8 +3,8 @@ model:
   model_type: "streamvln_actor"
   progress_loss_weight: 4.0
   done_loss_weight: 1.5
-  use_gru_progress: true      # GRU progress/done head (false = legacy MLP)
-  progress_num_bins: 0        # 0 = sigmoid regression; 11 = bin CE (parallel experiment)
+  use_gru_progress: true
+  progress_num_bins: 0
   use_pos_skipping: false
   pos_skipping_range: 4096
   mm_newline_position: "grid"
@@ -17,7 +17,7 @@ model:
   bits: 16
 
 data:
-  summary_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/streamvln_actor_train_anchor.jsonl"
+  summary_data_path: "/mnt/swx/ThinkVLN/data/trajectory_data/streamvln_actor_train_anchor_v2.jsonl"
   watcher_memory_path: null
   watcher_memory_ratio: 0.25
   watcher_memory_seed: 42
@@ -28,12 +28,14 @@ data:
   num_future_steps: 4
   done_threshold: 0.85
   max_samples: null
-  use_next_token: true         # <next> token at subtask boundaries instead of fake STOP
-  use_sliding_window: true     # anchor + sliding window memory layout
-  subtask_noise_prob: 0.15     # probability of injecting wrong subtask label
+  use_next_token: true
+  use_sliding_window: true
+  subtask_noise_prob: 0.15
+  use_sequential_subtask_sampler: true
+  action_history_len: 8
 
 training:
-  output_dir: "/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_anchor_full_lora_v1"
+  output_dir: "/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_anchor_full_lora_v2"
   num_train_epochs: 1
   max_steps: -1
   per_device_train_batch_size: 1
@@ -65,16 +67,16 @@ training:
 
 logging:
   report_to: ["wandb"]
-  run_name: "streamvln-actor-anchor-full-v1"
-  logging_dir: "/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_anchor_full_lora_v1/runs"
+  run_name: "streamvln-actor-anchor-v2"
+  logging_dir: "/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_anchor_full_lora_v2/runs"
   wandb:
     project: "ThinkVLN"
     mode: "online"
-    tags: ["streamvln_actor", "anchor", "full"]
+    tags: ["streamvln_actor", "anchor", "v2"]
 
 runtime:
   gpus: "0,1,2,3"
-  master_port: 29513
+  master_port: 29514
   env:
     TOKENIZERS_PARALLELISM: "false"
     HF_HUB_OFFLINE: "1"

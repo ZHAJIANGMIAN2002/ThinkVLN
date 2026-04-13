@@ -154,3 +154,39 @@ def test_build_streamvln_train_argv_fills_vision_tower_from_model_config(tmp_pat
     assert "--vision_tower" in argv
     vision_idx = argv.index("--vision_tower")
     assert argv[vision_idx + 1] == "google/siglip-so400m-patch14-384"
+
+
+def test_build_streamvln_train_argv_includes_v2_actor_flags():
+    module = _load_script_module()
+    config = {
+        "model": {
+            "model_name_or_path": "/models/streamvln",
+            "model_type": "streamvln_actor",
+            "use_gru_progress": True,
+            "progress_num_bins": 11,
+        },
+        "data": {
+            "summary_data_path": "/data/train_v2.jsonl",
+            "use_next_token": True,
+            "use_sliding_window": True,
+            "subtask_noise_prob": 0.15,
+            "use_sequential_subtask_sampler": True,
+            "action_history_len": 6,
+        },
+        "training": {
+            "output_dir": "/outputs/actor_v2",
+        },
+    }
+
+    argv = module.build_streamvln_train_argv(config)
+
+    assert "--use_gru_progress" in argv
+    assert "--progress_num_bins" in argv
+    assert "11" in argv
+    assert "--use_next_token" in argv
+    assert "--use_sliding_window" in argv
+    assert "--subtask_noise_prob" in argv
+    assert "0.15" in argv
+    assert "--use_sequential_subtask_sampler" in argv
+    assert "--action_history_len" in argv
+    assert "6" in argv

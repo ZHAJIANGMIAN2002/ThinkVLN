@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 import torch
 from PIL import Image
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 from streamvln.dataset.streamvln_actor_history_layout import select_anchor_memory_layout
 from streamvln.utils.utils import (
@@ -22,10 +22,13 @@ from streamvln.utils.utils import (
 from thinkvln.datagen.generation.watcher_actor_memory_dataset import parse_sample_id_to_episode_frame
 from thinkvln.dataset.dataset import _episode_key_to_dir_key
 from thinkvln.tools.dataset_utils import (
+    NEXT_SUBTASK_SENTINEL,
     compute_current_step_progress,
     compute_done_label,
     compute_previous_step_progress,
     extract_action_chunk,
+    get_subtask_start_frame,
+    select_sliding_window_with_anchor,
 )
 
 
@@ -34,6 +37,7 @@ INT_ACTION_TO_SYMBOL = {
     1: "↑",
     2: "←",
     3: "→",
+    NEXT_SUBTASK_SENTINEL: "<next>",  # subtask boundary transition
 }
 
 
@@ -90,12 +94,20 @@ def build_streamvln_actor_prompt(
     watcher_hint: Optional[str] = None,
     include_visual_memory: bool = False,
     include_anchor_frame: bool = False,
+    next_subtask: Optional[str] = None,
+    subtask_position: Optional[str] = None,
+    action_history: Optional[str] = None,
+    steps_in_subtask: Optional[int] = None,
 ) -> str:
     lines = [
         "<image>",
         f"Instruction: {str(instruction or '').strip()}",
-        f"Current subtask: {str(subtask or '').strip()}",
     ]
+    pos_str = f" ({subtask_position})" if subtask_position else ""
+    lines.append(f"Current subtask{pos_str}: {str(subtask or '').strip()}")
+    next_text = str(next_subtask or "").strip()
+    if next_text:
+        lines.append(f"Next subtask: {next_text}")
     if include_anchor_frame:
         lines.append(f"Subtask start observation: {DEFAULT_ANCHOR_TOKEN}")
     hint_text = str(watcher_hint or "").strip()
@@ -103,7 +115,12 @@ def build_streamvln_actor_prompt(
         lines.append(f"Watcher hint: {hint_text}")
     if include_visual_memory:
         lines.append(f"Historical observations: {DEFAULT_MEMORY_TOKEN}")
-    lines.append("Predict the next 4 actions using STOP, ↑, ←, →.")
+    action_hist_text = str(action_history or "").strip()
+    if action_hist_text:
+        lines.append(f"Recent actions: {action_hist_text}")
+    if steps_in_subtask is not None:
+        lines.append(f"Steps in current subtask: {int(steps_in_subtask)}")
+    lines.append("Predict the next 4 actions using STOP, ↑, ←, →, <next>.")
     return "\n".join(lines)
 
 
@@ -141,7 +158,15 @@ def _resolve_sparse_history_indices(
     memory_num_history_images: int,
     memory_post_anchor_count: int,
     memory_pre_anchor_count: int,
+    use_sliding_window: bool = False,
 ) -> List[int]:
+    if use_sliding_window:
+        _anchor, window = select_sliding_window_with_anchor(
+            frame_idx=frame_idx,
+            subtask_sequence=subtask_sequence,
+            num_memory_slots=memory_num_history_images,
+        )
+        return window
     del memory_num_history_images
     layout = select_anchor_memory_layout(
         frame_idx=frame_idx,
@@ -308,6 +333,9 @@ def _build_actor_sample(
     memory_num_history_images: int = 0,
     memory_post_anchor_count: int = 0,
     memory_pre_anchor_count: int = 0,
+    use_next_token: bool = False,
+    use_sliding_window: bool = False,
+    action_history_len: int = 8,
 ) -> Dict:
     episode_key = str(traj["episode_key"])
     instruction = str(traj.get("instruction", ""))
@@ -317,11 +345,31 @@ def _build_actor_sample(
     subtask_idx = max(1, int(subtask_sequence[frame_idx]))
     plan_idx = min(subtask_idx - 1, len(plan) - 1)
     subtask = plan[plan_idx]
+
+    # Next subtask (empty string for last subtask)
+    next_subtask = plan[plan_idx + 1] if plan_idx + 1 < len(plan) else ""
+
+    # Subtask position string e.g. "2/5"
+    subtask_position = f"{subtask_idx}/{len(plan)}" if plan else ""
+
+    # Steps taken so far in current subtask
+    subtask_start = get_subtask_start_frame(frame_idx, subtask_sequence)
+    steps_in_subtask = max(0, frame_idx - subtask_start)
+
+    # Action history: last action_history_len actions before current frame
+    normalized_actions = [_normalize_action_id(a) for a in actions]
+    history_start = max(0, frame_idx - action_history_len)
+    action_history_ids = normalized_actions[history_start:frame_idx]
+    action_history_str = " ".join(
+        INT_ACTION_TO_SYMBOL.get(a, "STOP") for a in action_history_ids
+    ) if action_history_ids else ""
+
     action_labels, _ = extract_action_chunk(
         frame_idx=frame_idx,
-        actions=[_normalize_action_id(action) for action in actions],
+        actions=normalized_actions,
         subtask_sequence=subtask_sequence,
         num_steps=4,
+        use_next_token=use_next_token,
     )
     progress_label = compute_current_step_progress(frame_idx, subtask_sequence)
     previous_progress = compute_previous_step_progress(frame_idx, subtask_sequence)
@@ -338,18 +386,35 @@ def _build_actor_sample(
         memory_num_history_images=memory_num_history_images,
         memory_post_anchor_count=memory_post_anchor_count,
         memory_pre_anchor_count=memory_pre_anchor_count,
+        use_sliding_window=use_sliding_window,
     )
+
+    # Anchor: sliding window uses subtask start; legacy layout uses history_layout
+    if use_sliding_window:
+        anchor_frame_idx_resolved, _ = select_sliding_window_with_anchor(
+            frame_idx=frame_idx,
+            subtask_sequence=subtask_sequence,
+            num_memory_slots=memory_num_history_images,
+        )
+    else:
+        anchor_frame_idx_resolved = int(history_layout.anchor_frame_idx)
     sample = {
         "episode_key": episode_key,
         "frame_idx": int(frame_idx),
         "instruction": instruction,
+        "plan": plan,
         "subtask": subtask,
+        "subtask_idx": int(plan_idx),
+        "next_subtask": next_subtask,
+        "subtask_position": subtask_position,
+        "steps_in_subtask": int(steps_in_subtask),
+        "action_history_str": action_history_str,
         "watcher_hint": str(watcher_hint).strip() if str(watcher_hint or "").strip() else None,
         "action_labels": list(action_labels),
         "progress_label": float(progress_label),
         "previous_progress": float(previous_progress),
         "done_label": float(done_label),
-        "anchor_frame_idx": int(history_layout.anchor_frame_idx),
+        "anchor_frame_idx": int(anchor_frame_idx_resolved),
         "history_frame_indices": list(history_frame_indices),
         "pre_anchor_history_frame_indices": list(history_layout.pre_anchor_frame_indices),
         "post_anchor_history_frame_indices": list(history_layout.post_anchor_frame_indices),
@@ -360,7 +425,7 @@ def _build_actor_sample(
         sample["anchor_image_path"] = _materialized_frame_to_image_path(
             image_root=image_root,
             traj=traj,
-            frame_idx=int(history_layout.anchor_frame_idx),
+            frame_idx=int(anchor_frame_idx_resolved),
             dataset_name=dataset_name,
         )
         sample["image_path"] = _materialized_frame_to_image_path(
@@ -465,6 +530,9 @@ def load_streamvln_actor_samples(
     memory_post_anchor_count: Optional[int] = None,
     memory_pre_anchor_count: Optional[int] = None,
     seed: int = 42,
+    use_next_token: bool = False,
+    use_sliding_window: bool = False,
+    action_history_len: int = 8,
 ) -> List[Dict]:
     rows = _load_jsonl(summary_path)
     if rows and _materialized_actor_row(rows[0]):
@@ -507,13 +575,16 @@ def load_streamvln_actor_samples(
                     memory_num_history_images=memory_num_history_images,
                     memory_post_anchor_count=resolved_post,
                     memory_pre_anchor_count=resolved_pre,
+                    use_next_token=use_next_token,
+                    use_sliding_window=use_sliding_window,
+                    action_history_len=action_history_len,
                 )
             )
 
     return samples
 
 
-def build_materialized_streamvln_actor_records(
+def iter_materialized_streamvln_actor_records(
     summary_specs: List[Dict],
     watcher_memory_path: Optional[str] = None,
     watcher_memory_ratio: float = 1.0,
@@ -522,9 +593,11 @@ def build_materialized_streamvln_actor_records(
     memory_post_anchor_count: Optional[int] = None,
     memory_pre_anchor_count: Optional[int] = None,
     seed: int = 42,
+    use_next_token: bool = False,
+    use_sliding_window: bool = False,
+    action_history_len: int = 8,
 ) -> List[Dict]:
     watcher_hints = _load_watcher_hints(watcher_memory_path, watcher_memory_ratio, seed)
-    records: List[Dict] = []
     total_history = max(0, int(memory_num_history_images))
     default_pre = min(2, total_history)
     resolved_pre = default_pre if memory_pre_anchor_count is None else max(0, int(memory_pre_anchor_count))
@@ -545,20 +618,50 @@ def build_materialized_streamvln_actor_records(
                 continue
             episode_key = str(traj["episode_key"])
             for frame_idx in range(min(num_frames, len(subtask_sequence))):
-                records.append(
-                    _build_actor_sample(
-                        traj=traj,
-                        frame_idx=frame_idx,
-                        done_threshold=done_threshold,
-                        watcher_hint=watcher_hints.get((episode_key, frame_idx)),
-                        dataset_name=dataset_name or None,
-                        image_root=image_root or None,
-                        memory_num_history_images=memory_num_history_images,
-                        memory_post_anchor_count=resolved_post,
-                        memory_pre_anchor_count=resolved_pre,
-                    )
+                yield _build_actor_sample(
+                    traj=traj,
+                    frame_idx=frame_idx,
+                    done_threshold=done_threshold,
+                    watcher_hint=watcher_hints.get((episode_key, frame_idx)),
+                    dataset_name=dataset_name or None,
+                    image_root=image_root or None,
+                    memory_num_history_images=memory_num_history_images,
+                    memory_post_anchor_count=resolved_post,
+                    memory_pre_anchor_count=resolved_pre,
+                    use_next_token=use_next_token,
+                    use_sliding_window=use_sliding_window,
+                    action_history_len=action_history_len,
                 )
-    return records
+
+
+def build_materialized_streamvln_actor_records(
+    summary_specs: List[Dict],
+    watcher_memory_path: Optional[str] = None,
+    watcher_memory_ratio: float = 1.0,
+    done_threshold: float = 0.85,
+    memory_num_history_images: int = 0,
+    memory_post_anchor_count: Optional[int] = None,
+    memory_pre_anchor_count: Optional[int] = None,
+    seed: int = 42,
+    use_next_token: bool = False,
+    use_sliding_window: bool = False,
+    action_history_len: int = 8,
+) -> List[Dict]:
+    return list(
+        iter_materialized_streamvln_actor_records(
+            summary_specs=summary_specs,
+            watcher_memory_path=watcher_memory_path,
+            watcher_memory_ratio=watcher_memory_ratio,
+            done_threshold=done_threshold,
+            memory_num_history_images=memory_num_history_images,
+            memory_post_anchor_count=memory_post_anchor_count,
+            memory_pre_anchor_count=memory_pre_anchor_count,
+            seed=seed,
+            use_next_token=use_next_token,
+            use_sliding_window=use_sliding_window,
+            action_history_len=action_history_len,
+        )
+    )
 
 
 def _replace_special_token_ids(tokenizer, input_ids: torch.Tensor) -> torch.Tensor:
@@ -578,7 +681,7 @@ def _replace_special_token_ids(tokenizer, input_ids: torch.Tensor) -> torch.Tens
 def _tokenize_actor_sample(tokenizer, prompt_text: str, target_text: str):
     tokenizer = copy.deepcopy(tokenizer)
     if hasattr(tokenizer, "add_tokens"):
-        tokenizer.add_tokens(["<image>", "<anchor>", "<memory>"], special_tokens=True)
+        tokenizer.add_tokens(["<image>", "<anchor>", "<memory>", "<next>"], special_tokens=True)
 
     prompt_messages = [{"role": "user", "content": prompt_text}]
     full_messages = prompt_messages + [{"role": "assistant", "content": target_text}]
@@ -638,6 +741,13 @@ class StreamVLNActorDataset(Dataset):
                 or 0
             ),
         )
+        self.use_next_token = bool(getattr(data_args, "use_next_token", False))
+        self.use_sliding_window = bool(getattr(data_args, "use_sliding_window", False))
+        self.subtask_noise_prob = float(getattr(data_args, "subtask_noise_prob", 0.0))
+        self.action_history_len = int(getattr(data_args, "action_history_len", 8) or 8)
+        self.use_sequential_subtask_sampler = bool(
+            getattr(data_args, "use_sequential_subtask_sampler", False)
+        )
         summary_path = str(getattr(data_args, "summary_data_path", "") or "")
         if not summary_path:
             summary_path = str(getattr(data_args, "data_path", "") or "")
@@ -653,6 +763,9 @@ class StreamVLNActorDataset(Dataset):
             memory_post_anchor_count=self.memory_post_anchor_count,
             memory_pre_anchor_count=self.memory_pre_anchor_count,
             seed=int(getattr(data_args, "watcher_memory_seed", 42)),
+            use_next_token=self.use_next_token,
+            use_sliding_window=self.use_sliding_window,
+            action_history_len=self.action_history_len,
         )
 
     def __len__(self):
@@ -712,12 +825,29 @@ class StreamVLNActorDataset(Dataset):
     def __getitem__(self, index: int) -> Dict:
         sample = self.samples[index]
         include_visual_memory = self.memory_num_history_images > 0
+
+        # Subtask noise injection: replace subtask text with adjacent subtask
+        subtask = sample["subtask"]
+        if self.subtask_noise_prob > 0.0 and random.random() < self.subtask_noise_prob:
+            plan = sample.get("plan", [])
+            subtask_idx = int(sample.get("subtask_idx", 0))
+            noise_type = random.choice(["next", "prev"])
+            if noise_type == "next" and subtask_idx + 1 < len(plan):
+                subtask = plan[subtask_idx + 1]
+            elif noise_type == "prev" and subtask_idx > 0:
+                subtask = plan[subtask_idx - 1]
+            # else: keep original (no suitable neighbour)
+
         prompt = build_streamvln_actor_prompt(
             instruction=sample["instruction"],
-            subtask=sample["subtask"],
+            subtask=subtask,
             watcher_hint=sample.get("watcher_hint"),
             include_visual_memory=include_visual_memory,
             include_anchor_frame=True,
+            next_subtask=sample.get("next_subtask") or None,
+            subtask_position=sample.get("subtask_position") or None,
+            action_history=sample.get("action_history_str") or None,
+            steps_in_subtask=sample.get("steps_in_subtask"),
         )
         target_text = _actions_to_text(sample["action_labels"])
         input_ids, labels = _tokenize_actor_sample(self.tokenizer, prompt, target_text)
@@ -734,7 +864,97 @@ class StreamVLNActorDataset(Dataset):
             "task_type": self.task_id,
             "progress_labels": torch.tensor(sample["progress_label"], dtype=torch.float32),
             "done_labels": torch.tensor(sample["done_label"], dtype=torch.float32),
+            "recurrent_sequence_key": (
+                f'{sample.get("episode_key", "")}::{sample.get("subtask_position", sample.get("subtask", ""))}'
+            ),
         }
+
+
+class SequentialSubtaskSampler(Sampler[int]):
+    """
+    Yields sample indices so that frames belonging to the same (episode, subtask)
+    appear consecutively, in frame order.  This lets the GRU progress head
+    accumulate hidden state across a real subtask trajectory during training.
+
+    Within each epoch, subtask groups are shuffled (if shuffle=True) but the
+    frames *within* each group are always in ascending frame_idx order.
+
+    Usage (in training loop or Trainer subclass):
+        sampler = SequentialSubtaskSampler(dataset, shuffle=True, seed=epoch)
+        loader = DataLoader(dataset, batch_sampler=..., sampler=sampler)
+
+    Note: batch_size should be set so that consecutive samples from the same
+    subtask end up in the same micro-batch.  A batch_size of 1 with gradient
+    accumulation is the simplest option.
+    """
+
+    def __init__(
+        self,
+        dataset,
+        shuffle: bool = True,
+        seed: int = 42,
+        rank: int = 0,
+        num_replicas: int = 1,
+    ):
+        sample_lookup: Dict[int, Dict]
+        if hasattr(dataset, "samples"):
+            sample_indices = list(range(len(dataset.samples)))
+            samples = list(dataset.samples)
+            sample_lookup = {idx: sample for idx, sample in zip(sample_indices, samples)}
+        elif hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
+            base_dataset = dataset.dataset
+            base_samples = getattr(base_dataset, "samples", [])
+            sample_indices = list(range(len(dataset.indices)))
+            samples = [base_samples[int(base_idx)] for base_idx in dataset.indices]
+            sample_lookup = {idx: sample for idx, sample in zip(sample_indices, samples)}
+        else:
+            raise TypeError("SequentialSubtaskSampler requires a dataset with samples or a Subset of one")
+
+        groups: Dict[tuple, List[int]] = {}
+        for sample_idx, sample in zip(sample_indices, samples):
+            key = (
+                str(sample.get("episode_key", "")),
+                str(sample.get("subtask_position", sample.get("subtask", ""))),
+            )
+            groups.setdefault(key, []).append(sample_idx)
+        self._groups: List[List[int]] = [
+            sorted(v, key=lambda idx: int(sample_lookup[idx].get("frame_idx", 0)))
+            for v in groups.values()
+        ]
+        self._shuffle = bool(shuffle)
+        self._seed = int(seed)
+        self._rank = max(0, int(rank))
+        self._num_replicas = max(1, int(num_replicas))
+        self._epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = int(epoch)
+
+    def _build_indices(self) -> List[int]:
+        groups = list(self._groups)
+        if self._shuffle:
+            random.Random(self._seed + self._epoch).shuffle(groups)
+        if self._num_replicas <= 1:
+            return [idx for group in groups for idx in group]
+
+        rank_indices: List[List[int]] = [[] for _ in range(self._num_replicas)]
+        for group_idx, group in enumerate(groups):
+            rank_indices[group_idx % self._num_replicas].extend(group)
+        max_len = max((len(indices) for indices in rank_indices), default=0)
+        current = list(rank_indices[self._rank]) if self._rank < len(rank_indices) else []
+        if current and len(current) < max_len:
+            pad_source = list(current)
+            pad_idx = 0
+            while len(current) < max_len:
+                current.append(pad_source[pad_idx % len(pad_source)])
+                pad_idx += 1
+        return current
+
+    def __iter__(self):
+        yield from self._build_indices()
+
+    def __len__(self):
+        return len(self._build_indices())
 
 
 def streamvln_actor_collate_fn(batch, tokenizer):
@@ -767,4 +987,5 @@ def streamvln_actor_collate_fn(batch, tokenizer):
         "task_type": [item["task_type"] for item in batch],
         "progress_labels": torch.stack([item["progress_labels"] for item in batch], dim=0),
         "done_labels": torch.stack([item["done_labels"] for item in batch], dim=0),
+        "recurrent_sequence_keys": [str(item.get("recurrent_sequence_key", "")) for item in batch],
     }

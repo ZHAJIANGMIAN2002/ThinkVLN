@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,8 +8,8 @@ import pytest
 import torch
 from PIL import Image
 
-from thinkvln.eval.close_eval_runner import VLNEvaluator
-from thinkvln.models.navigation_model import ThinkVLNActorNavigationModel
+from thinkvln.eval.close_eval_runner import VLNEvaluator, supports_memory_bank_replay
+from thinkvln.models.navigation_model import ThinkVLNActorNavigationModel, StreamVLNNavigationModel
 
 _CLOSE_EVAL_PATH = Path(__file__).resolve().parents[1] / "eval" / "close_eval.py"
 _SPEC = importlib.util.spec_from_file_location("close_eval_for_test", _CLOSE_EVAL_PATH)
@@ -20,6 +21,15 @@ build_subtask_spans = _CLOSE_EVAL.build_subtask_spans
 compute_step_budget = _CLOSE_EVAL.compute_step_budget
 summarize_subtask_aggregation = _CLOSE_EVAL.summarize_subtask_aggregation
 timeline_progress = _CLOSE_EVAL.timeline_progress
+distance_based_progress = _CLOSE_EVAL.distance_based_progress
+
+
+def test_distance_based_progress_uses_start_current_over_path_sum():
+    assert distance_based_progress(0.0, 0.0) == 1.0
+    assert distance_based_progress(0.0, 4.0) == 0.0
+    assert distance_based_progress(4.0, 4.0) == pytest.approx(0.5, rel=1e-5, abs=1e-6)
+    assert distance_based_progress(9.0, 3.0) == pytest.approx(0.75, rel=1e-5, abs=1e-6)
+    assert distance_based_progress(5.0, 0.0) == 1.0
 
 
 class _DummyProcessor:
@@ -93,6 +103,13 @@ class CloseEvalLadderUtilsTest:
         assert timeline_progress(3, 4) == 1.0
         assert timeline_progress(10, 4) == 1.0
 
+    def test_distance_based_progress_uses_start_current_over_path_sum(self):
+        assert distance_based_progress(0.0, 0.0) == 1.0
+        assert distance_based_progress(0.0, 4.0) == 0.0
+        assert distance_based_progress(4.0, 4.0) == pytest.approx(0.5, rel=1e-5, abs=1e-6)
+        assert distance_based_progress(9.0, 3.0) == pytest.approx(0.75, rel=1e-5, abs=1e-6)
+        assert distance_based_progress(5.0, 0.0) == 1.0
+
     def test_compute_step_budget_uses_ceiling_and_min_one(self):
         assert compute_step_budget(0, 2.0) == 1
         assert compute_step_budget(3, 2.0) == 6
@@ -106,11 +123,57 @@ class CloseEvalLadderUtilsTest:
             "steps_success_count": 3.0,
             "progress_abs_error_sum": 2.5,
             "progress_count": 10.0,
+            "done_tp": 3.0,
+            "done_tn": 5.0,
+            "done_fp": 1.0,
+            "done_fn": 1.0,
         }
         summary = summarize_subtask_aggregation(stats)
         assert summary["subtask_success_rate"] == 0.75
         assert summary["steps_to_subgoal"] == 4.0
         assert summary["progress_mae"] == 0.25
+        assert summary["done_accuracy"] == 0.8
+        assert summary["done_precision"] == 0.75
+        assert summary["done_recall"] == 0.75
+        assert summary["done_f1"] == 0.75
+
+
+def test_action_history_for_frame_matches_training_history_window():
+    actions = [1, 2, 3, 0, 1]
+
+    assert VLNEvaluator._action_history_for_frame(actions, frame_idx=0, action_history_len=8) == ""
+    assert VLNEvaluator._action_history_for_frame(actions, frame_idx=3, action_history_len=8) == "↑ ← →"
+    assert VLNEvaluator._action_history_for_frame(actions, frame_idx=5, action_history_len=2) == "STOP ↑"
+
+
+def test_streamvln_navigation_model_supports_memory_bank_replay():
+    class _DummyStreamModel:
+        def __init__(self):
+            self._vision_tower = SimpleNamespace(
+                image_processor=SimpleNamespace(crop_size={"height": 384, "width": 384})
+            )
+
+        def get_vision_tower(self):
+            return self._vision_tower
+
+        def reset(self, world_size):
+            del world_size
+
+        def reset_for_env(self, env_id):
+            del env_id
+
+        def eval(self):
+            return self
+
+    model = _DummyStreamModel()
+    nav = StreamVLNNavigationModel(
+        model=model,
+        tokenizer=object(),
+        device="cpu",
+        env_id=1,
+    )
+
+    assert supports_memory_bank_replay(nav) is True
 
 class TestActorWrapper:
     def test_build_inputs_includes_image_tensors(self):
@@ -577,6 +640,94 @@ class TestSubtaskReplayMemoryPriming:
         stats = evaluator.eval_subtask_closed_loop(0, summary_full)
 
         assert stats["progress_count"] == 1.0
+
+    def test_subtask_eval_writes_distance_based_progress_and_done_records(self, tmp_path, monkeypatch):
+        model = _DummyActor(progress_value=0.3, done_prob=0.0)
+        processor = _DummyProcessor()
+        nav_model = ThinkVLNActorNavigationModel(model=model, processor=processor, device="cpu")
+
+        evaluator = VLNEvaluator.__new__(VLNEvaluator)
+        evaluator.nav_model = nav_model
+        evaluator.output_path = str(tmp_path)
+        evaluator.env_num = 1
+        evaluator.args = SimpleNamespace(
+            debug_log_interval=0,
+            subtask_step_budget_factor=1.0,
+            subgoal_success_distance=0.5,
+        )
+        evaluator.target_episode_key = ""
+        evaluator.enable_step_debug = False
+        evaluator.step_debug_format = "none"
+        evaluator.config_path = "config/vln_r2r.yaml"
+        evaluator._episode_instruction = lambda config_path, episode: "go forward"
+        evaluator._iter_assigned_episodes = lambda env, idx: [("scene_030", env.episodes[0])]
+
+        class _FakeSim:
+            def __init__(self):
+                self.position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+            def get_agent_state(self):
+                return SimpleNamespace(position=self.position.copy())
+
+            def geodesic_distance(self, start, goal):
+                return float(np.linalg.norm(np.array(start) - np.array(goal)))
+
+        class _FakeEnv:
+            def __init__(self):
+                self.episodes = [SimpleNamespace(scene_id="scene_030.glb", episode_id="ep-3")]
+                self.current_episode = None
+                self.episode_over = False
+                self.sim = _FakeSim()
+
+            def reset(self):
+                self.episode_over = False
+                self.sim.position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+                return {"rgb": np.zeros((8, 8, 3), dtype=np.uint8)}
+
+            def step(self, action):
+                del action
+                self.sim.position = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+                self.episode_over = True
+                return {"rgb": np.zeros((8, 8, 3), dtype=np.uint8)}
+
+            def get_metrics(self):
+                return {}
+
+            def close(self):
+                return None
+
+        env = _FakeEnv()
+        evaluator.config_env = lambda: env
+
+        monkeypatch.setattr(
+            nav_model,
+            "predict_action_with_progress_and_done",
+            lambda **kwargs: (1, 0.25, False),
+        )
+        monkeypatch.setattr(
+            nav_model,
+            "get_last_debug_snapshot",
+            lambda: {"fresh_actor_metadata": True, "fresh_progress_done": True},
+        )
+
+        summary_full = {
+            "scene_030_ep-3": {
+                "actions": [1, 1],
+                "subtask_sequence": [2, 2],
+                "plan": ["prep", "go forward"],
+            }
+        }
+
+        evaluator.eval_subtask_closed_loop(0, summary_full)
+
+        progress_path = tmp_path / "subtask_progress_steps_rank0.jsonl"
+        assert progress_path.exists()
+        rows = [json.loads(line) for line in progress_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert len(rows) == 1
+        assert rows[0]["pred_progress"] == pytest.approx(0.25, rel=1e-5, abs=1e-6)
+        assert rows[0]["actual_progress"] == 0.0
+        assert rows[0]["pred_done"] is False
+        assert rows[0]["actual_done"] is False
 
 
 class TestReplayActionNormalization:

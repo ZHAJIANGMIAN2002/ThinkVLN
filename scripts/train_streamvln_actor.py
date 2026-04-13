@@ -125,6 +125,8 @@ def build_streamvln_train_argv(config: dict, data_path_override: Optional[str] =
         "model_type": "model_type",
         "progress_loss_weight": "progress_loss_weight",
         "done_loss_weight": "done_loss_weight",
+        "use_gru_progress": "use_gru_progress",
+        "progress_num_bins": "progress_num_bins",
         "rope_scaling_factor": "rope_scaling_factor",
         "rope_scaling_type": "rope_scaling_type",
         "use_pos_skipping": "use_pos_skipping",
@@ -164,6 +166,11 @@ def build_streamvln_train_argv(config: dict, data_path_override: Optional[str] =
         "num_future_steps": "num_future_steps",
         "val_split_ratio": "val_split_ratio",
         "multi_task_training": "multi_task_training",
+        "use_next_token": "use_next_token",
+        "use_sliding_window": "use_sliding_window",
+        "subtask_noise_prob": "subtask_noise_prob",
+        "use_sequential_subtask_sampler": "use_sequential_subtask_sampler",
+        "action_history_len": "action_history_len",
     }
     training_key_map = {
         "output_dir": "output_dir",

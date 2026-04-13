@@ -35,6 +35,7 @@ from thinkvln.eval.close_eval_utils import (
     build_episode_key,
     build_subtask_spans,
     compute_step_budget,
+    distance_based_progress,
     extract_scene_id,
     normalize_action,
     parse_plan_steps,
@@ -46,6 +47,12 @@ from thinkvln.eval.close_eval_utils import (
 
 
 logger = logging.getLogger(__name__)
+ACTION_ID_TO_TEXT = {
+    0: "STOP",
+    1: "↑",
+    2: "←",
+    3: "→",
+}
 
 
 def supports_progress_done_actor_model(nav_model: NavigationModel) -> bool:
@@ -261,6 +268,15 @@ class VLNEvaluator:
         idx = max(0, min(int(frame_idx), len(subtask_sequence) - 1))
         return _normalize_subtask_idx(subtask_sequence[idx])
 
+    @staticmethod
+    def _action_history_for_frame(actions: List[Any], frame_idx: int, action_history_len: int = 8) -> str:
+        if not actions:
+            return ""
+        end = max(0, min(int(frame_idx), len(actions)))
+        start = max(0, end - max(0, int(action_history_len)))
+        history = [ACTION_ID_TO_TEXT.get(int(normalize_action(action)), "STOP") for action in actions[start:end]]
+        return " ".join(history)
+
     def _replay_to_frame_with_memory(
         self,
         env: Env,
@@ -352,16 +368,26 @@ class VLNEvaluator:
             "steps_success_count": 0.0,
             "progress_abs_error_sum": 0.0,
             "progress_count": 0.0,
+            "done_tp": 0.0,
+            "done_tn": 0.0,
+            "done_fp": 0.0,
+            "done_fn": 0.0,
         }
 
         detail_path = os.path.join(self.output_path, f"subtask_closed_loop_rank{idx}.jsonl")
+        progress_detail_path = os.path.join(self.output_path, f"subtask_progress_steps_rank{idx}.jsonl")
         logger.info(
-            "[subtask][rank=%d] Start closed-loop subtask eval. detail_path=%s episodes=%d",
+            "[subtask][rank=%d] Start closed-loop subtask eval. detail_path=%s progress_detail_path=%s episodes=%d",
             idx,
             detail_path,
+            progress_detail_path,
             len(env.episodes),
         )
-        with open(detail_path, "w", encoding="utf-8") as detail_file:
+        with open(detail_path, "w", encoding="utf-8") as detail_file, open(
+            progress_detail_path,
+            "w",
+            encoding="utf-8",
+        ) as progress_detail_file:
             for scene_id, episode in self._iter_assigned_episodes(env, idx):
                 stats["episodes_total"] += 1.0
                 episode_key = build_episode_key(scene_id, episode.episode_id)
@@ -463,31 +489,66 @@ class VLNEvaluator:
 
                         rollout_steps = 0
                         previous_pred_progress: Optional[float] = None
+                        executed_actions_in_subtask: List[str] = []
                         current_pos = self._current_position(env)
                         final_distance = self._safe_geodesic_distance(env, current_pos, goal_pos)
+                        subtask_start_pos = current_pos.copy()
                         success = final_distance <= float(self.args.subgoal_success_distance)
                         fail_reason = "already_at_subgoal" if success else "step_budget"
 
                         while (not success) and (not env.episode_over) and rollout_steps < step_budget:
                             info = env.get_metrics()
                             image = self.prepare_model_image(observations["rgb"], info)
-                            action, pred_progress, _ = self.nav_model.predict_action_with_progress_and_done(
+                            action_history_text = self._action_history_for_frame(
+                                replay_actions,
+                                frame_idx=start_frame + rollout_steps,
+                            )
+                            next_subtask = plan_steps[plan_idx + 1] if (plan_idx + 1) < len(plan_steps) else ""
+                            subtask_position = f"{int(subtask_idx)}/{len(plan_steps)}" if plan_steps else ""
+                            action, pred_progress, pred_done = self.nav_model.predict_action_with_progress_and_done(
                                 observation=image,
                                 instruction=episode_instruction,
                                 subgoal=subgoal_text,
                                 episode_key=episode_key,
                                 subtask_id=subtask_idx,
+                                next_subtask=next_subtask,
+                                subtask_position=subtask_position,
+                                action_history=action_history_text or None,
+                                steps_in_subtask=int(rollout_steps),
                                 forbidden_actions=[0],
                             )
                             snapshot = self.nav_model.get_last_debug_snapshot()
                             fresh_actor_metadata = bool(
                                 True if snapshot is None else snapshot.get("fresh_actor_metadata", True)
                             )
+                            fresh_progress_done = bool(
+                                fresh_actor_metadata
+                                if snapshot is None
+                                else snapshot.get("fresh_progress_done", fresh_actor_metadata)
+                            )
 
-                            target_progress = timeline_progress(rollout_steps, gt_subtask_steps)
-                            if fresh_actor_metadata:
+                            start_to_current_distance = self._safe_geodesic_distance(
+                                env,
+                                subtask_start_pos,
+                                current_pos,
+                            )
+                            current_to_goal_distance = float(final_distance)
+                            target_progress = distance_based_progress(
+                                start_to_current_distance=start_to_current_distance,
+                                current_to_goal_distance=current_to_goal_distance,
+                            )
+                            target_done = bool(final_distance <= float(self.args.subgoal_success_distance))
+                            if fresh_progress_done:
                                 stats["progress_abs_error_sum"] += abs(pred_progress - target_progress)
                                 stats["progress_count"] += 1.0
+                                if pred_done and target_done:
+                                    stats["done_tp"] += 1.0
+                                elif pred_done and (not target_done):
+                                    stats["done_fp"] += 1.0
+                                elif (not pred_done) and target_done:
+                                    stats["done_fn"] += 1.0
+                                else:
+                                    stats["done_tn"] += 1.0
                             prev_progress_in = None
                             if snapshot is not None:
                                 prev_progress_in = snapshot.get("prev_progress_input")
@@ -539,16 +600,22 @@ class VLNEvaluator:
                                     "selected_indices": snapshot.get("selected_indices", []) if snapshot is not None else [],
                                     "selected_subtask_ids": snapshot.get("selected_subtask_ids", []) if snapshot is not None else [],
                                     "prev_progress_in": prev_progress_in,
-                                    "pred_progress": float(pred_progress) if fresh_actor_metadata else None,
-                                    "target_progress": float(target_progress) if fresh_actor_metadata else None,
+                                    "pred_progress": float(pred_progress) if fresh_progress_done else None,
+                                    "target_progress": float(target_progress) if fresh_progress_done else None,
+                                    "pred_done": bool(pred_done) if fresh_progress_done else None,
+                                    "target_done": bool(target_done) if fresh_progress_done else None,
+                                    "distance_to_subgoal": float(final_distance),
+                                    "start_to_current_distance": float(start_to_current_distance),
+                                    "current_to_goal_distance": float(current_to_goal_distance),
                                     "progress_pass_through_delta": progress_pass_through_delta,
                                     "memory_bank_size": int(memory_bank_size),
                                     "expected_memory_bank_size": int(expected_memory_bank_size),
                                     "checks": {
                                         "memory_frame_count_ok": bool(memory_frame_count_ok),
                                         "memory_includes_past_subtask": bool(memory_includes_past_subtask),
-                                        "progress_pass_through_ok": bool(progress_pass_through_ok) if fresh_actor_metadata else True,
+                                        "progress_pass_through_ok": bool(progress_pass_through_ok) if fresh_progress_done else True,
                                         "fresh_actor_metadata": bool(fresh_actor_metadata),
+                                        "fresh_progress_done": bool(fresh_progress_done),
                                     },
                                     "replay_leading_sentinel_stripped": bool(
                                         replay_meta["leading_sentinel_stripped"]
@@ -556,7 +623,41 @@ class VLNEvaluator:
                                 }
                                 debugger.record_step(debug_row, images=debug_images)
 
+                            progress_detail = {
+                                "scene_id": scene_id,
+                                "episode_id": episode.episode_id,
+                                "episode_key": episode_key,
+                                "subtask_idx": int(subtask_idx),
+                                "subgoal_text": subgoal_text,
+                                "rollout_step": int(rollout_steps),
+                                "pred_progress": float(pred_progress) if fresh_progress_done else None,
+                                "pred_progress_smooth": (
+                                    snapshot.get("predicted_progress_smooth")
+                                    if (snapshot is not None and fresh_progress_done)
+                                    else None
+                                ),
+                                "actual_progress": float(target_progress) if fresh_progress_done else None,
+                                "pred_done": bool(pred_done) if fresh_progress_done else None,
+                                "pred_done_smooth": (
+                                    snapshot.get("predicted_done_smooth")
+                                    if (snapshot is not None and fresh_progress_done)
+                                    else None
+                                ),
+                                "actual_done": bool(target_done) if fresh_progress_done else None,
+                                "distance_to_subgoal": float(final_distance),
+                                "start_to_current_distance": float(start_to_current_distance),
+                                "current_to_goal_distance": float(current_to_goal_distance),
+                                "success_distance": float(self.args.subgoal_success_distance),
+                                "fresh_actor_metadata": bool(fresh_actor_metadata),
+                                "fresh_progress_done": bool(fresh_progress_done),
+                                "action_history": action_history_text,
+                            }
+                            write_jsonl_record(progress_detail_file, progress_detail, sync_to_disk=False)
+
                             observations = env.step(action)
+                            executed_actions_in_subtask.append(
+                                ACTION_ID_TO_TEXT.get(int(normalize_action(action)), "STOP")
+                            )
                             rollout_steps += 1
 
                             current_pos = self._current_position(env)
@@ -570,8 +671,8 @@ class VLNEvaluator:
                                     rollout_steps,
                                     step_budget,
                                     final_distance,
-                                    pred_progress if fresh_actor_metadata else float("nan"),
-                                    target_progress if fresh_actor_metadata else float("nan"),
+                                    pred_progress if fresh_progress_done else float("nan"),
+                                    target_progress if fresh_progress_done else float("nan"),
                                 )
                             if final_distance <= float(self.args.subgoal_success_distance):
                                 success = True

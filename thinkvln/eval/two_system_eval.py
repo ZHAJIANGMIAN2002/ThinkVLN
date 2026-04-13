@@ -25,6 +25,10 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from thinkvln.datagen.generation.watcher_utils import action_id_to_name, extract_json_object
+from thinkvln.dataset.watcher_sft_dataset import (
+    ROLLOUT_SYSTEM_PROMPT,
+    build_rollout_prompt as build_watcher_rollout_prompt,
+)
 from thinkvln.eval.close_eval_utils import load_summary_full, parse_plan_steps, write_jsonl_record
 
 
@@ -35,37 +39,7 @@ MAX_ACTOR_CALLS_PER_EPISODE = 128
 DATAGEN_WATCHER_MODEL_NAME = "qwen/qwen3.5-397b-a17b"
 DATAGEN_WATCHER_API_BASE_URL = "https://openrouter.ai/api/v1"
 DATAGEN_WATCHER_API_KEY_ENV = "OPENROUTER_API_KEY"
-DATAGEN_ROLLOUT_SYSTEM_PROMPT = """You are a navigation evaluator updating watcher memory and deciding if the current subtask is complete.
-
-You MUST return JSON only, and strictly in this EXACT order:
-{"memory_end":"...","done":true/false,"next_subtask":"..."}
-
-# Thinking Guidelines (For your internal reasoning before generating JSON)
-1. Identify the robot's current 'Active' step from the plan.
-2. Look at the FINAL rollout frame: Has the specific visual or physical goal of this active step been achieved? (e.g., if the step is "enter kitchen", is it clearly inside the kitchen?)
-3. Is the robot fully aligned and ready to start the "Pending" step, or is it still adjusting?
-
-# Output Rules
-
-Step 1: memory_end
-- Must be exactly three short semicolon-separated fragments: [traj summary]; [current physical state]; [neutral status].
-- Update the memory_start with the new progress.
-- Keep it concise and state exactly where the robot is in the final frame.
-
-Step 2: done
-- Set to true ONLY IF your internal reasoning confirms the active step's goal is fully reached AND the robot is in a stable position to begin the next step.
-- Set to false if the robot is still moving toward the goal, still turning, halfway through a door, or recovering from a mistake.
-- NEVER set to true just because the robot is "close" to the goal.
-
-Step 3: next_subtask
-- If done=false: Write an imperative command to continue or finish the current active step (e.g., "finish turning left").
-- If done=true: Write the imperative command for the NEW active step (promoted from pending), or "stop" if no steps remain.
-
-Examples:
-{"memory_end":"Reached the hallway entrance; mid-turn facing the wall; step ongoing","done":false,"next_subtask":"finish turning right to face down the hallway"}
-
-{"memory_end":"Cleared the dining area and entered bathroom; standing inside facing the sink; ready for next step","done":true,"next_subtask":"approach the sink"}
-"""
+DATAGEN_ROLLOUT_SYSTEM_PROMPT = ROLLOUT_SYSTEM_PROMPT
 
 
 REQUIRED_CONFIG_KEYS = {
@@ -248,20 +222,24 @@ def build_init_prompt(
     plan_steps: Sequence[str],
     first_observation: Image.Image,
 ) -> WatcherPrompt:
-    system_prompt = (
-        "You are the watcher for a two-system VLN evaluator.\n"
-        "Respond with one JSON object only.\n"
-        'Use this schema exactly: {"memory":"...","done":false,"subtask":"..."}\n'
-        "The `memory` field is cumulative and concise.\n"
-        "For initialization, `done` should normally stay false unless the task is already complete.\n"
-        "Set `subtask` to the actor-facing text for the next rollout."
+    done_steps: List[str] = []
+    active_step = str(plan_steps[0]).strip() if plan_steps else ""
+    pending_steps = [str(step).strip() for step in plan_steps[1:] if str(step).strip()]
+    prompt = build_watcher_rollout_prompt(
+        instruction=instruction,
+        plan_steps=plan_steps,
+        done_steps=done_steps,
+        active_step=active_step,
+        pending_steps=pending_steps,
+        memory_start="",
+        rollout_actions=[],
+        rollout_images=[first_observation],
     )
-    user_text = (
-        f"Instruction:\n{instruction}\n\n"
-        f"Plan:\n{_plan_lines(plan_steps)}\n\n"
-        "Use the first observation to initialize watcher memory and pick the first actor-facing subtask."
+    return WatcherPrompt(
+        system_prompt=prompt.system_prompt,
+        user_text=prompt.user_text,
+        images=prompt.images,
     )
-    return WatcherPrompt(system_prompt=system_prompt, user_text=user_text, images=[first_observation])
 
 
 def build_update_prompt(
@@ -309,42 +287,20 @@ def build_api_update_prompt(
     image_stride: int = 1,
 ) -> WatcherPrompt:
     sampled_images = _sample_rollout_images(rollout_images, image_stride=image_stride)
-    user_text = (
-        "Plan state\n"
-        "Done\n"
-        f"{_format_plan_section(todo_state.done_steps)}\n"
-        "Active\n"
-        f"{_format_plan_section([todo_state.active_step] if todo_state.active_step else [])}\n"
-        "Pending\n"
-        f"{_format_plan_section(todo_state.pending_steps)}\n"
-        "State\n"
-        f"- Memory start: {memory_text or '(empty)'}\n"
-        f"- Rollout actions: {list(rollout_actions)}\n"
-        "Decision\n"
-        "- Set done=true only if the active step reaches a natural handoff by rollout end.\n"
-        "- The rollout end must also be a good starting point for the next subtask.\n"
-        "- Do not hand off early just because the active step looks mostly complete.\n"
-        "- If the next pending step is a turn, judge whether the robot has actually reached the turning point.\n"
-        "- If the active step is a turn, judge it together with the next pending step and only hand off once the robot is aligned for that next movement.\n"
-        "- If the active step is still the right step, set done=false.\n"
-        "- With done=false, next_subtask should continue the active step or give a short recovery step.\n"
-        "- With done=true, next_subtask should describe the promoted pending step, or stop if pending is empty.\n"
-        "Memory\n"
-        "- Rewrite memory_start into a new cumulative watcher memory.\n"
-        "- Keep only the still-relevant part of memory_start.\n"
-        "- Write memory_end as a direct update of memory_start.\n"
-        "- Prefer extending memory_start forward with the new observation and then compressing if needed.\n"
-        "- Do not reduce memory_end to only the final frame.\n"
-        "- Write memory_end as exactly three short semicolon-separated fragments.\n"
-        "- Use this exact order: traj summary; current state; task status.\n"
-        "- The first fragment must summarize the path already traveled before the final state.\n"
-        "- The third fragment must say whether the step is ongoing, ready for next step, or task complete.\n"
-        "- Sentence fragments are allowed."
+    prompt = build_watcher_rollout_prompt(
+        instruction="",
+        plan_steps=[],
+        done_steps=todo_state.done_steps,
+        active_step=todo_state.active_step,
+        pending_steps=todo_state.pending_steps,
+        memory_start=memory_text or "",
+        rollout_actions=rollout_actions,
+        rollout_images=sampled_images,
     )
     return WatcherPrompt(
-        system_prompt=DATAGEN_ROLLOUT_SYSTEM_PROMPT,
-        user_text=user_text,
-        images=sampled_images,
+        system_prompt=prompt.system_prompt,
+        user_text=prompt.user_text,
+        images=prompt.images,
     )
 
 
@@ -652,7 +608,7 @@ class ApiWatcherBackend:
             plan_steps=plan_steps,
             first_observation=first_observation,
         )
-        return _normalize_watcher_payload(self._request_json(prompt), wakeup_reason="init")
+        return _normalize_api_update_payload(self._request_json(prompt), wakeup_reason="init")
 
     def update(
         self,
@@ -770,7 +726,7 @@ class LocalWatcherBackend:
             plan_steps=plan_steps,
             first_observation=first_observation,
         )
-        return _normalize_watcher_payload(self._generate_json(prompt), wakeup_reason="init")
+        return _normalize_api_update_payload(self._generate_json(prompt), wakeup_reason="init")
 
     def update(
         self,
@@ -878,8 +834,22 @@ class TwoSystemEpisodeRunner:
             "step_in_rollout": int(step_in_rollout),
             "is_rollout_start": bool(step_in_rollout == 0),
             "is_rollout_end": False,
-            "actor_prompt": None if not debug_snapshot else debug_snapshot.get("prompt"),
+            "actor_prompt": None
+            if not debug_snapshot
+            else (debug_snapshot.get("prompt") or debug_snapshot.get("instruction_text")),
             "predicted_waypoint": None if not debug_snapshot else debug_snapshot.get("waypoint_first"),
+            "actor_history_frame_indices": []
+            if not debug_snapshot
+            else list(debug_snapshot.get("history_frame_indices") or []),
+            "actor_history_frame_count": 0
+            if not debug_snapshot
+            else int(debug_snapshot.get("history_frame_count") or 0),
+            "actor_history_frame_target": None
+            if not debug_snapshot
+            else debug_snapshot.get("history_frame_target"),
+            "actor_history_frame_count_ok": True
+            if not debug_snapshot
+            else bool(debug_snapshot.get("history_frame_count_ok", True)),
         }
 
     @staticmethod
@@ -1556,6 +1526,7 @@ def _build_actor_args(config: Dict[str, Any], device: str) -> SimpleNamespace:
 def _build_watcher_backend(config: Dict[str, Any], device: str):
     watcher_cfg = config["watcher"]
     backend = str(watcher_cfg["backend"]).strip().lower()
+    watcher_device = str(watcher_cfg.get("device", device) or device)
     if backend == "api":
         return ApiWatcherBackend(
             model_name=watcher_cfg["model_name"],
@@ -1570,7 +1541,7 @@ def _build_watcher_backend(config: Dict[str, Any], device: str):
         return LocalWatcherBackend(
             model_path=watcher_cfg["model_path"],
             base_model_path=watcher_cfg["base_model_path"],
-            device=device,
+            device=watcher_device,
             image_stride=watcher_cfg["image_stride"],
         )
     raise ValueError(f"Unsupported watcher backend: {backend}")
@@ -1579,12 +1550,14 @@ def _build_watcher_backend(config: Dict[str, Any], device: str):
 def _write_debug_html(path: Path, episode_result: Dict[str, Any]) -> None:
     step_rows = []
     for step in episode_result["trace"].get("steps", []):
+        actor_progress = step.get("actor_progress")
+        actor_progress_text = "" if actor_progress is None else f"{float(actor_progress):.3f}"
         step_rows.append(
             "<tr>"
             f"<td>{int(step.get('step_index', 0))}</td>"
             f"<td>{'' if step.get('env_step_index') is None else int(step['env_step_index'])}</td>"
             f"<td>{html_lib.escape(str(step.get('action', '')))}</td>"
-            f"<td>{float(step.get('actor_progress', 0.0)):.3f}</td>"
+            f"<td>{actor_progress_text}</td>"
             f"<td>{html_lib.escape(str(step.get('actor_done', False)))}</td>"
             f"<td><pre>{html_lib.escape(str(step.get('actor_prompt', '')))}</pre></td>"
             "</tr>"
@@ -1654,6 +1627,8 @@ def _build_debug_video_sections(
     step: Dict[str, Any],
     watcher_event: Optional[Dict[str, Any]] = None,
 ) -> List[tuple[str, List[tuple[str, Any]]]]:
+    actor_progress = step.get("actor_progress")
+    actor_progress_text = "" if actor_progress is None else f"{float(actor_progress):.3f}"
     sections: List[tuple[str, List[tuple[str, Any]]]] = [
         (
             "Episode",
@@ -1673,7 +1648,7 @@ def _build_debug_video_sections(
             "Actor Output",
             [
                 ("Action", step.get("action", "")),
-                ("Progress", f"{float(step.get('actor_progress', 0.0)):.3f}"),
+                ("Progress", actor_progress_text),
                 ("Done", step.get("actor_done", False)),
             ],
         ),

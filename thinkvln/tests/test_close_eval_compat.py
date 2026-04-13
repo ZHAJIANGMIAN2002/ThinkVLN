@@ -2,6 +2,7 @@ import unittest
 
 from thinkvln.eval import close_eval
 from thinkvln.eval.close_eval_cli import build_parser
+from thinkvln.eval.close_eval_models import _load_streamvln_pretrained_model
 
 
 class CloseEvalCompatibilityTest(unittest.TestCase):
@@ -73,6 +74,32 @@ class CloseEvalCompatibilityTest(unittest.TestCase):
         self.assertEqual(args.target_episode_key, "")
         self.assertEqual(args.enable_step_debug, False)
         self.assertEqual(args.step_debug_format, "none")
+
+    def test_streamvln_loader_falls_back_when_flash_attention_init_fails(self):
+        calls = []
+
+        class _DummyModel:
+            pass
+
+        class _DummyStreamModel:
+            @classmethod
+            def from_pretrained(cls, path, **kwargs):
+                calls.append((path, dict(kwargs)))
+                if kwargs.get("attn_implementation") == "flash_attention_2":
+                    raise ValueError("Flash Attention 2 is not available on CPU.")
+                return _DummyModel()
+
+        model = _load_streamvln_pretrained_model(
+            streamvln_cls=_DummyStreamModel,
+            model_path="/models/streamvln",
+            config=object(),
+            dtype="bf16",
+            prefer_flash_attention=True,
+        )
+
+        self.assertIsInstance(model, _DummyModel)
+        self.assertEqual(calls[0][1]["attn_implementation"], "flash_attention_2")
+        self.assertEqual(calls[1][1]["attn_implementation"], "eager")
 
 
 if __name__ == "__main__":

@@ -57,6 +57,7 @@ from llava.utils import rank0_print, process_video_with_pyav, process_video_with
 
 from streamvln.model.stream_video_vln import StreamVLNForCausalLM
 from streamvln.dataset.streamvln_actor_dataset import (
+    SequentialSubtaskSampler,
     StreamVLNActorDataset,
     streamvln_actor_collate_fn,
 )
@@ -113,6 +114,7 @@ def maybe_zero_3(param, ignore_status=False, name=None):
 
 # Borrowed from peft.utils.get_peft_model_state_dict
 def get_peft_state_maybe_zero_3(named_params, bias):
+    modules_to_save = {k: t for k, t in named_params if "modules_to_save." in k}
     if bias == "none":
         to_return = {k: t for k, t in named_params if "lora_" in k}
     elif bias == "all":
@@ -128,17 +130,22 @@ def get_peft_state_maybe_zero_3(named_params, bias):
                 lora_bias_names.add(bias_name)
             elif "bias" in k:
                 maybe_lora_bias[k] = t
-        for k, t in maybe_lora_bias:
-            if bias_name in lora_bias_names:
-                to_return[bias_name] = t
+        for k, t in maybe_lora_bias.items():
+            if k in lora_bias_names:
+                to_return[k] = t
     else:
         raise NotImplementedError
+    to_return.update(modules_to_save)
     to_return = {k: maybe_zero_3(v, ignore_status=True) for k, v in to_return.items()}
     return to_return
 
 
 def get_peft_state_non_lora_maybe_zero_3(named_params, require_grad_only=True):
-    to_return = {k: t for k, t in named_params if "lora_" not in k}
+    to_return = {
+        k: t
+        for k, t in named_params
+        if "lora_" not in k and "modules_to_save." not in k
+    }
     if require_grad_only:
         to_return = {k: t for k, t in to_return.items() if t.requires_grad}
     to_return = {k: maybe_zero_3(v, ignore_status=True).cpu() for k, v in to_return.items()}
@@ -305,6 +312,22 @@ def smart_tokenizer_and_embedding_resize(
 
         input_embeddings[-num_new_tokens:] = input_embeddings_avg
         output_embeddings[-num_new_tokens:] = output_embeddings_avg
+
+
+def prepare_streamvln_actor_special_tokens(model, tokenizer) -> int:
+    if not hasattr(tokenizer, "add_tokens"):
+        return 0
+    added = int(tokenizer.add_tokens(["<image>", "<anchor>", "<memory>", "<next>"], special_tokens=True))
+    current_vocab_size = model.get_input_embeddings().weight.shape[0]
+    if len(tokenizer) > current_vocab_size:
+        model.resize_token_embeddings(len(tokenizer))
+    return added
+
+
+def get_actor_lora_modules_to_save(model_args) -> List[str]:
+    if bool(getattr(model_args, "use_gru_progress", False)):
+        return ["gru_progress_head"]
+    return ["progress_head", "done_head"]
 
 
 def _tokenize_fn(strings: Sequence[str], tokenizer: transformers.PreTrainedTokenizer) -> Dict:
@@ -1515,6 +1538,10 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, vis
             val_split_ratio=getattr(data_args, "val_split_ratio", 0.0),
             seed=getattr(training_args, "seed", 42),
         )
+        sequential_sampler = bool(getattr(data_args, "use_sequential_subtask_sampler", False))
+        if sequential_sampler:
+            setattr(train_dataset, "use_sequential_subtask_sampler", True)
+            setattr(train_dataset, "sampler_seed", int(getattr(training_args, "seed", 42)))
         rank0_print('len train_dataset ', len(train_dataset))
         if eval_dataset is not None:
             rank0_print('len eval_dataset ', len(eval_dataset))
@@ -1548,8 +1575,65 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, vis
 
 
 class StreamVLNActorTrainer(LLaVATrainer):
+    def _reset_recurrent_gru_state(self):
+        self._gru_recurrent_hidden = None
+        self._gru_recurrent_sequence_key = None
+
+    def get_train_dataloader(self):
+        self._reset_recurrent_gru_state()
+        return super().get_train_dataloader()
+
+    @staticmethod
+    def _model_uses_recurrent_gru(model):
+        current = model
+        while hasattr(current, "module"):
+            current = current.module
+        return bool(getattr(current, "use_gru_progress", False))
+
+    def _prepare_recurrent_gru_inputs(self, model, inputs):
+        sequence_keys = inputs.pop("recurrent_sequence_keys", None)
+        if not sequence_keys or not self._model_uses_recurrent_gru(model):
+            self._reset_recurrent_gru_state()
+            return inputs
+        if len(sequence_keys) != 1:
+            raise ValueError(
+                "Sequential GRU training currently requires per-device batch size 1 so recurrent state follows frame order."
+            )
+        current_key = str(sequence_keys[0])
+        if current_key != getattr(self, "_gru_recurrent_sequence_key", None):
+            self._gru_recurrent_hidden = None
+            self._gru_recurrent_sequence_key = current_key
+        if getattr(self, "_gru_recurrent_hidden", None) is not None:
+            inputs["gru_hidden"] = self._gru_recurrent_hidden
+        return inputs
+
+    def _update_recurrent_gru_state(self, outputs):
+        gru_hidden = outputs.get("gru_hidden_out") if isinstance(outputs, dict) else getattr(outputs, "gru_hidden_out", None)
+        if gru_hidden is None:
+            self._reset_recurrent_gru_state()
+            return
+        self._gru_recurrent_hidden = gru_hidden.detach()
+
+    def _get_train_sampler(self):
+        if getattr(self.train_dataset, "use_sequential_subtask_sampler", False):
+            seed = int(
+                getattr(self.args, "data_seed", None)
+                if getattr(self.args, "data_seed", None) is not None
+                else getattr(self.args, "seed", 42)
+            )
+            return SequentialSubtaskSampler(
+                self.train_dataset,
+                shuffle=True,
+                seed=seed,
+                rank=int(getattr(self.args, "process_index", 0)),
+                num_replicas=int(getattr(self.args, "world_size", 1)),
+            )
+        return super()._get_train_sampler()
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        inputs = self._prepare_recurrent_gru_inputs(model, inputs)
         outputs = model(**inputs)
+        self._update_recurrent_gru_state(outputs)
         loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
         if self.state.global_step % self.args.logging_steps == 0:
             metrics = self._collect_actor_aux_metrics(outputs)
@@ -1632,6 +1716,8 @@ def get_model(model_args, training_args, data_args, bnb_model_from_pretrained_ar
         overwrite_config["num_history"] = data_args.num_history
     overwrite_config["progress_loss_weight"] = float(getattr(model_args, "progress_loss_weight", 1.0))
     overwrite_config["done_loss_weight"] = float(getattr(model_args, "done_loss_weight", 1.0))
+    overwrite_config["use_gru_progress"] = bool(getattr(model_args, "use_gru_progress", False))
+    overwrite_config["progress_num_bins"] = int(getattr(model_args, "progress_num_bins", 0))
         
     if model_args.mm_tunable_parts:
         overwrite_config["mm_tunable_parts"] = model_args.mm_tunable_parts
@@ -1661,6 +1747,8 @@ def get_model(model_args, training_args, data_args, bnb_model_from_pretrained_ar
                 **local_pretrained_kwargs,
                 **customized_kwargs,
                 )
+    if hasattr(model, "ensure_gru_recurrent_parameters"):
+        model.ensure_gru_recurrent_parameters()
     
     return model
 
@@ -1747,7 +1835,7 @@ def train(attn_implementation=None):
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias,
             task_type="CAUSAL_LM",
-            modules_to_save=["progress_head", "done_head"],
+            modules_to_save=get_actor_lora_modules_to_save(model_args),
         )
         if training_args.bits == 16:
             if training_args.bf16:
@@ -1761,6 +1849,8 @@ def train(attn_implementation=None):
         # import ipdb; ipdb.set_trace()
 
     tokenizer = load_tokenizer(model_args, training_args, local_pretrained_kwargs)
+    if getattr(model_args, "model_type", "streamvln") == "streamvln_actor":
+        prepare_streamvln_actor_special_tokens(model, tokenizer)
 
     rank0_print(f"Prompt version: {model_args.version}")
     if model_args.version == "v0":
@@ -1985,6 +2075,7 @@ def train(attn_implementation=None):
                 model.config.save_pretrained(training_args.output_dir)
             if hasattr(model, "generation_config"):
                 model.generation_config.save_pretrained(training_args.output_dir)
+            tokenizer.save_pretrained(training_args.output_dir)
             model.save_pretrained(training_args.output_dir, state_dict=state_dict)
             torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, "non_lora_trainables.bin"))
     else:
@@ -1993,7 +2084,11 @@ def train(attn_implementation=None):
             safe_save_model_for_hf_trainer_fsdp(trainer=trainer, output_dir=training_args.output_dir)
         else:
             safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
+        if training_args.local_rank == 0 or training_args.local_rank == -1:
+            tokenizer.save_pretrained(training_args.output_dir)
 
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
     rank0_print(f"Model saved to {training_args.output_dir}")
 
 
