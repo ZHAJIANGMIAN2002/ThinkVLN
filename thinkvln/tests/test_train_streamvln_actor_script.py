@@ -190,3 +190,30 @@ def test_build_streamvln_train_argv_includes_v2_actor_flags():
     assert "--use_sequential_subtask_sampler" in argv
     assert "--action_history_len" in argv
     assert "6" in argv
+
+
+def test_build_streamvln_train_argv_includes_gru_only_finetune_flags():
+    module = _load_script_module()
+    config = {
+        "model": {
+            "model_name_or_path": "/models/streamvln",
+            "model_type": "streamvln_actor",
+            "use_gru_progress": True,
+            "lora_adapter_path": "/checkpoints/streamvln_lora/checkpoint-2000",
+        },
+        "data": {
+            "summary_data_path": "/data/train_v2.jsonl",
+        },
+        "training": {
+            "output_dir": "/outputs/actor_v2_gru_only",
+            "lora_enable": True,
+            "train_gru_only": True,
+        },
+    }
+
+    argv = module.build_streamvln_train_argv(config)
+
+    assert "--lora_adapter_path" in argv
+    assert "/checkpoints/streamvln_lora/checkpoint-2000" in argv
+    assert "--train_gru_only" in argv
+    assert "True" in argv

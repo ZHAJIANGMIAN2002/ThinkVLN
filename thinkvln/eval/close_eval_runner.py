@@ -368,10 +368,16 @@ class VLNEvaluator:
             "steps_success_count": 0.0,
             "progress_abs_error_sum": 0.0,
             "progress_count": 0.0,
+            "progress_smooth_abs_error_sum": 0.0,
+            "progress_smooth_count": 0.0,
             "done_tp": 0.0,
             "done_tn": 0.0,
             "done_fp": 0.0,
             "done_fn": 0.0,
+            "done_smooth_tp": 0.0,
+            "done_smooth_tn": 0.0,
+            "done_smooth_fp": 0.0,
+            "done_smooth_fn": 0.0,
         }
 
         detail_path = os.path.join(self.output_path, f"subtask_closed_loop_rank{idx}.jsonl")
@@ -490,6 +496,18 @@ class VLNEvaluator:
                         rollout_steps = 0
                         previous_pred_progress: Optional[float] = None
                         executed_actions_in_subtask: List[str] = []
+                        subtask_progress_abs_error_sum = 0.0
+                        subtask_progress_count = 0.0
+                        subtask_progress_smooth_abs_error_sum = 0.0
+                        subtask_progress_smooth_count = 0.0
+                        subtask_done_tp = 0.0
+                        subtask_done_tn = 0.0
+                        subtask_done_fp = 0.0
+                        subtask_done_fn = 0.0
+                        subtask_done_smooth_tp = 0.0
+                        subtask_done_smooth_tn = 0.0
+                        subtask_done_smooth_fp = 0.0
+                        subtask_done_smooth_fn = 0.0
                         current_pos = self._current_position(env)
                         final_distance = self._safe_geodesic_distance(env, current_pos, goal_pos)
                         subtask_start_pos = current_pos.copy()
@@ -538,17 +556,50 @@ class VLNEvaluator:
                                 current_to_goal_distance=current_to_goal_distance,
                             )
                             target_done = bool(final_distance <= float(self.args.subgoal_success_distance))
+                            pred_progress_smooth = (
+                                snapshot.get("predicted_progress_smooth") if snapshot is not None else None
+                            )
+                            pred_done_smooth = (
+                                snapshot.get("predicted_done_smooth") if snapshot is not None else None
+                            )
                             if fresh_progress_done:
-                                stats["progress_abs_error_sum"] += abs(pred_progress - target_progress)
+                                raw_progress_error = abs(pred_progress - target_progress)
+                                stats["progress_abs_error_sum"] += raw_progress_error
                                 stats["progress_count"] += 1.0
+                                subtask_progress_abs_error_sum += raw_progress_error
+                                subtask_progress_count += 1.0
                                 if pred_done and target_done:
                                     stats["done_tp"] += 1.0
+                                    subtask_done_tp += 1.0
                                 elif pred_done and (not target_done):
                                     stats["done_fp"] += 1.0
+                                    subtask_done_fp += 1.0
                                 elif (not pred_done) and target_done:
                                     stats["done_fn"] += 1.0
+                                    subtask_done_fn += 1.0
                                 else:
                                     stats["done_tn"] += 1.0
+                                    subtask_done_tn += 1.0
+                                if pred_progress_smooth is not None:
+                                    smooth_progress_error = abs(float(pred_progress_smooth) - target_progress)
+                                    stats["progress_smooth_abs_error_sum"] += smooth_progress_error
+                                    stats["progress_smooth_count"] += 1.0
+                                    subtask_progress_smooth_abs_error_sum += smooth_progress_error
+                                    subtask_progress_smooth_count += 1.0
+                                if pred_done_smooth is not None:
+                                    pred_done_smooth = bool(pred_done_smooth)
+                                    if pred_done_smooth and target_done:
+                                        stats["done_smooth_tp"] += 1.0
+                                        subtask_done_smooth_tp += 1.0
+                                    elif pred_done_smooth and (not target_done):
+                                        stats["done_smooth_fp"] += 1.0
+                                        subtask_done_smooth_fp += 1.0
+                                    elif (not pred_done_smooth) and target_done:
+                                        stats["done_smooth_fn"] += 1.0
+                                        subtask_done_smooth_fn += 1.0
+                                    else:
+                                        stats["done_smooth_tn"] += 1.0
+                                        subtask_done_smooth_tn += 1.0
                             prev_progress_in = None
                             if snapshot is not None:
                                 prev_progress_in = snapshot.get("prev_progress_input")
@@ -627,6 +678,7 @@ class VLNEvaluator:
                                 "scene_id": scene_id,
                                 "episode_id": episode.episode_id,
                                 "episode_key": episode_key,
+                                "level": int(subtask_idx),
                                 "subtask_idx": int(subtask_idx),
                                 "subgoal_text": subgoal_text,
                                 "rollout_step": int(rollout_steps),
@@ -692,6 +744,7 @@ class VLNEvaluator:
                             "scene_id": scene_id,
                             "episode_id": episode.episode_id,
                             "episode_key": episode_key,
+                            "level": int(subtask_idx),
                             "subtask_idx": subtask_idx,
                             "start_frame": start_frame,
                             "end_frame": end_frame,
@@ -702,6 +755,47 @@ class VLNEvaluator:
                             "final_distance": float(final_distance),
                             "subgoal_text": subgoal_text,
                             "fail_reason": fail_reason,
+                            "progress_samples": int(subtask_progress_count),
+                            "progress_mae": (
+                                subtask_progress_abs_error_sum / subtask_progress_count
+                                if subtask_progress_count > 0
+                                else None
+                            ),
+                            "progress_smooth_samples": int(subtask_progress_smooth_count),
+                            "progress_smooth_mae": (
+                                subtask_progress_smooth_abs_error_sum / subtask_progress_smooth_count
+                                if subtask_progress_smooth_count > 0
+                                else None
+                            ),
+                            "done_samples": int(subtask_done_tp + subtask_done_tn + subtask_done_fp + subtask_done_fn),
+                            "done_accuracy": (
+                                (subtask_done_tp + subtask_done_tn)
+                                / (subtask_done_tp + subtask_done_tn + subtask_done_fp + subtask_done_fn)
+                                if (subtask_done_tp + subtask_done_tn + subtask_done_fp + subtask_done_fn) > 0
+                                else None
+                            ),
+                            "done_smooth_samples": int(
+                                subtask_done_smooth_tp
+                                + subtask_done_smooth_tn
+                                + subtask_done_smooth_fp
+                                + subtask_done_smooth_fn
+                            ),
+                            "done_smooth_accuracy": (
+                                (subtask_done_smooth_tp + subtask_done_smooth_tn)
+                                / (
+                                    subtask_done_smooth_tp
+                                    + subtask_done_smooth_tn
+                                    + subtask_done_smooth_fp
+                                    + subtask_done_smooth_fn
+                                )
+                                if (
+                                    subtask_done_smooth_tp
+                                    + subtask_done_smooth_tn
+                                    + subtask_done_smooth_fp
+                                    + subtask_done_smooth_fn
+                                ) > 0
+                                else None
+                            ),
                             "replay_leading_sentinel_stripped": bool(
                                 replay_meta["leading_sentinel_stripped"]
                             ),

@@ -116,7 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--num_frames", type=int, default=32)
     parser.add_argument("--num_future_steps", type=int, default=4)
-    parser.add_argument("--num_history", type=int, default=8)
+    parser.add_argument(
+        "--num_history",
+        type=int,
+        default=None,
+        help="History frame count for StreamVLN actor. Defaults to checkpoint training config when available.",
+    )
 
     parser.add_argument("--world_size", default=1, type=int)
     parser.add_argument("--rank", default=0, type=int)
@@ -241,10 +246,18 @@ def evaluate(
         ladder_summary["subtask_closed_loop"] = {
             **subtask_metrics,
             "progress_l1": float(subtask_metrics.get("progress_mae", 0.0)),
+            "progress_smooth_l1": float(subtask_metrics.get("progress_smooth_mae", 0.0)),
             "total_subtasks": int(global_subtask_stats.get("subtasks_total", 0.0)),
             "successful_subtasks": int(global_subtask_stats.get("subtasks_success", 0.0)),
             "progress_samples": int(global_subtask_stats.get("progress_count", 0.0)),
+            "progress_smooth_samples": int(global_subtask_stats.get("progress_smooth_count", 0.0)),
             "done_samples": done_samples,
+            "done_smooth_samples": int(
+                global_subtask_stats.get("done_smooth_tp", 0.0)
+                + global_subtask_stats.get("done_smooth_tn", 0.0)
+                + global_subtask_stats.get("done_smooth_fp", 0.0)
+                + global_subtask_stats.get("done_smooth_fn", 0.0)
+            ),
             "episodes_total": int(global_subtask_stats.get("episodes_total", 0.0)),
             "episodes_evaluated": int(global_subtask_stats.get("episodes_evaluated", 0.0)),
             "episodes_missing_meta": int(global_subtask_stats.get("episodes_missing_meta", 0.0)),

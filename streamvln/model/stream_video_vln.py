@@ -44,6 +44,34 @@ def compute_masked_done_loss(done_logits, done_labels, ignore_value: float = -10
     return nn.functional.binary_cross_entropy_with_logits(done_logits[valid_done], done_labels[valid_done])
 
 
+def combine_streamvln_aux_losses(
+    base_loss: Optional[torch.Tensor],
+    progress_loss: Optional[torch.Tensor],
+    done_loss: Optional[torch.Tensor],
+    progress_loss_weight: float,
+    done_loss_weight: float,
+    progress_only_loss: bool,
+    reference_tensor: torch.Tensor,
+) -> torch.Tensor:
+    if progress_only_loss:
+        total_loss = torch.zeros((), device=reference_tensor.device, dtype=reference_tensor.dtype)
+        if progress_loss is not None:
+            total_loss = total_loss + float(progress_loss_weight) * progress_loss
+        return total_loss
+
+    total_loss = base_loss
+    if progress_loss is not None or done_loss is not None:
+        if total_loss is None:
+            total_loss = torch.zeros((), device=reference_tensor.device, dtype=reference_tensor.dtype)
+        if progress_loss is not None:
+            total_loss = total_loss + float(progress_loss_weight) * progress_loss
+        if done_loss is not None:
+            total_loss = total_loss + float(done_loss_weight) * done_loss
+    if total_loss is None:
+        total_loss = torch.zeros((), device=reference_tensor.device, dtype=reference_tensor.dtype)
+    return total_loss
+
+
 class GRUProgressHead(nn.Module):
     """
     GRU-based temporal progress and done predictor.
@@ -155,6 +183,7 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         aux_dropout = float(getattr(config, "aux_dropout", 0.1))
         self.use_gru_progress = bool(getattr(config, "use_gru_progress", False))
         self.progress_num_bins = int(getattr(config, "progress_num_bins", 0))
+        self.progress_only_loss = bool(getattr(config, "progress_only_loss", False))
 
         if self.use_gru_progress:
             self.gru_progress_head = GRUProgressHead(
@@ -699,14 +728,15 @@ class StreamVLNForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         if done_labels is not None:
             done_loss = compute_masked_done_loss(done_logits, done_labels)
 
-        total_loss = outputs.loss
-        if progress_loss is not None or done_loss is not None:
-            if total_loss is None:
-                total_loss = torch.tensor(0.0, device=hidden_states.device, dtype=hidden_states.dtype)
-            if progress_loss is not None:
-                total_loss = total_loss + self.progress_loss_weight * progress_loss
-            if done_loss is not None:
-                total_loss = total_loss + self.done_loss_weight * done_loss
+        total_loss = combine_streamvln_aux_losses(
+            base_loss=outputs.loss,
+            progress_loss=progress_loss,
+            done_loss=done_loss,
+            progress_loss_weight=self.progress_loss_weight,
+            done_loss_weight=self.done_loss_weight,
+            progress_only_loss=self.progress_only_loss,
+            reference_tensor=hidden_states,
+        )
 
         aux_outputs = StreamVLNCausalLMOutputWithAux(
             loss=total_loss,

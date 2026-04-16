@@ -123,19 +123,30 @@ class CloseEvalLadderUtilsTest:
             "steps_success_count": 3.0,
             "progress_abs_error_sum": 2.5,
             "progress_count": 10.0,
+            "progress_smooth_abs_error_sum": 1.5,
+            "progress_smooth_count": 10.0,
             "done_tp": 3.0,
             "done_tn": 5.0,
             "done_fp": 1.0,
             "done_fn": 1.0,
+            "done_smooth_tp": 4.0,
+            "done_smooth_tn": 4.0,
+            "done_smooth_fp": 1.0,
+            "done_smooth_fn": 1.0,
         }
         summary = summarize_subtask_aggregation(stats)
         assert summary["subtask_success_rate"] == 0.75
         assert summary["steps_to_subgoal"] == 4.0
         assert summary["progress_mae"] == 0.25
+        assert summary["progress_smooth_mae"] == 0.15
         assert summary["done_accuracy"] == 0.8
         assert summary["done_precision"] == 0.75
         assert summary["done_recall"] == 0.75
         assert summary["done_f1"] == 0.75
+        assert summary["done_smooth_accuracy"] == 0.8
+        assert summary["done_smooth_precision"] == 0.8
+        assert summary["done_smooth_recall"] == 0.8
+        assert summary["done_smooth_f1"] == 0.8
 
 
 def test_action_history_for_frame_matches_training_history_window():
@@ -707,7 +718,12 @@ class TestSubtaskReplayMemoryPriming:
         monkeypatch.setattr(
             nav_model,
             "get_last_debug_snapshot",
-            lambda: {"fresh_actor_metadata": True, "fresh_progress_done": True},
+            lambda: {
+                "fresh_actor_metadata": True,
+                "fresh_progress_done": True,
+                "predicted_progress_smooth": 0.125,
+                "predicted_done_smooth": False,
+            },
         )
 
         summary_full = {
@@ -724,10 +740,22 @@ class TestSubtaskReplayMemoryPriming:
         assert progress_path.exists()
         rows = [json.loads(line) for line in progress_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         assert len(rows) == 1
+        assert rows[0]["level"] == 2
         assert rows[0]["pred_progress"] == pytest.approx(0.25, rel=1e-5, abs=1e-6)
+        assert rows[0]["pred_progress_smooth"] == pytest.approx(0.125, rel=1e-5, abs=1e-6)
         assert rows[0]["actual_progress"] == 0.0
         assert rows[0]["pred_done"] is False
+        assert rows[0]["pred_done_smooth"] is False
         assert rows[0]["actual_done"] is False
+
+        detail_path = tmp_path / "subtask_closed_loop_rank0.jsonl"
+        detail_rows = [json.loads(line) for line in detail_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert len(detail_rows) == 1
+        assert detail_rows[0]["level"] == 2
+        assert detail_rows[0]["progress_samples"] == 1
+        assert detail_rows[0]["progress_mae"] == pytest.approx(0.25, rel=1e-5, abs=1e-6)
+        assert detail_rows[0]["progress_smooth_samples"] == 1
+        assert detail_rows[0]["progress_smooth_mae"] == pytest.approx(0.125, rel=1e-5, abs=1e-6)
 
 
 class TestReplayActionNormalization:

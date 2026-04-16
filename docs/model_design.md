@@ -1,259 +1,441 @@
 # ThinkVLN Model Design
 
-Current design summary aligned with:
-- [watcher_openai_annotation_prompts.md](/mnt/swx/ThinkVLN/docs/watcher_openai_annotation_prompts.md)
-- [thinkvln_actor.py](/mnt/swx/ThinkVLN/thinkvln/models/thinkvln_actor.py)
+This document is a practical introduction to the current system design. It is written to match the style of `docs/repo_handoff_guide.md`: concrete modules first, then data flow, then how the actor and watcher cooperate in training and evaluation.
 
-## 1. System Overview
+## 1. System overview
 
-ThinkVLN is organized as a two-level navigation stack:
+The current repository is organized around a two-system navigation stack:
 
-- `Actor`: low-level executor that predicts the next action, scalar progress, and binary done signal from current visual context
-- `Watcher`: high-level state updater that maintains compact memory and decides whether the current subtask should continue or hand off to the next one
+1. a fast **actor** that predicts low-level navigation actions from the current observation, instruction, and compressed trajectory context;
+2. a slower **watcher** that reviews rollout spans, updates compact memory, and decides whether the current subtask should hand off to the next one.
 
-The current codebase is strongest on:
-- a trainable multimodal `Actor`
-- a prompt-defined `Watcher` annotation format for supervision and data construction
+In practice:
 
-## 2. Actor Design
+- the actor is trained on the active `streamvln/` codepath and StreamVLN-style subtask supervision;
+- the watcher is trained as a large Qwen vision-language model on watcher rollout data and annotations.
 
-### Base model
 
-- Backbone: `ThinkVLNForConditionalGeneration`
-- Actor wrapper: `ThinkVLNActor`
-- Visual-language base is inherited from the underlying ThinkVLN / Qwen3-VL style model
+The high-level reason for this split is simple:
 
-### Core prediction targets
+- the actor needs to run frequently and cheaply inside Habitat closed-loop evaluation;
+- the watcher needs a broader, slower judgment over a rollout span: what progress has already been made, whether the active step is truly complete, and what text hint should guide the next actor segment.
 
-The actor predicts three control signals:
+## 2. Main modules
 
-- `action_logits`: 4-way discrete action classification
-  - `forward`
-  - `turn_left`
-  - `turn_right`
-  - `stop`
-- `progress_preds`: scalar subtask progress
-- `done_preds`: binary completion probability for the current step/subtask state
+### Actor stack
 
-### Query-token interface
+The actor side is split between the active StreamVLN actor baseline and the ThinkVLN evaluation wrappers that consume it.
 
-The actor uses learnable query-token pairs instead of action-token search.
+Primary files:
 
-- `num_query_tokens = K`
-- Actual appended query length is `2 * K`
-- Query tokens are interleaved:
-  - `action_0, progress_0, action_1, progress_1, ...`
+- `streamvln/model/stream_video_vln.py`: main StreamVLN model path.
+- `streamvln/dataset/streamvln_actor_dataset.py`: actor sample construction, prompt format, memory layout, and 4-step action supervision.
+- `streamvln/streamvln_train.py`: baseline StreamVLN training path.
+- `scripts/train_streamvln_actor.py`: current training launcher and config adapter for StreamVLN actor experiments.
+- `config/streamvln_actor_train*.yaml`: active actor experiment configs.
 
-At inference/training time:
-- even query positions feed the action head
-- odd query positions feed the progress head
-- the first progress query also feeds the done head
+Actor-facing evaluation wrappers:
 
-### Head architecture
+- `thinkvln/models/navigation_model.py`: unified navigation wrapper used by closed-loop evaluation.
+- `thinkvln/eval/close_eval_models.py`: builds the eval-time navigation model from config/CLI args.
+- `thinkvln/eval/close_eval_runner.py`: Habitat runtime loop for subtask closed-loop evaluation.
 
-The current actor head stack is:
+### Watcher stack
 
-1. shared projector
-   - `Linear -> LayerNorm -> GELU -> Dropout`
-2. action head
-   - OpenVLA-OFT style `MLPResNet`
-   - output shape: `[batch, K, 4]`
-3. progress head
-   - OpenVLA-OFT style `MLPResNet`
-   - output shape: `[batch, K]`
-   - current training/inference mainly uses the first scalar
-4. done head
-   - binary linear head on the first projected progress token
-   - output: `done_logits`, `done_preds = sigmoid(done_logits)`
+The watcher side is implemented inside `thinkvln/` as a rollout-level supervision and decision system.
 
-### Training modes
+Primary files:
 
-`ThinkVLNActor.forward()` supports two modes:
+- `thinkvln/dataset/watcher_sft_dataset.py`: watcher prompt contract, rollout-sample loading, and target JSON format.
+- `thinkvln/engine/watcher_sft_trainer.py`: watcher SFT trainer.
+- `thinkvln/datagen/generation/watcher_rollout_generation.py`: generates rollout spans for watcher training.
+- `thinkvln/datagen/generation/watcher_openai_annotation.py`: API-based watcher annotation pipeline.
+- `thinkvln/datagen/generation/watcher_openai_annotation_deploy.py`: deployment-oriented annotation path.
+- `thinkvln/datagen/generation/watcher_manual_done_annotation.py`: manual done-label workflow.
+- `thinkvln/datagen/generation/watcher_manual_switch_annotation.py`: manual switch / handoff workflow.
+- `thinkvln/datagen/generation/watcher_merge_dataset.py`: merges watcher supervision sources.
+- `scripts/train_watcher.sh`: watcher training launcher.
+- `config/watcher_sft.yaml`, `config/watcher_sft_fullv2_streamv2.yaml`: current watcher training configs.
 
-- Action mode
-  - triggered when `action_labels` is provided
-  - computes `action_loss + progress_loss + done_loss`
-  - no LM loss
-- CoT mode
-  - triggered when `action_labels` is absent
-  - computes only language-model loss
-  - no action/progress/done prediction loss
+### Shared offline data pipeline
 
-This keeps one model usable for both control prediction and reasoning-style supervision.
+These modules build the trajectory summaries and subtask structures that both actor and watcher depend on:
 
-### Losses
+- `scripts/generate_summary_full.py`: builds `summary_full.jsonl`.
+- `thinkvln/datagen/generation/subtask_split.py`: splits trajectories into subtask segments.
+- `thinkvln/datagen/generation/subtask_determination.py`: generates subtask determination outputs.
+- `scripts/run_subtask_summary_pipeline.sh`: practical summary/subtask pipeline launcher.
+- `scripts/build_streamvln_actor_dataset.py`: materializes StreamVLN actor training records from one or more summary files, with optional watcher hints.
 
-- action: cross-entropy
-- progress: MSE by default, optional Huber
-- done: BCE-with-logits
+### Evaluation stack
 
-Weighted sum:
+There are two important evaluation paths in the current system:
 
-```text
-total_loss =
-    action_loss_weight * action_loss +
-    progress_loss_weight * progress_loss +
-    done_loss_weight * done_loss
-```
+- **subtask evaluation**:
+  - `thinkvln/eval/close_eval.py`
+  - `thinkvln/eval/close_eval_cli.py`
+  - `thinkvln/eval/close_eval_runner.py`
+  - `scripts/run_close_eval_subtask.sh`
+  - `scripts/summarize_subtask_success.py`
+- **two-system evaluation**:
+  - `thinkvln/eval/two_system_eval.py`
+  - `config/two_system_eval*.yaml`
 
-### Runtime behavior
+## 3. Actor design
 
-At runtime the navigation stack mainly consumes:
+The current actor is best understood as a StreamVLN-derived low-level controller with extra subtask-oriented supervision.
 
-- the first action logit vector
-- the first scalar progress prediction
-- the first done probability
+Core behavior:
 
-This makes the actor an efficient local controller, while leaving step-transition judgment to the watcher layer.
+- input: current RGB observation, instruction, current subtask text, optional watcher hint, and selected historical observations;
+- output: a short action chunk, typically the next 4 actions;
+- optional supervision heads or metadata: progress and done labels for subtask-aware evaluation and handoff logic.
 
-## 3. Watcher Design
+The actor prompt builder in `streamvln/dataset/streamvln_actor_dataset.py` makes the design intent explicit. A typical actor sample can include:
 
-The watcher side is currently defined as a compact annotation and supervision interface rather than a standalone trained network in this file set.
+- `Instruction`
+- `Current subtask`
+- `Next subtask`
+- `Subtask start observation`
+- `Watcher hint`
+- `Historical observations`
+- `Recent actions`
+- `Steps in current subtask`
 
-### Stage A: `memory_start`
+The actor is therefore not a plain end-to-end navigation policy. It is a subtask-conditioned controller with optional watcher-provided text memory and sparse visual memory.
 
-Output format:
+Important implementation details:
 
-```json
-{"memory_start":"..."}
-```
+- supervision is chunked into the next 4 actions;
+- the dataset supports a special `<next>` token to mark subtask transitions;
+- the data builder can inject watcher memory text from a separate watcher hint file;
+- historical observations are selected with anchor-aware layouts rather than naive full-history replay.
 
-Fixed structure:
+The result is an actor that is still operationally close to StreamVLN, but trained in a way that makes it compatible with watcher-guided hierarchical control.
 
-```text
-traj summary; current state; neutral status
-```
+## 4. Watcher design
 
-Requirements:
-- summarize only past progress that still matters
-- make the pivot state explicit
-- keep the third fragment neutral
-- do not decide handoff yet
+The watcher is the slower supervisory model. Its job is not to emit primitive actions every step. Its job is to judge progress over a rollout span and produce compact state that the actor can use on the next segment.
 
-Typical neutral status:
-- `active step in progress`
-- `still on current step`
-- `approach still ongoing`
+The watcher prompt and output contract are defined in `thinkvln/dataset/watcher_sft_dataset.py`.
 
-### Stage B: rollout update
+The watcher consumes:
 
-Output format:
+- the plan state split into `done`, `active`, and `pending` steps;
+- a prior compressed memory string, `memory_start`;
+- rollout actions over a short segment;
+- sampled rollout images from that segment.
 
-```json
-{"done":true,"next_subtask":"...","memory_end":"..."}
-```
+The watcher returns structured JSON with three fields:
 
-Definitions:
-- `done`: whether the current active step has reached a real handoff point
-- `next_subtask`: short imperative subtask text
-- `memory_end`: updated watcher memory after the rollout
+- `memory_end`: updated compact cumulative memory;
+- `done`: whether the current active step has reached a natural handoff;
+- `next_subtask`: the next actor-facing subtask string, either a continuation of the current step or the promoted next step.
 
-`memory_end` keeps the same update-friendly structure:
+This is the central watcher design choice: the watcher is a rollout-level state updater and handoff judge, not merely a classifier. It performs three coupled functions:
 
-```text
-traj summary; current state; task status
-```
+1. compress trajectory history into reusable text memory;
+2. decide whether the active subtask is genuinely complete;
+3. rewrite the actor-facing subtask text for the next rollout segment.
 
-The first two fragments should feel like a direct continuation of `memory_start`.
-The third fragment is now allowed to decide state:
-- `step ongoing`
-- `ready for next step`
-- `task complete`
+That combination is what lets the two-system loop stay lightweight while still being more structured than a single flat actor policy.
 
-### Watcher decision rule
+## 5. Training data sources
 
-Current watcher logic does not rely on a map.
-It judges only from:
-- `memory_start`
-- rollout RGB images
-- rollout actions
-- plan state split into `Done / Active / Pending`
+### Actor training data
 
-`done=true` requires both:
-- the current active step is naturally complete
-- the rollout end is already a valid start point for the next step
+The actor training data is based on StreamVLN-style trajectory summaries and materialized subtask records.
 
-This avoids early handoff cases such as:
-- not yet at the intersection before a turn
-- not yet fully through a doorway
-- not yet aligned after a turn
+Main sources:
 
-### Transition logic used by watcher
+- `data/trajectory_data/R2R_back/summary_full.jsonl`
+- `data/trajectory_data/ScaleVLN_back/summary_full*.jsonl`
+- materialized actor datasets such as `data/trajectory_data/streamvln_actor_train.jsonl`
 
-- `Turn`
-  - hand off only after the new heading is aligned for the next move
-- `Region Transition`
-  - hand off only after clearly crossing into the next region
-- `Visual Approach`
-  - hand off only when the target/stop point is immediate
-- `General Cruise`
-  - hand off only at the actual structural trigger point
-- `Stop`
-  - hand off only when already settled in the stop position
+The materialization step is handled by `scripts/build_streamvln_actor_dataset.py`, which can combine:
 
-## 4. Actor-Watcher Interface
+- one or more summary files such as R2R and ScaleVLN;
+- the corresponding image roots;
+- optional watcher hint files;
+- memory-layout settings such as history length, anchor counts, and sliding-window mode.
 
-The current system boundary is:
+Actor records typically contain:
 
-- Actor handles short-horizon control prediction
-- Watcher handles subtask-level memory and handoff judgment
-
-A clean interface looks like:
-
-### Actor inputs
-
-- current image sequence / visual context
-- text prompt or subgoal
-- appended action/progress query tokens
-
-### Actor outputs
-
-- `action_logits`
-- `progress_preds`
-- `done_preds`
-
-### Watcher inputs
-
-- pre-pivot history images for `memory_start`
-- rollout images and rollout actions
-- current plan state
-- previous memory
-
-### Watcher outputs
-
-- `memory_start`
-- `done`
-- `next_subtask`
-- `memory_end`
-
-## 5. Data and Supervision
-
-Current training/supervision signals in the codebase are:
-
-### Actor-side labels
-
+- `episode_key`
+- `frame_idx`
+- `subtask`
 - `action_labels`
-- `progress_labels`
-- `done_labels`
+- image paths and history image paths
+- optional `watcher_hint`
+- optional `next_subtask`
 
-### Watcher-side annotations
+Conceptually, the actor training data answers this question:
 
+> Given the current observation, subtask, recent context, and optional watcher memory, what short low-level action chunk should the actor produce next?
+
+### Watcher training data
+
+The watcher training data is built from rollout bundles rather than directly from raw trajectory summaries.
+
+Main sources in the checked-in configs:
+
+- rollout bundle root:
+  `results/watcher_rollout_train_full_v2`
+- rollout manifest:
+  `results/watcher_rollout_train_full_v2/manifest/watcher_rollout_manifest.jsonl`
+- annotation file:
+  `results/watcher_rollout_train_full_v2/watcher_openai_annotations.deploy.full.jsonl`
+- base trajectory summary:
+  `data/trajectory_data/R2R_back/summary_full.jsonl`
+
+The watcher dataset loader combines:
+
+- manifest rows produced by rollout generation;
+- annotation rows produced by OpenAI-style or manual watcher labeling;
+- summary metadata such as instruction and plan steps from `summary_full.jsonl`.
+
+Each watcher sample is built around:
+
+- `instruction`
+- `plan_steps`
+- `done_steps`
+- `active_step`
+- `pending_steps`
 - `memory_start`
-- `done`
-- `next_subtask`
-- `memory_end`
+- `rollout_actions`
+- `rollout_image_paths`
+- target `memory_end`
+- target `done`
+- target `next_subtask`
 
-This means the project already has:
-- direct control supervision for the actor
-- structured high-level supervision for watcher memory and handoff decisions
+Conceptually, the watcher training data answers this question:
 
-## 6. Current Design Takeaways
+> After observing this rollout segment, how should the system update memory, and is the current subtask ready to hand off?
 
-- The actor is no longer just `action + progress`; it is now `action + progress + done`
-- The watcher is no longer described by old `PROCEED / RESUME / FAIL` labels in the current annotation design
-- The latest watcher format is memory-centric and update-oriented:
-  - `memory_start` is neutral
-  - `memory_end` is a direct update with explicit task status
-- The main division of labor is:
-  - actor for local execution
-  - watcher for memory compression and subtask transition
+## 6. Training pipeline
+
+The current end-to-end training pipeline has two connected but separate tracks.
+
+### Stage A: build trajectory summaries and subtask structure
+
+Starting from raw trajectory or simulator outputs, the repo builds summary files and subtask labels.
+
+Typical pieces:
+
+- `scripts/generate_summary_full.py`
+- `thinkvln/datagen/generation/subtask_split.py`
+- `thinkvln/datagen/generation/subtask_determination.py`
+- `scripts/run_subtask_summary_pipeline.sh`
+
+This stage produces `summary_full.jsonl`-style files that are the base source for later actor and watcher workflows.
+
+### Stage B: materialize actor training records
+
+The next step is to transform summary trajectories into StreamVLN actor examples.
+
+Typical entrypoint:
+
+- `scripts/build_streamvln_actor_dataset.py`
+
+This stage:
+
+- chooses the underlying summary datasets such as R2R and ScaleVLN;
+- resolves image paths;
+- injects optional watcher hints;
+- selects sparse history frames;
+- writes a materialized actor dataset JSONL for efficient training.
+
+### Stage C: train the actor
+
+The actor is trained through the active StreamVLN path.
+
+Typical entrypoints:
+
+- `scripts/train_streamvln_actor.py`
+- `scripts/train_streamvln_actor.sh`
+- `config/streamvln_actor_train*.yaml`
+
+The actor config defines:
+
+- base model path, currently `model_weights/streamvln` in the checked-in StreamVLN actor config;
+- LoRA settings;
+- history length and future-step horizon;
+- optional watcher memory ratio;
+- training hyperparameters and output paths.
+
+### Stage D: generate watcher rollouts
+
+Once an actor is available, the system generates rollout segments specifically for watcher supervision.
+
+Typical entrypoints:
+
+- `thinkvln/datagen/generation/watcher_rollout_generation.py`
+- `scripts/run_watcher_rollout_train_full.sh`
+
+This stage runs the actor in Habitat, collects rollout spans around subtask pivots, stores rollout frames, and writes manifest rows for later annotation.
+
+### Stage E: annotate watcher data
+
+The rollout bundle is then annotated so that watcher targets become supervised learning data.
+
+Typical entrypoints:
+
+- `thinkvln/datagen/generation/watcher_openai_annotation.py`
+- `thinkvln/datagen/generation/watcher_openai_annotation_deploy.py`
+- `thinkvln/datagen/generation/watcher_manual_done_annotation.py`
+- `thinkvln/datagen/generation/watcher_manual_switch_annotation.py`
+- `scripts/run_watcher_openai_annotation*.sh`
+- `scripts/run_watcher_manual_annotation.sh`
+- `scripts/run_watcher_manual_switch_web.sh`
+
+This stage produces target labels for:
+
+- updated watcher memory;
+- handoff decision (`done`);
+- next actor-facing subtask text.
+
+### Stage F: train the watcher
+
+The watcher is then fine-tuned with the rollout-based SFT dataset.
+
+Typical entrypoints:
+
+- `thinkvln/engine/watcher_sft_trainer.py`
+- `scripts/train_watcher.sh`
+- `config/watcher_sft.yaml`
+- `config/watcher_sft_fullv2_streamv2.yaml`
+
+In the checked-in config, the watcher is trained from a local Qwen3-VL-8 checkpoint with LoRA enabled and rollout-image inputs sampled by `image_stride`.
+
+## 7. Online cooperation pipeline
+
+At runtime, the actor and watcher cooperate as a staged loop rather than a single monolithic policy.
+
+### Initialization
+
+At the start of an episode:
+
+- the environment provides the instruction and the full plan;
+- the watcher starts with an empty or initial memory;
+- the active step is the first plan step;
+- the actor receives the current subtask text plus the first observation.
+
+### Fast actor loop
+
+The actor runs for a short local segment:
+
+- it predicts low-level actions from the current observation, current subtask, sparse history, and optional watcher hint;
+- it executes those actions in the environment;
+- the system accumulates rollout images and action traces for the current segment.
+
+This is the fast control path and is meant to be called frequently.
+
+### Slow watcher wakeup
+
+After some number of steps, or when a progress threshold / wakeup rule is hit, the watcher is called:
+
+- it receives the rollout segment, prior memory, and current plan state;
+- it rewrites memory into a compact cumulative state;
+- it decides whether the current active step has reached a natural handoff;
+- it emits the next actor-facing subtask text.
+
+### Handoff logic
+
+If `done=false`:
+
+- the active step remains the same;
+- the watcher subtask text usually refines or recovers the current step;
+- the actor continues on the same plan step but with updated watcher memory.
+
+If `done=true`:
+
+- the current active step moves into `done_steps`;
+- the next pending step becomes the new active step;
+- the actor continues with the promoted step and updated watcher memory.
+
+This separation is the core system design:
+
+- the actor handles local movement;
+- the watcher handles long-horizon subtask state transitions and memory compression.
+
+## 8. Evaluation
+
+The current repo uses two evaluation styles that answer different questions.
+
+### A. Subtask evaluation
+
+Subtask evaluation measures how well the actor handles the current active step in closed loop.
+
+Primary files:
+
+- `thinkvln/eval/close_eval.py`
+- `thinkvln/eval/close_eval_cli.py`
+- `thinkvln/eval/close_eval_runner.py`
+- `thinkvln/eval/close_eval_utils.py`
+- `scripts/run_close_eval_subtask.sh`
+- `scripts/summarize_subtask_success.py`
+
+Important characteristics:
+
+- `close_eval_cli.py` currently exposes `ladder_mode=subtask`;
+- the evaluation requires `summary_full.jsonl`;
+- the navigation model must implement `predict_action_with_progress_and_done(...)`;
+- the output summary includes subtask success, progress error, and done-related metrics.
+
+This evaluation is mainly about the actor’s ability to execute a subtask correctly under closed-loop control.
+
+In other words, subtask evaluation answers:
+
+> Can the current actor finish the right local step within budget, and are its progress / done signals aligned with the ground-truth subtask structure?
+
+### B. Two-system evaluation
+
+Two-system evaluation measures the joint behavior of actor and watcher as a coordinated hierarchical system.
+
+Primary files:
+
+- `thinkvln/eval/two_system_eval.py`
+- `config/two_system_eval*.yaml`
+- `thinkvln/tests/test_two_system_eval.py`
+
+The config structure in `two_system_eval.py` makes the design explicit:
+
+- `actor`: low-level policy and memory settings;
+- `watcher`: backend, model path, and image stride;
+- `env`: Habitat config and summary source;
+- `rollout`: wakeup frequency, progress threshold, watcher budget, and episode cap;
+- `output`: trace and summary artifact settings.
+
+This evaluation asks a different question:
+
+> Does the combined system manage handoffs correctly, preserve useful memory, and achieve better episode-level behavior than the actor alone?
+
+Operationally, this path evaluates:
+
+- actor execution quality inside each rollout span;
+- watcher handoff quality;
+- watcher memory usefulness;
+- end-to-end episode success under repeated actor-watcher alternation.
+
+## 9. Practical repo map
+
+If someone needs to understand or extend the current system quickly, the shortest reading path is:
+
+1. `docs/repo_handoff_guide.md`
+2. `docs/model_design.md`
+3. `streamvln/dataset/streamvln_actor_dataset.py`
+4. `thinkvln/dataset/watcher_sft_dataset.py`
+5. `scripts/build_streamvln_actor_dataset.py`
+6. `scripts/train_streamvln_actor.py`
+7. `scripts/run_watcher_rollout_train_full.sh`
+8. `thinkvln/engine/watcher_sft_trainer.py`
+9. `thinkvln/eval/close_eval_cli.py`
+10. `thinkvln/eval/two_system_eval.py`
+
+That sequence covers:
+
+- how actor samples are built;
+- how watcher samples are built;
+- how training data is produced;
+- how the actor and watcher are trained;
+- how the two evaluation modes map onto the actual runtime system.

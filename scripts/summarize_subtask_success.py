@@ -28,6 +28,37 @@ def _make_stat(success: int, total: int) -> Dict[str, Any]:
     return {"success": success, "total": total, "rate": (success / total) if total > 0 else 0.0}
 
 
+def _to_optional_float(value: Any) -> Any:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_count(value: Any) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return count if count > 0 else 0
+
+
+def _finalize_stat_with_progress(
+    success: int,
+    total: int,
+    progress_sum: float,
+    progress_count: int,
+    progress_smooth_sum: float,
+    progress_smooth_count: int,
+) -> Dict[str, Any]:
+    stat = _make_stat(success, total)
+    stat["progress_mae"] = (progress_sum / progress_count) if progress_count > 0 else None
+    stat["progress_smooth_mae"] = (
+        (progress_smooth_sum / progress_smooth_count) if progress_smooth_count > 0 else None
+    )
+    return stat
+
+
 def collect_stats(run_dir: str, pattern: str = "subtask_closed_loop_rank*.jsonl") -> Dict[str, Any]:
     root = Path(run_dir)
     if not root.is_dir():
@@ -40,7 +71,8 @@ def collect_stats(run_dir: str, pattern: str = "subtask_closed_loop_rank*.jsonl"
     total_success = 0
     total_count = 0
     by_file: Dict[str, Dict[str, Any]] = {}
-    by_subtask_raw = defaultdict(lambda: [0, 0])  # idx -> [success, total]
+    by_subtask_raw = defaultdict(lambda: [0, 0, 0.0, 0, 0.0, 0])
+    by_level_raw = defaultdict(lambda: [0, 0, 0.0, 0, 0.0, 0])
 
     for file_path in files:
         file_success = 0
@@ -59,19 +91,59 @@ def collect_stats(run_dir: str, pattern: str = "subtask_closed_loop_rank*.jsonl"
 
                 success = _to_bool(record.get("success", False))
                 subtask_idx = _to_subtask_idx(record.get("subtask_idx", 1))
+                level = _to_subtask_idx(record.get("level", subtask_idx))
+                progress_mae = _to_optional_float(record.get("progress_mae"))
+                progress_smooth_mae = _to_optional_float(record.get("progress_smooth_mae"))
+                progress_samples = _to_count(record.get("progress_samples", 1 if progress_mae is not None else 0))
+                progress_smooth_samples = _to_count(
+                    record.get("progress_smooth_samples", 1 if progress_smooth_mae is not None else 0)
+                )
 
                 file_count += 1
                 file_success += int(success)
                 by_subtask_raw[subtask_idx][0] += int(success)
                 by_subtask_raw[subtask_idx][1] += 1
+                if progress_mae is not None and progress_samples > 0:
+                    by_subtask_raw[subtask_idx][2] += progress_mae * progress_samples
+                    by_subtask_raw[subtask_idx][3] += progress_samples
+                if progress_smooth_mae is not None and progress_smooth_samples > 0:
+                    by_subtask_raw[subtask_idx][4] += progress_smooth_mae * progress_smooth_samples
+                    by_subtask_raw[subtask_idx][5] += progress_smooth_samples
+
+                by_level_raw[level][0] += int(success)
+                by_level_raw[level][1] += 1
+                if progress_mae is not None and progress_samples > 0:
+                    by_level_raw[level][2] += progress_mae * progress_samples
+                    by_level_raw[level][3] += progress_samples
+                if progress_smooth_mae is not None and progress_smooth_samples > 0:
+                    by_level_raw[level][4] += progress_smooth_mae * progress_smooth_samples
+                    by_level_raw[level][5] += progress_smooth_samples
 
         total_count += file_count
         total_success += file_success
         by_file[file_path.name] = _make_stat(file_success, file_count)
 
     by_subtask_idx = {
-        idx: _make_stat(success=success, total=total)
-        for idx, (success, total) in sorted(by_subtask_raw.items(), key=lambda item: item[0])
+        idx: _finalize_stat_with_progress(
+            success=values[0],
+            total=values[1],
+            progress_sum=values[2],
+            progress_count=values[3],
+            progress_smooth_sum=values[4],
+            progress_smooth_count=values[5],
+        )
+        for idx, values in sorted(by_subtask_raw.items(), key=lambda item: item[0])
+    }
+    by_level = {
+        idx: _finalize_stat_with_progress(
+            success=values[0],
+            total=values[1],
+            progress_sum=values[2],
+            progress_count=values[3],
+            progress_smooth_sum=values[4],
+            progress_smooth_count=values[5],
+        )
+        for idx, values in sorted(by_level_raw.items(), key=lambda item: item[0])
     }
 
     return {
@@ -81,6 +153,7 @@ def collect_stats(run_dir: str, pattern: str = "subtask_closed_loop_rank*.jsonl"
         "overall": _make_stat(total_success, total_count),
         "by_file": by_file,
         "by_subtask_idx": by_subtask_idx,
+        "by_level": by_level,
     }
 
 
@@ -104,7 +177,23 @@ def _print_stats(stats: Dict[str, Any]) -> None:
 
     print("\nBy subtask_idx:")
     for idx, item in stats["by_subtask_idx"].items():
-        print(f"  {idx}: {item['success']}/{item['total']} ({_format_rate(item['rate'])})")
+        extra = []
+        if item.get("progress_mae") is not None:
+            extra.append(f"progress_mae={item['progress_mae']:.4f}")
+        if item.get("progress_smooth_mae") is not None:
+            extra.append(f"progress_smooth_mae={item['progress_smooth_mae']:.4f}")
+        suffix = f" [{' '.join(extra)}]" if extra else ""
+        print(f"  {idx}: {item['success']}/{item['total']} ({_format_rate(item['rate'])}){suffix}")
+
+    print("\nBy level:")
+    for idx, item in stats["by_level"].items():
+        extra = []
+        if item.get("progress_mae") is not None:
+            extra.append(f"progress_mae={item['progress_mae']:.4f}")
+        if item.get("progress_smooth_mae") is not None:
+            extra.append(f"progress_smooth_mae={item['progress_smooth_mae']:.4f}")
+        suffix = f" [{' '.join(extra)}]" if extra else ""
+        print(f"  {idx}: {item['success']}/{item['total']} ({_format_rate(item['rate'])}){suffix}")
 
 
 def parse_args() -> argparse.Namespace:

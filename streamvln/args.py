@@ -13,6 +13,8 @@ class ModelArguments:
     done_loss_weight: float = field(default=1.0)
     use_gru_progress: bool = field(default=False)
     progress_num_bins: int = field(default=0)
+    progress_only_loss: bool = field(default=False)
+    lora_adapter_path: Optional[str] = field(default=None)
 
     mm_tunable_parts: Optional[str] = field(
         default=None, metadata={"help": 'Could be "mm_mlp_adapter", "mm_vision_resampler", "mm_vision_tower,mm_mlp_adapter,mm_language_model", "mm_vision_tower,mm_mlp_adapter,mm_language_model", "mm_mlp_adapter,mm_language_model"'}
@@ -145,4 +147,5 @@ class TrainingArguments(transformers.TrainingArguments):
     gradient_checkpointing: bool = field(default=True)
     verbose_logging: bool = field(default=False)
     attn_implementation: str = field(default="flash_attention_2", metadata={"help": "Use transformers attention implementation."})
+    train_gru_only: bool = field(default=False)
     

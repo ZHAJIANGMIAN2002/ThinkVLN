@@ -128,33 +128,52 @@ def compute_step_budget(gt_subtask_steps: int, factor: float) -> int:
 
 
 def summarize_subtask_aggregation(stats: Dict[str, float]) -> Dict[str, float]:
+    def _binary_metrics(prefix: str = "") -> Dict[str, float]:
+        tp = float(stats.get(f"{prefix}tp", 0.0))
+        tn = float(stats.get(f"{prefix}tn", 0.0))
+        fp = float(stats.get(f"{prefix}fp", 0.0))
+        fn = float(stats.get(f"{prefix}fn", 0.0))
+        total = tp + tn + fp + fn
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (
+            2.0 * precision * recall / (precision + recall)
+            if (precision + recall) > 0
+            else 0.0
+        )
+        return {
+            "accuracy": (tp + tn) / total if total > 0 else 0.0,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+        }
+
     total_subtasks = float(stats.get("subtasks_total", 0.0))
     successful_subtasks = float(stats.get("subtasks_success", 0.0))
     success_steps_count = float(stats.get("steps_success_count", 0.0))
     success_steps_sum = float(stats.get("steps_success_sum", 0.0))
     progress_count = float(stats.get("progress_count", 0.0))
     progress_error_sum = float(stats.get("progress_abs_error_sum", 0.0))
-    done_tp = float(stats.get("done_tp", 0.0))
-    done_tn = float(stats.get("done_tn", 0.0))
-    done_fp = float(stats.get("done_fp", 0.0))
-    done_fn = float(stats.get("done_fn", 0.0))
-    done_total = done_tp + done_tn + done_fp + done_fn
-    done_precision = done_tp / (done_tp + done_fp) if (done_tp + done_fp) > 0 else 0.0
-    done_recall = done_tp / (done_tp + done_fn) if (done_tp + done_fn) > 0 else 0.0
-    done_f1 = (
-        2.0 * done_precision * done_recall / (done_precision + done_recall)
-        if (done_precision + done_recall) > 0
-        else 0.0
-    )
+    progress_smooth_count = float(stats.get("progress_smooth_count", 0.0))
+    progress_smooth_error_sum = float(stats.get("progress_smooth_abs_error_sum", 0.0))
+    done_metrics = _binary_metrics()
+    done_smooth_metrics = _binary_metrics("done_smooth_")
 
     return {
         "subtask_success_rate": successful_subtasks / total_subtasks if total_subtasks > 0 else 0.0,
         "steps_to_subgoal": success_steps_sum / success_steps_count if success_steps_count > 0 else 0.0,
         "progress_mae": progress_error_sum / progress_count if progress_count > 0 else 0.0,
-        "done_accuracy": (done_tp + done_tn) / done_total if done_total > 0 else 0.0,
-        "done_precision": done_precision,
-        "done_recall": done_recall,
-        "done_f1": done_f1,
+        "progress_smooth_mae": (
+            progress_smooth_error_sum / progress_smooth_count if progress_smooth_count > 0 else 0.0
+        ),
+        "done_accuracy": done_metrics["accuracy"],
+        "done_precision": done_metrics["precision"],
+        "done_recall": done_metrics["recall"],
+        "done_f1": done_metrics["f1"],
+        "done_smooth_accuracy": done_smooth_metrics["accuracy"],
+        "done_smooth_precision": done_smooth_metrics["precision"],
+        "done_smooth_recall": done_smooth_metrics["recall"],
+        "done_smooth_f1": done_smooth_metrics["f1"],
     }
 
 

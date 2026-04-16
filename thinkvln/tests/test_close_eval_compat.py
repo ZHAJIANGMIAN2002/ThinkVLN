@@ -2,7 +2,7 @@ import unittest
 
 from thinkvln.eval import close_eval
 from thinkvln.eval.close_eval_cli import build_parser
-from thinkvln.eval.close_eval_models import _load_streamvln_pretrained_model
+from thinkvln.eval.close_eval_models import _infer_streamvln_num_history, _load_streamvln_pretrained_model
 
 
 class CloseEvalCompatibilityTest(unittest.TestCase):
@@ -71,9 +71,24 @@ class CloseEvalCompatibilityTest(unittest.TestCase):
         self.assertEqual(args.model_max_length, 4096)
         self.assertEqual(args.memory_num_history_images, 6)
         self.assertEqual(args.done_threshold, 0.85)
+        self.assertIsNone(args.num_history)
         self.assertEqual(args.target_episode_key, "")
         self.assertEqual(args.enable_step_debug, False)
         self.assertEqual(args.step_debug_format, "none")
+
+    def test_infer_streamvln_num_history_prefers_matching_training_config(self):
+        value = _infer_streamvln_num_history(
+            model_path="/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_anchor_v2_progress_gru_4gpu/checkpoint-4000",
+            configured_num_history=None,
+        )
+        self.assertEqual(value, 6)
+
+    def test_infer_streamvln_num_history_respects_explicit_override(self):
+        value = _infer_streamvln_num_history(
+            model_path="/mnt/swx/ThinkVLN/checkpoints/streamvln_actor_anchor_v2_progress_gru_4gpu/checkpoint-4000",
+            configured_num_history=5,
+        )
+        self.assertEqual(value, 5)
 
     def test_streamvln_loader_falls_back_when_flash_attention_init_fails(self):
         calls = []

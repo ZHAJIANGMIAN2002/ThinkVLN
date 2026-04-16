@@ -4,6 +4,7 @@ import sys
 from typing import Optional
 
 import torch
+import yaml
 
 from thinkvln.engine.inference import load_model_and_processor
 from thinkvln.models.navigation_model import (
@@ -13,6 +14,44 @@ from thinkvln.models.navigation_model import (
     ThinkVLNFMNavigationModel,
     ThinkVLNNavigationModel,
 )
+
+
+def _infer_streamvln_num_history(model_path: str, configured_num_history: Optional[int]) -> int:
+    if configured_num_history is not None:
+        return int(configured_num_history)
+
+    try:
+        checkpoint_dir = os.path.abspath(model_path)
+        candidate_dir = checkpoint_dir if os.path.isdir(checkpoint_dir) else os.path.dirname(checkpoint_dir)
+        base_name = os.path.basename(candidate_dir.rstrip(os.sep))
+        if base_name.startswith("checkpoint-"):
+            output_dir = os.path.dirname(candidate_dir)
+        else:
+            output_dir = candidate_dir
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+        config_dir = os.path.join(repo_root, "config")
+        if not os.path.isdir(config_dir):
+            return 8
+
+        for name in sorted(os.listdir(config_dir)):
+            if not name.endswith((".yaml", ".yml")):
+                continue
+            config_path = os.path.join(config_dir, name)
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    payload = yaml.safe_load(f) or {}
+            except Exception:
+                continue
+            training_cfg = payload.get("training", {})
+            data_cfg = payload.get("data", {})
+            if os.path.abspath(str(training_cfg.get("output_dir", ""))) != output_dir:
+                continue
+            value = data_cfg.get("num_history")
+            if value is not None:
+                return int(value)
+    except Exception:
+        pass
+    return 8
 
 
 def _load_streamvln_pretrained_model(
@@ -173,6 +212,10 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
         )
 
     if args.model_type in {"streamvln", "streamvln_actor"}:
+        resolved_num_history = _infer_streamvln_num_history(
+            model_path=args.model_path,
+            configured_num_history=getattr(args, "num_history", None),
+        )
         thinkvln_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
         possible_llava_paths = [
             os.path.join(thinkvln_root, "third_party", "LLaVA-NeXT"),
@@ -228,6 +271,11 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
         )
         config = transformers.AutoConfig.from_pretrained(config_source)
 
+        if is_lora:
+            _modules_to_save = adapter_config.get("modules_to_save") or []
+            if "gru_progress_head" in _modules_to_save and not getattr(config, "use_gru_progress", False):
+                config.use_gru_progress = True
+
         if not hasattr(config, "layer_types") or config.layer_types is None:
             num_layers = getattr(config, "num_hidden_layers", 32)
             sliding_window = getattr(config, "sliding_window", None)
@@ -258,7 +306,7 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
                 non_lora_state = torch.load(non_lora_path, map_location="cpu")
                 model.load_state_dict(non_lora_state, strict=False)
         core_model = model.get_base_model() if hasattr(model, "get_base_model") else model
-        core_model.model.num_history = args.num_history
+        core_model.model.num_history = resolved_num_history
         model.requires_grad_(False)
         model.to(device)
         model.eval()
@@ -270,7 +318,7 @@ def build_nav_model(args, device: str, rank: int, world_size: int) -> Navigation
             device=str(device),
             num_frames=args.num_frames,
             num_future_steps=args.num_future_steps,
-            num_history=args.num_history,
+            num_history=resolved_num_history,
             env_id=rank,
             done_threshold=getattr(args, "done_threshold", 0.85),
             include_previous_progress_in_prompt=False,

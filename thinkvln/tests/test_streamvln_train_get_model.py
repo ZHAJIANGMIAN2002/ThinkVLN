@@ -210,6 +210,104 @@ def test_smart_tokenizer_and_embedding_resize_does_not_shrink_padded_vocab(monke
     assert model.resize_calls == []
 
 
+def test_resize_model_embeddings_for_lora_adapter_matches_adapter_tokenizer(monkeypatch, tmp_path):
+    import sys
+    import torch
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["streamvln_train.py", "--model_name_or_path", str(tmp_path)],
+    )
+
+    import streamvln.streamvln_train as train_mod
+
+    class _DummyTokenizer:
+        def __len__(self):
+            return 151651
+
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.input_embeddings = torch.nn.Embedding(152064, 8)
+            self.resize_calls = []
+
+        def resize_token_embeddings(self, new_size):
+            self.resize_calls.append(int(new_size))
+            self.input_embeddings = torch.nn.Embedding(int(new_size), 8)
+
+        def get_input_embeddings(self):
+            return self.input_embeddings
+
+    seen = {}
+
+    def _fake_from_pretrained(path, **kwargs):
+        seen["path"] = path
+        seen["kwargs"] = dict(kwargs)
+        return _DummyTokenizer()
+
+    monkeypatch.setattr(
+        train_mod.transformers,
+        "AutoTokenizer",
+        SimpleNamespace(from_pretrained=_fake_from_pretrained),
+    )
+
+    model = _DummyModel()
+    train_mod.resize_model_embeddings_for_lora_adapter(
+        model,
+        adapter_path="/tmp/adapter-checkpoint",
+        local_pretrained_kwargs={"local_files_only": True},
+    )
+
+    assert seen["path"] == "/tmp/adapter-checkpoint"
+    assert seen["kwargs"]["local_files_only"] is True
+    assert model.resize_calls == [151651]
+
+
+def test_resize_model_embeddings_for_lora_adapter_skips_when_sizes_match(monkeypatch, tmp_path):
+    import sys
+    import torch
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["streamvln_train.py", "--model_name_or_path", str(tmp_path)],
+    )
+
+    import streamvln.streamvln_train as train_mod
+
+    class _DummyTokenizer:
+        def __len__(self):
+            return 152064
+
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.input_embeddings = torch.nn.Embedding(152064, 8)
+            self.resize_calls = []
+
+        def resize_token_embeddings(self, new_size):
+            self.resize_calls.append(int(new_size))
+
+        def get_input_embeddings(self):
+            return self.input_embeddings
+
+    monkeypatch.setattr(
+        train_mod.transformers,
+        "AutoTokenizer",
+        SimpleNamespace(from_pretrained=lambda *args, **kwargs: _DummyTokenizer()),
+    )
+
+    model = _DummyModel()
+    train_mod.resize_model_embeddings_for_lora_adapter(
+        model,
+        adapter_path="/tmp/adapter-checkpoint",
+        local_pretrained_kwargs={"local_files_only": True},
+    )
+
+    assert model.resize_calls == []
+
+
 def test_make_supervised_data_module_splits_streamvln_actor_dataset(monkeypatch, tmp_path):
     import sys
 
@@ -579,3 +677,51 @@ def test_streamvln_actor_trainer_resets_gru_hidden_when_sequence_key_changes():
     assert seen_hidden[0] is None
     assert seen_hidden[1] is None
     assert trainer._gru_recurrent_sequence_key == "ep1::2/2"
+
+
+def test_freeze_model_for_gru_only_leaves_only_gru_parameters_trainable(monkeypatch, tmp_path):
+    import sys
+    import torch
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["streamvln_train.py", "--model_name_or_path", str(tmp_path)],
+    )
+
+    import streamvln.streamvln_train as train_mod
+
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone = torch.nn.Linear(2, 2)
+            self.gru_progress_head = torch.nn.GRUCell(2, 2)
+            self.progress_head = torch.nn.Linear(2, 1)
+
+    model = _DummyModel()
+
+    kept = train_mod.freeze_model_for_gru_only(model)
+
+    assert kept
+    assert all("gru_progress_head" in name for name in kept)
+    trainable = [name for name, param in model.named_parameters() if param.requires_grad]
+    assert trainable == kept
+
+
+def test_freeze_model_for_gru_only_raises_without_gru_parameters(monkeypatch, tmp_path):
+    import sys
+    import torch
+    import pytest
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["streamvln_train.py", "--model_name_or_path", str(tmp_path)],
+    )
+
+    import streamvln.streamvln_train as train_mod
+
+    model = torch.nn.Linear(2, 2)
+
+    with pytest.raises(ValueError, match="gru_progress_head"):
+        train_mod.freeze_model_for_gru_only(model)

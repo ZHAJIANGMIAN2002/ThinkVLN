@@ -127,6 +127,8 @@ def build_streamvln_train_argv(config: dict, data_path_override: Optional[str] =
         "done_loss_weight": "done_loss_weight",
         "use_gru_progress": "use_gru_progress",
         "progress_num_bins": "progress_num_bins",
+        "progress_only_loss": "progress_only_loss",
+        "lora_adapter_path": "lora_adapter_path",
         "rope_scaling_factor": "rope_scaling_factor",
         "rope_scaling_type": "rope_scaling_type",
         "use_pos_skipping": "use_pos_skipping",
@@ -204,6 +206,7 @@ def build_streamvln_train_argv(config: dict, data_path_override: Optional[str] =
         "ddp_backend": "ddp_backend",
         "remove_unused_columns": "remove_unused_columns",
         "attn_implementation": "attn_implementation",
+        "train_gru_only": "train_gru_only",
     }
 
     for source_key, arg_key in model_key_map.items():

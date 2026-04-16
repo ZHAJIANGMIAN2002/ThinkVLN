@@ -1718,6 +1718,7 @@ def get_model(model_args, training_args, data_args, bnb_model_from_pretrained_ar
     overwrite_config["done_loss_weight"] = float(getattr(model_args, "done_loss_weight", 1.0))
     overwrite_config["use_gru_progress"] = bool(getattr(model_args, "use_gru_progress", False))
     overwrite_config["progress_num_bins"] = int(getattr(model_args, "progress_num_bins", 0))
+    overwrite_config["progress_only_loss"] = bool(getattr(model_args, "progress_only_loss", False))
         
     if model_args.mm_tunable_parts:
         overwrite_config["mm_tunable_parts"] = model_args.mm_tunable_parts
@@ -1764,6 +1765,34 @@ def normalize_resume_from_checkpoint_arg(resume_from_checkpoint):
     if resume_from_checkpoint is False:
         return None
     return resume_from_checkpoint
+
+
+def resize_model_embeddings_for_lora_adapter(model, adapter_path: str, local_pretrained_kwargs: Dict) -> None:
+    adapter_tokenizer = transformers.AutoTokenizer.from_pretrained(
+        adapter_path,
+        **local_pretrained_kwargs,
+    )
+    target_vocab_size = len(adapter_tokenizer)
+    current_vocab_size = model.get_input_embeddings().weight.shape[0]
+    if int(target_vocab_size) == int(current_vocab_size):
+        return
+    rank0_print(
+        f"Resizing token embeddings from {current_vocab_size} to {target_vocab_size} "
+        f"to match LoRA adapter tokenizer."
+    )
+    model.resize_token_embeddings(target_vocab_size)
+
+
+def freeze_model_for_gru_only(model) -> List[str]:
+    kept = []
+    for name, param in model.named_parameters():
+        keep_trainable = "gru_progress_head" in name
+        param.requires_grad_(keep_trainable)
+        if keep_trainable:
+            kept.append(name)
+    if not kept:
+        raise ValueError("train_gru_only requires trainable parameters under `gru_progress_head`.")
+    return kept
 
 
 def train(attn_implementation=None):
@@ -1832,8 +1861,11 @@ def train(attn_implementation=None):
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
     # import ipdb; ipdb.set_trace()
+    if model_args.lora_adapter_path and not training_args.lora_enable:
+        raise ValueError("lora_adapter_path requires lora_enable=True.")
+
     if training_args.lora_enable:
-        from peft import LoraConfig, get_peft_model
+        from peft import LoraConfig, PeftModel, get_peft_model
 
         target_modules = training_args.lora_target_modules
         if isinstance(target_modules, str):
@@ -1855,8 +1887,22 @@ def train(attn_implementation=None):
                 model.to(torch.bfloat16)
             if training_args.fp16:
                 model.to(torch.float16)
-        rank0_print("Adding LoRA adapters...")
-        model = get_peft_model(model, lora_config)
+        if model_args.lora_adapter_path:
+            rank0_print(f"Loading LoRA adapter from {model_args.lora_adapter_path}")
+            resize_model_embeddings_for_lora_adapter(
+                model,
+                adapter_path=model_args.lora_adapter_path,
+                local_pretrained_kwargs=local_pretrained_kwargs,
+            )
+            model = PeftModel.from_pretrained(
+                model,
+                model_args.lora_adapter_path,
+                is_trainable=True,
+                **local_pretrained_kwargs,
+            )
+        else:
+            rank0_print("Adding LoRA adapters...")
+            model = get_peft_model(model, lora_config)
         if hasattr(model, "print_trainable_parameters"):
             model.print_trainable_parameters()
         # import ipdb; ipdb.set_trace()
@@ -2012,6 +2058,14 @@ def train(attn_implementation=None):
                 if hasattr(module, "weight"):
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
+
+    if training_args.train_gru_only:
+        if not bool(getattr(model_args, "use_gru_progress", False)):
+            raise ValueError("train_gru_only requires use_gru_progress=True.")
+        kept = freeze_model_for_gru_only(model)
+        rank0_print(f"GRU-only fine-tuning enabled. Trainable tensors: {len(kept)}")
+        for name in kept:
+            rank0_print(name)
 
     if data_args.data_augmentation:
         data_args.transform_train = v2.Compose([

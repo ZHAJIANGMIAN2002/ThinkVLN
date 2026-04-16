@@ -15,6 +15,40 @@ def test_progress_loss_helper_uses_l1_on_sigmoid_predictions():
     assert torch.allclose(progress_loss, torch.tensor(0.45, dtype=torch.float32))
 
 
+def test_combine_aux_losses_uses_only_progress_when_requested():
+    import streamvln.model.stream_video_vln as model_mod
+
+    reference = torch.zeros((), dtype=torch.float32)
+    total = model_mod.combine_streamvln_aux_losses(
+        base_loss=torch.tensor(10.0, dtype=torch.float32),
+        progress_loss=torch.tensor(0.25, dtype=torch.float32),
+        done_loss=torch.tensor(0.75, dtype=torch.float32),
+        progress_loss_weight=4.0,
+        done_loss_weight=1.5,
+        progress_only_loss=True,
+        reference_tensor=reference,
+    )
+
+    assert torch.allclose(total, torch.tensor(1.0, dtype=torch.float32))
+
+
+def test_combine_aux_losses_keeps_base_and_done_when_progress_only_disabled():
+    import streamvln.model.stream_video_vln as model_mod
+
+    reference = torch.zeros((), dtype=torch.float32)
+    total = model_mod.combine_streamvln_aux_losses(
+        base_loss=torch.tensor(10.0, dtype=torch.float32),
+        progress_loss=torch.tensor(0.25, dtype=torch.float32),
+        done_loss=torch.tensor(0.75, dtype=torch.float32),
+        progress_loss_weight=4.0,
+        done_loss_weight=1.5,
+        progress_only_loss=False,
+        reference_tensor=reference,
+    )
+
+    assert torch.allclose(total, torch.tensor(12.125, dtype=torch.float32))
+
+
 def test_aux_position_resolver_uses_prompt_boundary_for_training_and_prompt_only_inference():
     import streamvln.model.stream_video_vln as model_mod
 
