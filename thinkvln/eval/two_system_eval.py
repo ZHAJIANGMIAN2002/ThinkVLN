@@ -1229,12 +1229,18 @@ class TwoSystemEpisodeRunner:
                 step_actor_done = bool(actor_done) if fresh_actor_metadata else False
 
                 if int(action) == 0:
+                    # Execute STOP in the environment so R2R success (agent must stop near goal)
+                    # can actually be evaluated. Without this, env.episode_over / nav_success
+                    # never observe the stop and SR stays 0 regardless of trajectory quality.
+                    current_observation = env.step(int(action))
+                    episode_over = bool(getattr(env, "episode_over", False))
+                    nav_success = self._current_nav_success(env)
                     step_record = self._step_record(
                         observation_image=observation_image,
                         instruction=instruction,
                         episode_key=episode_key,
                         step_index=decision_index,
-                        env_step_index=None,
+                        env_step_index=steps_total,
                         rollout_index=rollout_index,
                         step_in_rollout=len(rollout_slice),
                         action=int(action),
@@ -1250,6 +1256,9 @@ class TwoSystemEpisodeRunner:
                     trace["steps"].append(dict(step_record))
                     self._log_actor_decision(episode_key=episode_key, step_record=step_record)
                     decision_index += 1
+                    steps_total += 1
+                    if nav_success or episode_over:
+                        break
                     previous_memory = current_decision.memory
                     if self.max_watcher_wakeups is not None and watcher_wakeups >= self.max_watcher_wakeups:
                         return self._watcher_wakeup_cap_result(
