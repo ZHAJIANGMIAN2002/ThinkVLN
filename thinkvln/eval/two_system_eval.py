@@ -759,6 +759,7 @@ class TwoSystemEpisodeRunner:
         max_watcher_wakeups: Optional[int] = None,
         forbidden_actions: Optional[Sequence[int]] = None,
         max_actor_calls_per_episode: int = MAX_ACTOR_CALLS_PER_EPISODE,
+        use_raw_plan_step: bool = False,
     ):
         self.nav_model = nav_model
         self.watcher_backend = watcher_backend
@@ -769,6 +770,10 @@ class TwoSystemEpisodeRunner:
         self.forbidden_actions = [int(action) for action in (forbidden_actions or [])]
         self.max_actor_calls_per_episode = max(1, int(max_actor_calls_per_episode))
         self.stagnation_distance_threshold = DEFAULT_STAGNATION_DISTANCE
+        # Ablation toggle: when True, actor is fed the ground-truth plan step
+        # (todo_state.active_step) instead of watcher's rewritten subtask. Used
+        # to isolate whether watcher subtask rewriting degrades actor behavior.
+        self.use_raw_plan_step = bool(use_raw_plan_step)
 
     @staticmethod
     def _observation_to_image(observation: Any) -> Image.Image:
@@ -1207,7 +1212,10 @@ class TwoSystemEpisodeRunner:
                     )
                 observation_image = self._observation_to_image(current_observation)
                 watcher_hint = current_decision.memory
-                watcher_subtask = current_decision.subtask or todo_state.active_step
+                if self.use_raw_plan_step:
+                    watcher_subtask = todo_state.active_step
+                else:
+                    watcher_subtask = current_decision.subtask or todo_state.active_step
                 action, progress, actor_done = self.nav_model.predict_action_with_progress_and_done(
                     observation=observation_image,
                     instruction=instruction,
@@ -1911,6 +1919,7 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
         episode_step_cap=config["rollout"]["episode_step_cap"],
         max_watcher_wakeups=config["rollout"]["max_watcher_wakeups"],
         forbidden_actions=config["rollout"]["forbidden_actions"],
+        use_raw_plan_step=bool(config["rollout"].get("use_raw_plan_step", False)),
     )
 
     local_stats = {
@@ -2050,6 +2059,7 @@ def evaluate_debug(config: Dict[str, Any]) -> Dict[str, Any]:
         episode_step_cap=config["rollout"]["episode_step_cap"],
         max_watcher_wakeups=config["rollout"]["max_watcher_wakeups"],
         forbidden_actions=config["rollout"]["forbidden_actions"],
+        use_raw_plan_step=bool(config["rollout"].get("use_raw_plan_step", False)),
     )
 
     if single_episode:
